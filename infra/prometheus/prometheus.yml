@@ -1,0 +1,10 @@
+global:
+  scrape_interval: 5s
+
+# No app services expose /metrics yet (that's phase 3 — observability).
+# Self-scrape for now so Prometheus has something to show; add each
+# service's target here as it gets instrumented.
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]

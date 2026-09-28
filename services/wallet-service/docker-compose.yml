@@ -1,0 +1,18 @@
+include:
+  - path: ../../infra/docker-compose.yml
+
+services:
+  wallet-service:
+    build: .
+    environment:
+      PORT: "8080"
+      POSTGRES_DSN: postgres://custody:custody@postgres:5432/custody?sslmode=disable
+      REDIS_ADDR: redis:6379
+      # Set in .env (gitignored) — `make gen-key` creates one.
+      MASTER_KEY_HEX: ${MASTER_KEY_HEX:?run 'make gen-key' first, see README}
+    ports: ["8080:8080"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy

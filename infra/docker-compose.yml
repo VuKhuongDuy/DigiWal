@@ -1,0 +1,76 @@
+# Shared infra for the DigiWal system. All four data stores are
+# brought up together (matching the point of the exercise), but each
+# phase's services only get wired to the ones they actually need —
+# wallet-service (phase 1) only touches postgres + redis.
+name: digiwal-infra
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: custody
+      POSTGRES_PASSWORD: custody
+      POSTGRES_DB: custody
+    ports: ["5432:5432"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U custody"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+    ports: ["6379:6379"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # KRaft mode: no Zookeeper needed. Single broker for local dev; the
+  # real multi-VM deployment (phase 4) runs a 3-broker cluster instead.
+  kafka:
+    image: bitnami/kafka:3.7
+    environment:
+      KAFKA_CFG_NODE_ID: "1"
+      KAFKA_CFG_PROCESS_ROLES: broker,controller
+      KAFKA_CFG_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_CFG_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_CFG_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_CFG_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      ALLOW_PLAINTEXT_LISTENER: "yes"
+    ports: ["9092:9092"]
+    volumes:
+      - kafka_data:/bitnami/kafka
+
+  mongo:
+    image: mongo:7
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: custody
+      MONGO_INITDB_ROOT_PASSWORD: custody
+    ports: ["27017:27017"]
+    volumes:
+      - mongo_data:/data/db
+
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports: ["9090:9090"]
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_SECURITY_ADMIN_PASSWORD: custody
+    ports: ["3000:3000"]
+    depends_on: [prometheus]
+
+volumes:
+  pg_data:
+  kafka_data:
+  mongo_data:
