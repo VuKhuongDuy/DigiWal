@@ -30,8 +30,9 @@ you instead of letting you fake them:
 
 | Service | Responsibility | Talks to |
 |---|---|---|
-| `wallet-service` | Owns the one HD seed for the whole system (encrypted at rest). Derives one EVM address per user (BIP44 `m/44'/60'/0'/0/{index}`), signs outgoing transactions. Never exposes private keys. | Postgres (wallets, addresses), Redis (address-set cache) |
-| `chain-watcher` | Polls/subscribes to the EVM testnet RPC, checks incoming transfers against the known-address set, waits for confirmations, emits deposit events. | Redis (address lookup), Kafka (producer) |
+| `wallet-service` | Holds ≥2 sealed HD seeds (encrypted at rest): one derives every user's deposit address (BIP44 `m/44'/60'/0'/0/{index}`), a separate one is the Hot Wallet's signing key — kept apart so a compromised `wallet-service` process can never expose both at once. Signs outgoing transactions (withdrawals, Sweep, Gas Top-Up) on request; never exposes private keys. Warm/Cold tier keys live outside this service entirely (see `docs/design/wallet-tiering.md`). | Postgres (wallets, addresses, sealed seeds), Redis (address-set cache) |
+| `chain-watcher` | Polls/subscribes to the EVM testnet RPC, checks incoming transfers against the known-address set, waits for confirmations, emits deposit events. Purely an observer — never signs or broadcasts. | Redis (address lookup), Postgres (watermark, observed transfers), Kafka (producer) |
+| `sweeper` | Consumes confirmed deposits, tops up a user's deposit address with gas when its native balance can't cover it, then sweeps the deposit to the Hot Wallet. Signs via `wallet-service`; holds no key material of its own. See `docs/design/deposit-flow.md`. | `wallet-service` (sign, mTLS), EVM testnet RPC (broadcast), Kafka (consumer) |
 | `ledger-service` | Source of truth for balances. Double-entry bookkeeping in Postgres. Consumes deposit/withdrawal/transfer events idempotently (dedupe by tx hash + log index, or a client-supplied idempotency key for internal transfers). | Postgres (ledger), Kafka (consumer + producer) |
 | `withdrawal-service` | Validates a withdrawal request against the ledger, takes a Redis lock on the user, asks `wallet-service` to sign, broadcasts, tracks confirmation. | Postgres (read), Redis (lock), Kafka, `wallet-service` |
 | `history-service` | Denormalized, query-optimized transaction history / audit log — the "read model" — fed by Kafka events, stored in MongoDB. | MongoDB, Kafka (consumer) |
@@ -61,15 +62,21 @@ Event bus (Kafka topics): `deposits.detected`, `deposits.confirmed`,
 This is a learning project, but "custody wallet" is exactly the kind of
 system where sloppy key handling is the whole point of the lesson:
 
-- One master BIP39 mnemonic for the entire system, generated once,
-  encrypted with AES-256-GCM under a "master key" env var
-  (`MASTER_KEY_HEX`) that stands in for a real KMS/HSM — in a real
-  system that key never lives in an env var, it lives in a KMS/HSM and
+- **Tiered key custody, not one seed for everything.** `wallet-service`
+  holds ≥2 sealed BIP39 seeds, each independently encrypted with
+  AES-256-GCM under a "master key" env var (`MASTER_KEY_HEX`) that
+  stands in for a real KMS/HSM: one derives every user's deposit
+  address, a separate one is the Hot Wallet's signing key. Warm and Cold
+  tier seeds are never held by `wallet-service`, or any other always-on
+  service, at all — sealed, operator-held, decrypted only inside a
+  local one-off signing tool when funds move between tiers. Full design
+  and rationale: `docs/design/wallet-tiering.md`. In a real system none
+  of this key material lives in an env var — it lives in a KMS/HSM and
   `wallet-service` calls out to it instead of holding it in memory.
   Never roll your own derivation/signing crypto — this project uses
   `go-ethereum` + a standard BIP32/39/44 library, not hand-written
   elliptic curve code.
-- The mnemonic is shown exactly once, at generation time, to stdout —
+- Each mnemonic is shown exactly once, at generation time, to stdout —
   simulating "write this down and put it in a safe" — and is never
   returned by any API afterward.
 - Testnet only. No real funds, ever. If you later want to point this at
@@ -83,8 +90,9 @@ system where sloppy key handling is the whole point of the lesson:
    connection yet. Testable without any blockchain node.
 2. **Feature-complete locally**, all on Docker Compose on one machine
    (same pattern as `playground/`): `chain-watcher` against a local
-   Anvil/Hardhat EVM testnet, `ledger-service`, `withdrawal-service`
-   (sign + broadcast + confirm), `history-service`, `api-gateway`.
+   Anvil/Hardhat EVM testnet, `sweeper` (moves confirmed deposits to the
+   Hot Wallet), `ledger-service`, `withdrawal-service` (sign + broadcast
+   + confirm), `history-service`, `api-gateway`.
 3. **Observability**: Prometheus metrics per service, Grafana
    dashboards, structured logs, a couple of real alerting rules (stuck
    withdrawal, Kafka consumer lag).
