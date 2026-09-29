@@ -46,16 +46,39 @@ existing key-custody design does.
   same class of bug (two concurrent signs claiming the same value)
   applies here too.
 - **Compensating Entry** — a new Ledger Transaction that credits the
-  user back after a Withdrawal Request fails before it reached the
-  chain. Never a mutation of the original debit (`ledger.md`'s
-  immutability invariant).
+  user back after a Withdrawal Request ends up never having landed on
+  the canonical chain — either because it never broadcast successfully,
+  or because it was abandoned after a Nonce Gap (below). Never a
+  mutation of the original debit (`ledger.md`'s immutability
+  invariant).
+- **Nonce Gap** — the situation where a Hot Wallet transaction at nonce
+  N is no longer present in the canonical chain (a reorg deeper than
+  Withdrawal Confirmation Depth). By EVM's strict per-account nonce
+  ordering, this invalidates every Hot Wallet transaction at nonce ≥ N
+  on the new canonical chain too — not just the one at N. Both
+  `withdrawal-service` and `sweeper` draw nonces from the same Hot
+  Wallet sequence, so a Nonce Gap can freeze both withdrawals and
+  Sweeps/Gas Top-Ups (`deposit-flow.md`) at once.
+- **Withdrawal Confirmation Depth** — a deeper confirmation threshold
+  than deposits use (`deposit-flow.md`'s Confirmation Depth) before
+  marking a Withdrawal Request `confirmed`, since funds leaving custody
+  are more sensitive than funds arriving. Reduces how often a Nonce Gap
+  happens; can't eliminate it.
+- **Disputed** — the state a `confirmed` Withdrawal Request moves to
+  when a Nonce Gap is detected at or above its nonce. Resolved only by
+  explicit operator action — back to `confirmed` (original tx safely
+  rebroadcast at the same nonce) or to `failed` with a Compensating
+  Entry (abandoned, after a nonce-filler tx clears the gap).
 
 Withdrawal Request states: `requested → validated → reserved → signed →
 broadcast → confirmed`, with `rejected` (failed validation or
 insufficient funds, terminal, no reservation made) and `failed`
-(reserved but never broadcast, terminal, triggers a Compensating Entry)
-as the off-ramps. See Open Questions #3–4 for the two failure modes I'm
-not resolving unilaterally.
+(terminal, triggers a Compensating Entry — reached either from
+`reserved` if it never broadcast, or from `disputed` if abandoned) as
+off-ramps, plus `disputed` (a `confirmed` request whose tx was reorged
+out — see invariants #7–9) which resolves back to `confirmed` or
+forward to `failed`, always by explicit operator action. See Open
+Questions #3 for the one remaining unresolved failure mode.
 
 ## Aggregates & invariants
 
@@ -88,6 +111,23 @@ not resolving unilaterally.
    `UPDATE ... RETURNING` pattern `wallet-service` already uses for
    derivation-index allocation (`internal/storage/postgres.go`'s
    `allocateIndex`). No two signing calls can be issued the same nonce.
+7. **`wallet-service` refuses to allocate a new Hot Wallet nonce while a
+   Nonce Gap is open, regardless of who's asking.** `withdrawal-service`
+   and `sweeper` both draw from the same Hot Wallet nonce sequence, so
+   this has to be enforced centrally, in the one place that actually
+   allocates nonces — not duplicated (and possibly missed) in every
+   caller.
+8. **A detected Nonce Gap at N freezes every Withdrawal Request at
+   nonce ≥ N, not just the one that triggered detection.** Reflects the
+   EVM invariant that nonce N+1 can never be canonically confirmed while
+   nonce N isn't — treating them independently would be wrong, not just
+   incomplete.
+9. **Resolving a `disputed` Withdrawal Request is always an explicit
+   operator action, never automatic.** Either rebroadcast the original
+   signed raw tx (safe — identical nonce and payload, no new signature,
+   no double-spend risk), or submit a nonce-filler transaction to
+   abandon it and trigger a Compensating Entry. This is the one case
+   kept out of "fully automatic" — see Open Questions #4's resolution.
 
 ## Diagram
 
@@ -127,6 +167,31 @@ sequenceDiagram
     end
 ```
 
+Nonce Gap detection and recovery (invariants #7–9):
+
+```mermaid
+sequenceDiagram
+    participant WD as withdrawal-service / sweeper
+    participant RPC as EVM testnet RPC
+    participant Wallet as wallet-service
+    participant Op as Operator
+
+    loop periodic re-check of confirmed Hot Wallet txs
+        WD->>RPC: is the tx at nonce N still in the canonical chain?
+        alt still included
+            Note over WD: no action
+        else missing — Nonce Gap at N
+            WD->>WD: mark every Withdrawal Request at nonce >= N as disputed
+            WD->>Wallet: report Nonce Gap at N
+            Wallet->>Wallet: refuse new Hot Wallet nonce allocations
+            WD->>Op: alert
+            Op->>RPC: rebroadcast original raw tx at nonce N<br/>OR submit a nonce-filler tx + trigger Compensating Entry
+            Op->>Wallet: confirm gap cleared
+            Wallet->>Wallet: resume nonce allocation
+        end
+    end
+```
+
 ## Alternatives considered
 
 - **Pay out from each user's own derived deposit address (no Hot
@@ -150,6 +215,20 @@ sequenceDiagram
   testnet confirmation takes real wall-clock time. The request returns
   quickly with a request ID; confirmation is tracked asynchronously,
   consistent with how the rest of this system is event-driven.
+- **Auto-rebroadcast on Nonce Gap detection, no operator involved.**
+  Rebroadcasting the *same* signed tx is provably safe, so this was
+  tempting — but a Nonce Gap can also mean the operator (or a future
+  policy) wants to change what happens at that nonce (different gas
+  price, abandon it entirely), and auto-resolving removes that choice
+  right when something already went wrong in an unusual way. Rejected —
+  matches your standing decision to keep this one case out of full
+  automation.
+- **Treat each disputed Withdrawal Request independently instead of
+  freezing the whole nonce ≥ N range.** Rejected — it's not just simpler,
+  it's wrong: EVM won't canonically confirm nonce N+1 while nonce N
+  isn't confirmed, so treating them independently would let
+  `withdrawal-service`/`sweeper` keep issuing transactions that can
+  never actually land.
 
 ## Open questions
 
@@ -175,12 +254,25 @@ sequenceDiagram
    certainty it's truly dead, not just slow. I don't have a concrete
    timeout/replacement policy yet and would rather work it out with you
    than guess a number that's wrong in a way that loses money.
-4. **Confirmed-then-reorged withdrawal.** I'd recommend this one case
-   is *not* automated — freeze it and require manual review rather than
-   auto-retry, since blind re-signing risks a double-payment if the
-   original transaction actually did land. This is the one place I'd
-   push back on "fully automatic" as stated; want your explicit call on
-   it.
+4. ~~Confirmed-then-reorged withdrawal.~~ **Decided (recommendation
+   accepted):** not automated. Full design: a **Nonce Gap** (a Hot
+   Wallet tx at nonce N reorged out) invalidates every Hot Wallet tx at
+   nonce ≥ N too, by EVM's own nonce-ordering rule — so this isn't just
+   about one withdrawal, it can stall `withdrawal-service` and `sweeper`
+   both, since they share one Hot Wallet nonce sequence. On detection:
+   `wallet-service` stops allocating new nonces (invariant #7), every
+   affected Withdrawal Request moves to `disputed` (invariant #8), and
+   an operator resolves it explicitly (invariant #9) — either
+   rebroadcasting the original signed tx (safe: identical nonce and
+   payload, no double-spend risk) or abandoning it with a nonce-filler
+   tx plus a Compensating Entry. See the new invariants #7–9, the
+   Nonce Gap / Disputed terms above, and the recovery diagram. Also
+   recommending **Withdrawal Confirmation Depth be deeper than
+   deposit-flow.md's Confirmation Depth**, since funds leaving custody
+   are more sensitive than funds arriving — reduces how often this
+   triggers, doesn't eliminate it. Confirm you're good with this shape;
+   the actual depth values still wait on chain choice (#3 above and
+   deposit-flow.md #3/#6).
 5. **Dust/minimum withdrawal amount**, and whether the Hot Wallet's own
    gas balance needs low-balance alerting — not designing now, flagging
    for the observability phase (roadmap step 3).

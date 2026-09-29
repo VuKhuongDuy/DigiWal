@@ -26,11 +26,21 @@ an external EVM testnet RPC node. Producer to Kafka; consumed by
 
 **Decided (PR #1): sweep model approved** (per `withdrawal-flow.md` and
 `wallet-tiering.md`) — confirmed deposits sweep from the user's
-attribution address to the Hot Wallet. This doc now also owns the
-**Sweep** step (see below), which means chain-watcher's role widens
-from pure observation (read chain, emit events) to also triggering a
-custody movement — flagged explicitly in Open Questions #5, since it's
-a real boundary change, not something to fold in silently.
+attribution address to the Hot Wallet.
+
+**Decided: a new bounded context, Sweep, owned by a new `sweeper`
+service** performs the actual movement — not `chain-watcher`. This
+resolves what was Open Question #5. `sweeper` consumes `deposits.confirmed`
+from Kafka, calls `wallet-service`'s signing endpoint (mTLS, same as
+`withdrawal-service` ↔ `wallet-service`) for both the Gas Top-Up and the
+Sweep itself, and broadcasts to the EVM testnet RPC. It holds no key
+material of its own — every signature comes from `wallet-service`, same
+pattern as `withdrawal-service`. This keeps `chain-watcher` a pure
+observer (reads the chain, emits events, never signs or broadcasts) and
+gives Sweep its own clean boundary instead of quietly expanding
+Deposit Detection's scope. `sweeper` is a new addition to
+`docs/ARCHITECTURE.md`'s service table — tracked as a follow-up
+alongside the other two (chain-watcher's Postgres, the seed split).
 
 ## Ubiquitous language
 
@@ -103,12 +113,13 @@ a real boundary change, not something to fold in silently.
    address — unchanged by `wallet-tiering.md`'s seed split, which only
    separates the *Hot Wallet's* key from that seed. So signing a Sweep
    needs no new key material; custody of "who can move a user's swept
-   funds" stays exactly where it already was.
+   funds" stays exactly where it already was. `sweeper` asks for the
+   signature, it never holds or derives the key itself.
 7. **Gas Top-Up happens only when needed, and is idempotent per
-   deposit.** Before topping up, chain-watcher checks the address's
-   current native balance — a retried Sweep attempt must never blindly
-   re-fund an address that's already funded, or the Hot Wallet bleeds
-   gas on every retry.
+   deposit.** Before topping up, `sweeper` checks the address's current
+   native balance — a retried Sweep attempt must never blindly re-fund
+   an address that's already funded, or the Hot Wallet bleeds gas on
+   every retry.
 8. **A failed or stuck Sweep never touches the Ledger.** The user's
    credited balance (`ledger.md`) is set the moment `deposits.confirmed`
    is applied and is unaffected by whether the Sweep itself succeeds,
@@ -147,27 +158,27 @@ sequenceDiagram
     Note over Ledger: applied as a Ledger Transaction<br/>{credit user account, debit chain account}<br/>— see ledger.md's apply() sequence
 ```
 
-Sweep, triggered right after a deposit confirms (see Open Questions #5
-for which service owns this loop):
+Sweep, owned by `sweeper`, triggered by consuming `deposits.confirmed`:
 
 ```mermaid
 sequenceDiagram
-    participant CW as chain-watcher
+    participant Kafka
+    participant Sweeper as sweeper
     participant Wallet as wallet-service
     participant RPC as EVM testnet RPC
 
-    Note over CW: deposits.confirmed just emitted for this transfer
-    CW->>RPC: get user address's native balance
+    Kafka->>Sweeper: deliver deposits.confirmed
+    Sweeper->>RPC: get user address's native balance
     alt native balance insufficient for Sweep gas
-        CW->>Wallet: sign(from=Hot Wallet, to=user address, amount=gas top-up)
-        Wallet-->>CW: signed raw tx
-        CW->>RPC: broadcast (Gas Top-Up)
-        CW->>RPC: wait for inclusion
+        Sweeper->>Wallet: sign(from=Hot Wallet, to=user address, amount=gas top-up)
+        Wallet-->>Sweeper: signed raw tx
+        Sweeper->>RPC: broadcast (Gas Top-Up)
+        Sweeper->>RPC: wait for inclusion
     end
-    CW->>Wallet: sign(from=user address, to=Hot Wallet, asset, amount=full balance)
-    Wallet-->>CW: signed raw tx
-    CW->>RPC: broadcast (Sweep)
-    Note over CW: retried on failure with a fresh balance check;<br/>never touches the Ledger Transaction already applied
+    Sweeper->>Wallet: sign(from=user address, to=Hot Wallet, asset, amount=full balance)
+    Wallet-->>Sweeper: signed raw tx
+    Sweeper->>RPC: broadcast (Sweep)
+    Note over Sweeper: retried on failure with a fresh balance check;<br/>never touches the Ledger Transaction already applied
 ```
 
 ## Alternatives considered
@@ -191,6 +202,11 @@ sequenceDiagram
   Rejected — credits users for dust/scam/airdropped tokens nobody asked
   for and bloats the ledger with worthless assets. An explicit allow-
   list is cheap and standard for custody systems.
+- **Fold Sweep into chain-watcher instead of a new `sweeper` service.**
+  Would avoid one more service to deploy/monitor, but conflates pure
+  observation (chain-watcher's job) with signing and broadcasting (a
+  much higher-trust operation) inside one process. Rejected per your
+  decision — Sweep gets its own service and its own trust boundary.
 
 ## Open questions
 
@@ -216,16 +232,11 @@ sequenceDiagram
    block gets reorged out anyway) is out of scope here — flagging
    rather than silently assuming it can't happen. Worth its own note
    later if it matters for the HA/chaos-testing story in roadmap step 5.
-5. **Which service owns the Sweep loop?** I'm proposing chain-watcher —
-   it already knows the exact moment a transfer becomes confirmed, so
-   triggering Sweep right there avoids adding a new Kafka consumer
-   elsewhere. But this does widen chain-watcher from "observes the chain
-   and emits events" to "also signs and broadcasts custody movements" —
-   a real bounded-context change, not a detail. Alternative: a small
-   separate consumer of `deposits.confirmed` (symmetric with how
-   `wallet-tiering.md` put its Hot→Warm sweep-monitor loop inside
-   `withdrawal-service` rather than chain-watcher). Your call — didn't
-   want to expand chain-watcher's scope silently.
+5. ~~Which service owns the Sweep loop?~~ **Decided: a new `sweeper`
+   service**, not chain-watcher — see Bounded context(s) above. Keeps
+   chain-watcher a pure observer and gives Sweep (a distinct trust
+   boundary — it signs and broadcasts) its own home instead of quietly
+   widening an existing service's scope.
 6. **Gas Top-Up amount** — needs a concrete number (enough for one
    ERC-20 `transfer()` call at the chosen testnet's typical gas price,
    plus margin) once the testnet is chosen alongside Confirmation Depth
