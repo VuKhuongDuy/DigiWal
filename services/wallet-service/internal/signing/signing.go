@@ -101,40 +101,15 @@ func (s *Signer) Sign(ctx context.Context, req Request) (Response, error) {
 	}
 
 	// Everything that needs the network happens before we touch the nonce.
-	toAddr, value, data := to, amount, []byte(nil)
-	if asset.Type == AssetERC20 {
-		toAddr, value, data = asset.Contract, new(big.Int), erc20TransferData(to, amount)
-	}
-	tip, baseFee, err := s.chain.FeeQuote(ctx)
+	body, err := buildBody(ctx, s.chain, s.from, to, amount, asset, maxGas)
 	if err != nil {
-		return Response{}, fmt.Errorf("fetching fees: %w", err)
-	}
-	feeCap := new(big.Int).Add(new(big.Int).Mul(baseFee, big.NewInt(2)), tip) // headroom for 6 full blocks of base-fee growth
-	if maxGas != nil && feeCap.Cmp(maxGas) > 0 {
-		// Signing under the ceiling would produce a tx likely to stick, and a stuck
-		// tx blocks every later nonce — so refuse before allocating anything.
-		return Response{}, ErrGasCeilingExceeded
-	}
-	gas, err := s.chain.EstimateGas(ctx, s.from, toAddr, value, data)
-	if err != nil {
-		return Response{}, fmt.Errorf("estimating gas: %w", err)
-	}
-	if asset.Type == AssetERC20 {
-		gas = gas * 12 / 10
+		return Response{}, err
 	}
 
 	sig, err := s.store.SignHotWallet(ctx, s.chainID, req.IdempotencyKey, hash,
 		func(ctx context.Context) (uint64, error) { return s.chain.PendingNonceAt(ctx, s.from) },
 		func(nonce uint64) ([]byte, error) {
-			unsigned := types.NewTx(&types.DynamicFeeTx{
-				ChainID: big.NewInt(s.chainID), Nonce: nonce, GasTipCap: tip, GasFeeCap: feeCap,
-				Gas: gas, To: &toAddr, Value: value, Data: data,
-			})
-			signed, err := s.wallet.SignTxAt(hdwallet.HotWalletIndex, unsigned, big.NewInt(s.chainID))
-			if err != nil {
-				return nil, fmt.Errorf("signing: %w", err)
-			}
-			return signed.MarshalBinary()
+			return signTx(s.wallet, hdwallet.HotWalletIndex, s.chainID, nonce, body)
 		})
 	if err != nil {
 		return Response{}, err
@@ -195,4 +170,52 @@ func erc20TransferData(to common.Address, amount *big.Int) []byte {
 	data := []byte{0xa9, 0x05, 0x9c, 0xbb}
 	data = append(data, common.LeftPadBytes(to.Bytes(), 32)...)
 	return append(data, common.LeftPadBytes(amount.Bytes(), 32)...)
+}
+
+// txBody is everything about a transaction except its nonce.
+type txBody struct {
+	to        common.Address
+	value     *big.Int
+	data      []byte
+	gas       uint64
+	tip, cap_ *big.Int
+}
+
+// buildBody turns business intent (send amount of asset to `to`) into a fully
+// priced transaction body using the chain's live fees. maxGas, if set, is a
+// ceiling: current fees above it refuse the request rather than sign an
+// underpriced tx (a stuck tx would block every later nonce).
+func buildBody(ctx context.Context, chain Chain, from, to common.Address, amount *big.Int, asset Asset, maxGas *big.Int) (txBody, error) {
+	b := txBody{to: to, value: amount}
+	if asset.Type == AssetERC20 {
+		b.to, b.value, b.data = asset.Contract, new(big.Int), erc20TransferData(to, amount)
+	}
+	tip, baseFee, err := chain.FeeQuote(ctx)
+	if err != nil {
+		return b, fmt.Errorf("fetching fees: %w", err)
+	}
+	b.tip = tip
+	b.cap_ = new(big.Int).Add(new(big.Int).Mul(baseFee, big.NewInt(2)), tip) // headroom for 6 full blocks of base-fee growth
+	if maxGas != nil && b.cap_.Cmp(maxGas) > 0 {
+		return b, ErrGasCeilingExceeded
+	}
+	if b.gas, err = chain.EstimateGas(ctx, from, b.to, b.value, b.data); err != nil {
+		return b, fmt.Errorf("estimating gas: %w", err)
+	}
+	if asset.Type == AssetERC20 {
+		b.gas = b.gas * 12 / 10
+	}
+	return b, nil
+}
+
+func signTx(w *hdwallet.Wallet, index uint32, chainID int64, nonce uint64, b txBody) ([]byte, error) {
+	unsigned := types.NewTx(&types.DynamicFeeTx{
+		ChainID: big.NewInt(chainID), Nonce: nonce, GasTipCap: b.tip, GasFeeCap: b.cap_,
+		Gas: b.gas, To: &b.to, Value: b.value, Data: b.data,
+	})
+	signed, err := w.SignTxAt(index, unsigned, big.NewInt(chainID))
+	if err != nil {
+		return nil, fmt.Errorf("signing: %w", err)
+	}
+	return signed.MarshalBinary()
 }

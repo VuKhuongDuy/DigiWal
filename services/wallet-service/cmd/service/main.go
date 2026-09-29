@@ -104,17 +104,18 @@ func runServer(ctx context.Context, store *storage.Store, sealer *crypto.Sealer)
 	// builds the tx itself) and the asset list; without all three the endpoint
 	// answers 503 instead of guessing.
 	var hotSigner api.HotSigner
+	var userSign api.UserSigner
 	hotWallet, err := loadWallet(ctx, store, sealer, storage.RoleHotWallet)
 	switch {
 	case err == nil:
-		hotSigner = buildHotSigner(ctx, store, hotWallet)
+		hotSigner, userSign = buildSigners(ctx, store, hotWallet, userWallet)
 	case errors.Is(err, storage.ErrNotFound):
 		log.Println("WARNING: no hot_wallet seed found — run with -init-seed hot_wallet before Hot Wallet signing is used")
 	default:
 		log.Fatalf("loading hot_wallet wallet: %v", err)
 	}
 
-	server := api.NewServer(store, cache, signer, hotSigner)
+	server := api.NewServer(store, cache, signer, hotSigner, userSign)
 
 	// mTLS listener for /v1/sign/* (service-auth-mtls.md). Fail closed: without
 	// certs it simply isn't started, so nothing can be signed.
@@ -138,13 +139,14 @@ func runServer(ctx context.Context, store *storage.Store, sealer *crypto.Sealer)
 	log.Fatal(http.ListenAndServe(":"+port, server.Routes()))
 }
 
-// buildHotSigner wires the Hot Wallet signer, or returns nil (endpoint answers
+// buildSigners wires the Hot Wallet signer and, if the user_derivation seed is
+// loaded too, the Sweep (user-address) signer. Returns nils (endpoints answer
 // 503) when RPC_URL / ASSETS_FILE aren't configured.
-func buildHotSigner(ctx context.Context, store *storage.Store, hot *hdwallet.Wallet) api.HotSigner {
+func buildSigners(ctx context.Context, store *storage.Store, hot, users *hdwallet.Wallet) (api.HotSigner, api.UserSigner) {
 	rpcURL, assetsFile := os.Getenv("RPC_URL"), os.Getenv("ASSETS_FILE")
 	if rpcURL == "" || assetsFile == "" {
-		log.Println("WARNING: RPC_URL / ASSETS_FILE not set — Hot Wallet signing disabled")
-		return nil
+		log.Println("WARNING: RPC_URL / ASSETS_FILE not set — signing endpoints disabled")
+		return nil, nil
 	}
 	assets, err := signing.LoadAssets(assetsFile)
 	if err != nil {
@@ -154,12 +156,20 @@ func buildHotSigner(ctx context.Context, store *storage.Store, hot *hdwallet.Wal
 	if err != nil {
 		log.Fatal(err)
 	}
-	signer, err := signing.New(ctx, store, hot, chain, assets)
+	hotSigner, err := signing.New(ctx, store, hot, chain, assets)
 	if err != nil {
 		log.Fatalf("hot wallet signer: %v", err)
 	}
-	log.Printf("hot_wallet signing enabled, address %s", signer.HotWalletAddress())
-	return signer
+	log.Printf("hot_wallet signing enabled, address %s", hotSigner.HotWalletAddress())
+	if users == nil {
+		return hotSigner, nil
+	}
+	userSigner, err := signing.NewUserSigner(ctx, store, users, chain, assets, hotSigner.HotWalletAddress())
+	if err != nil {
+		log.Fatalf("user-address signer: %v", err)
+	}
+	log.Println("user-address (sweep) signing enabled")
+	return hotSigner, userSigner
 }
 
 // loadWallet decrypts the sealed seed for a role and builds an in-memory

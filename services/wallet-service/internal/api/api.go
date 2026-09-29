@@ -28,15 +28,21 @@ type HotSigner interface {
 	Sign(ctx context.Context, req signing.Request) (signing.Response, error)
 }
 
+// UserSigner signs Sweeps (POST /v1/sign/user-address).
+type UserSigner interface {
+	Sign(ctx context.Context, req signing.UserRequest) (signing.UserResponse, error)
+}
+
 type Server struct {
 	store     *storage.Store
 	cache     *storage.Cache
-	signer    Signer    // nil until the user_derivation seed is initialized and loaded
-	hotSigner HotSigner // nil until the hot_wallet seed, RPC and assets are configured
+	signer    Signer     // nil until the user_derivation seed is initialized and loaded
+	hotSigner HotSigner  // nil until the hot_wallet seed, RPC and assets are configured
+	userSign  UserSigner // nil until both seeds, RPC and assets are configured
 }
 
-func NewServer(store *storage.Store, cache *storage.Cache, signer Signer, hotSigner HotSigner) *Server {
-	return &Server{store: store, cache: cache, signer: signer, hotSigner: hotSigner}
+func NewServer(store *storage.Store, cache *storage.Cache, signer Signer, hotSigner HotSigner, userSign UserSigner) *Server {
+	return &Server{store: store, cache: cache, signer: signer, hotSigner: hotSigner, userSign: userSign}
 }
 
 // Routes is the plain-HTTP listener: /healthz (exempt from client certs,
@@ -58,7 +64,38 @@ func (s *Server) Routes() http.Handler {
 func (s *Server) MTLSRoutes() http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("POST /v1/sign/hot-wallet", authz.Require(authz.HotWalletSigners, http.HandlerFunc(s.handleSignHotWallet)))
+	mux.Handle("POST /v1/sign/user-address", authz.Require(authz.UserAddressSigners, http.HandlerFunc(s.handleSignUserAddress)))
 	return mux
+}
+
+// handleSignUserAddress signs a Sweep: the caller picks whose key signs, but the
+// destination is enforced to be the Hot Wallet by the signer, not trusted here.
+func (s *Server) handleSignUserAddress(w http.ResponseWriter, r *http.Request) {
+	if s.userSign == nil {
+		writeErr(w, http.StatusServiceUnavailable, "user-address signing not configured")
+		return
+	}
+	var req signing.UserRequest
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, "malformed JSON body")
+		return
+	}
+	resp, err := s.userSign.Sign(r.Context(), req)
+	switch {
+	case err == nil:
+		writeJSON(w, http.StatusOK, resp)
+	case errors.Is(err, signing.ErrDestinationNotHotWallet):
+		writeErr(w, http.StatusForbidden, err.Error())
+	case errors.Is(err, signing.ErrUnknownUser):
+		writeErr(w, http.StatusNotFound, err.Error())
+	case errors.Is(err, signing.ErrInvalidRequest), errors.Is(err, signing.ErrUnknownAsset), errors.Is(err, signing.ErrUnsupportedChain):
+		writeErr(w, http.StatusBadRequest, err.Error())
+	default:
+		log.Printf("signing user-address tx: %v", err)
+		writeErr(w, http.StatusInternalServerError, "internal error")
+	}
 }
 
 // handleSignHotWallet: the request has no field that could select a key —

@@ -96,3 +96,52 @@ func TestSignHotWallet_ResponseAndErrorMapping(t *testing.T) {
 		t.Errorf("unconfigured → %d, want 503", got)
 	}
 }
+
+type fakeUser struct {
+	err error
+	n   int
+}
+
+func (f *fakeUser) Sign(context.Context, signing.UserRequest) (signing.UserResponse, error) {
+	f.n++
+	return signing.UserResponse{SignedRawTx: "0x02"}, f.err
+}
+
+func callUser(t *testing.T, u *fakeUser, cn string) *httptest.ResponseRecorder {
+	t.Helper()
+	srv := &Server{userSign: u}
+	req := httptest.NewRequest("POST", "/v1/sign/user-address", strings.NewReader(`{"user_id":"alice"}`))
+	if cn != "" {
+		req = withPeer(req, cn)
+	}
+	rec := httptest.NewRecorder()
+	srv.MTLSRoutes().ServeHTTP(rec, req)
+	return rec
+}
+
+// service-auth-mtls.md invariant #4: withdrawal-service can never pick a user key.
+func TestSignUserAddress_OnlySweeperMayCall(t *testing.T) {
+	for cn, want := range map[string]int{"sweeper": 200, "withdrawal-service": 403, "api-gateway": 403, "": 403} {
+		u := &fakeUser{}
+		if got := callUser(t, u, cn).Code; got != want {
+			t.Errorf("CN=%q: %d, want %d", cn, got, want)
+		}
+		if want == 403 && u.n != 0 {
+			t.Errorf("CN=%q reached the signer", cn)
+		}
+	}
+}
+
+func TestSignUserAddress_ErrorMapping(t *testing.T) {
+	cases := map[error]int{
+		signing.ErrDestinationNotHotWallet: 403,
+		signing.ErrUnknownUser:             404,
+		signing.ErrInvalidRequest:          400,
+		errors.New("boom"):                 500,
+	}
+	for err, want := range cases {
+		if got := callUser(t, &fakeUser{err: err}, "sweeper").Code; got != want {
+			t.Errorf("%v → %d, want %d", err, got, want)
+		}
+	}
+}

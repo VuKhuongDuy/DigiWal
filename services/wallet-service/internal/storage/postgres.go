@@ -126,6 +126,20 @@ func (s *Store) AddressFor(ctx context.Context, userID, chain string) (string, e
 	return addr, nil
 }
 
+// DerivationIndexFor returns the BIP44 index of the user's address, or ErrNotFound.
+func (s *Store) DerivationIndexFor(ctx context.Context, userID, chain string) (uint32, error) {
+	var idx uint32
+	err := s.pool.QueryRow(ctx,
+		`SELECT derivation_index FROM wallet_addresses WHERE user_id = $1 AND chain = $2`, userID, chain).Scan(&idx)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, ErrNotFound
+	}
+	if err != nil {
+		return 0, fmt.Errorf("reading derivation index: %w", err)
+	}
+	return idx, nil
+}
+
 // AllocateIndex atomically claims the next derivation index for a new
 // address and returns it. The actual address computation happens
 // outside the transaction (it's pure math, no need to hold a DB lock
