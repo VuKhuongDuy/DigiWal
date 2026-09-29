@@ -125,6 +125,14 @@ alongside the other two (chain-watcher's Postgres, the seed split).
    is applied and is unaffected by whether the Sweep itself succeeds,
    fails, or needs a retry — Sweep is custody housekeeping, not a
    balance-affecting operation.
+9. **`sweeper` always re-reads the address's current on-chain balance
+   immediately before signing the Sweep itself, not just before Gas
+   Top-Up.** Never reuses a balance value read earlier in the same or a
+   prior (possibly crashed or Kafka-redelivered) attempt. This is what
+   makes a retried Sweep naturally idempotent: if an earlier attempt
+   already swept the funds, the current balance is at or near zero and
+   there's nothing meaningful left to move, rather than the retry
+   signing for a stale, possibly-wrong amount.
 
 ## Diagram
 
@@ -175,7 +183,8 @@ sequenceDiagram
         Sweeper->>RPC: broadcast (Gas Top-Up)
         Sweeper->>RPC: wait for inclusion
     end
-    Sweeper->>Wallet: sign(from=user address, to=Hot Wallet, asset, amount=full balance)
+    Sweeper->>RPC: get user address's current asset balance (fresh read, invariant #9)
+    Sweeper->>Wallet: sign(from=user address, to=Hot Wallet, asset, amount=current balance)
     Wallet-->>Sweeper: signed raw tx
     Sweeper->>RPC: broadcast (Sweep)
     Note over Sweeper: retried on failure with a fresh balance check,<br/>never touches the Ledger Transaction already applied

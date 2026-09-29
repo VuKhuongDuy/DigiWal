@@ -31,6 +31,9 @@ existing key-custody design does.
   `to_address`, identified by a client-supplied `idempotency_key`
   (minted by `api-gateway`, reused as the Ledger Transaction's
   idempotency key too — one key, one meaning, across both contexts).
+  `UNIQUE(idempotency_key)` on the `withdrawal_requests` table — the
+  request's own creation is idempotent, not just its later steps (see
+  invariant #11).
 - **Hot Wallet** — the single on-chain address (per this doc's
   recommendation — see Open Questions #1) that every withdrawal is
   actually paid out from, regardless of which address the user
@@ -50,7 +53,14 @@ existing key-custody design does.
   the canonical chain — either because it never broadcast successfully,
   or because it was abandoned after a Nonce Gap (below). Never a
   mutation of the original debit (`ledger.md`'s immutability
-  invariant).
+  invariant). Uses its own idempotency key, deterministically derived
+  from the original — **`{idempotency_key}:refund`** — never the
+  original key itself (that's already taken by the Reservation, and
+  `ledger_transactions.idempotency_key` is unique). A retried
+  compensation attempt hits the same `{idempotency_key}:refund` key and
+  no-ops via `ledger.md`'s own idempotent-apply mechanism, so a crash
+  between posting the refund and marking the Withdrawal Request
+  `failed` can never double-refund.
 - **Nonce Gap** — the situation where a Hot Wallet transaction at nonce
   N is no longer present in the canonical chain (a reorg deeper than
   Withdrawal Confirmation Depth). By EVM's strict per-account nonce
@@ -82,15 +92,16 @@ existing key-custody design does.
   `withdrawal-service` with dust requests — and burning through Hot
   Wallet nonces doing it — less attractive.
 
-Withdrawal Request states: `requested → validated → reserved → signed →
-broadcast → confirmed`, with `rejected` (failed validation or
-insufficient funds, terminal, no reservation made) and `failed`
-(terminal, triggers a Compensating Entry — reached either from
-`reserved` if it never broadcast, or from `disputed` if abandoned) as
-off-ramps, plus `disputed` (a `confirmed` request whose tx was reorged
-out — see invariants #7–9) which resolves back to `confirmed` or
-forward to `failed`, always by explicit operator action. See Open
-Questions #3 for the one remaining unresolved failure mode.
+Withdrawal Request states: a row exists first (invariant #11), then
+moves `requested → validated → reserved → signed → broadcast →
+confirmed`, with `rejected` (failed validation or insufficient funds,
+terminal, no reservation made) and `failed` (terminal, triggers a
+Compensating Entry — reached either from `reserved` if it never
+broadcast, or from `disputed` if abandoned) as off-ramps, plus
+`disputed` (a `confirmed` request whose tx was reorged out — see
+invariants #7–9) which resolves back to `confirmed` or forward to
+`failed`, always by explicit operator action. See Open Questions #3
+for the one remaining unresolved failure mode.
 
 ## Aggregates & invariants
 
@@ -106,7 +117,10 @@ Questions #3 for the one remaining unresolved failure mode.
    twice.
 3. **A Withdrawal Request that fails before broadcast is refunded via a
    Compensating Entry, never a mutation of the original debit.** Ties
-   directly to `ledger.md`'s entry-immutability invariant.
+   directly to `ledger.md`'s entry-immutability invariant. Posted with
+   idempotency key `{idempotency_key}:refund` (see Compensating Entry
+   above) — a crash-and-retry of the refund step itself can't double-
+   credit the user.
 4. **A Withdrawal Request that has already been broadcast is never
    auto-refunded.** Only a request that provably never reached the chain
    is safe to reverse automatically. Anything with a tx hash needs
@@ -145,6 +159,17 @@ Questions #3 for the one remaining unresolved failure mode.
     Same off-ramp as any other validation failure — `rejected`, no
     Entry ever posted — so a dust request never even touches the
     Ledger or claims a Hot Wallet nonce.
+11. **A Withdrawal Request's own row is created idempotently, before
+    anything else runs.** `INSERT INTO withdrawal_requests
+    (idempotency_key, ...) ON CONFLICT (idempotency_key) DO NOTHING`,
+    checked first — a concurrent duplicate `POST /withdrawals` (client
+    retry, double-click, network retry) can race to create the row, but
+    only one insert wins. The loser doesn't re-validate, re-reserve, or
+    call `wallet-service` again — it reads back the existing row and
+    returns *its* current status. This closes the gap invariants #1–2
+    already assumed: they guard against re-signing or re-reserving an
+    *existing* request, but not against two requests existing in the
+    first place for the same `idempotency_key`.
 
 ## Diagram
 
@@ -158,29 +183,35 @@ sequenceDiagram
     participant Kafka
 
     Gateway->>WD: POST /withdrawals<br/>{idempotency_key, user_id, asset, amount, to_address}
-    WD->>WD: validate (well-formed address, asset registered,<br/>amount >= asset.min_withdrawal_amount)
-    WD->>Ledger: apply(idempotency_key, [debit user, credit chain account])
-    alt insufficient funds
-        Ledger-->>WD: error
-        WD->>WD: status = rejected
-        WD-->>Gateway: 422 insufficient funds
-    else reserved
-        Ledger-->>WD: ok
-        WD->>WD: status = reserved
-        WD->>Wallet: sign({to_address, asset, amount, chain_id})<br/>Hot Wallet only — no caller-chosen key
-        Wallet->>Wallet: allocate next Hot Wallet nonce atomically
-        Wallet-->>WD: signed raw tx
-        WD->>WD: status = signed
-        WD->>RPC: broadcast(raw tx)
-        RPC-->>WD: tx_hash
-        WD->>WD: status = broadcast
-        WD->>Kafka: publish withdrawals.broadcast
-        loop poll for confirmations
-            WD->>RPC: get tx receipt / confirmation count
+    WD->>WD: INSERT withdrawal_requests (idempotency_key, ...)<br/>ON CONFLICT (idempotency_key) DO NOTHING
+    alt row already existed (duplicate request)
+        WD->>WD: read back existing row
+        WD-->>Gateway: existing request's current status
+    else new row created
+        WD->>WD: validate (well-formed address, asset registered,<br/>amount >= asset.min_withdrawal_amount)
+        WD->>Ledger: apply(idempotency_key, [debit user, credit chain account])
+        alt insufficient funds
+            Ledger-->>WD: error
+            WD->>WD: status = rejected
+            WD-->>Gateway: 422 insufficient funds
+        else reserved
+            Ledger-->>WD: ok
+            WD->>WD: status = reserved
+            WD->>Wallet: sign({to_address, asset, amount, chain_id})<br/>Hot Wallet only — no caller-chosen key
+            Wallet->>Wallet: allocate next Hot Wallet nonce atomically
+            Wallet-->>WD: signed raw tx
+            WD->>WD: status = signed
+            WD->>RPC: broadcast(raw tx)
+            RPC-->>WD: tx_hash
+            WD->>WD: status = broadcast
+            WD->>Kafka: publish withdrawals.broadcast
+            loop poll for confirmations
+                WD->>RPC: get tx receipt / confirmation count
+            end
+            RPC-->>WD: confirmed
+            WD->>WD: status = confirmed
+            WD->>Kafka: publish withdrawals.confirmed
         end
-        RPC-->>WD: confirmed
-        WD->>WD: status = confirmed
-        WD->>Kafka: publish withdrawals.confirmed
     end
 ```
 
