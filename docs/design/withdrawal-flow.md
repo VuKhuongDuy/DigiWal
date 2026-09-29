@@ -57,10 +57,16 @@ Question #7).
   expose both "every user's transient private key" and "the automated
   payout key." Fixed here to match. Source of truth going forward:
   `wallet-tiering.md` invariant #1, not this doc.)
-- **Reservation** — the Ledger Transaction that debits the user's
+- **Reservation** — the Lock (`ledger.md`) placed against the user's
   Account the moment a Withdrawal Request is accepted (not when it
-  finally confirms on-chain). Uses the invariant already defined in
-  `ledger.md` (balance can never go negative) as its safety net.
+  finally confirms on-chain). Reserves capacity out of the user's
+  Available Balance without moving any real money yet: no Entry is
+  posted, `total_balance` doesn't change, only `locked_balance` does.
+  Uses `ledger.md`'s Lock-creation invariant (Available Balance can
+  never go negative) as its safety net. Resolves to a real debit only
+  when the Withdrawal Request actually reaches `confirmed` (Settle,
+  `ledger.md`) — everything before that is reversible by Release alone,
+  no Compensating Entry needed (see invariant #3, revised).
 - **Hot Wallet Nonce** — the EVM account nonce for the Hot Wallet
   address. Must be allocated atomically and monotonically, exactly like
   `wallet-service`'s existing per-user derivation-index allocation — the
@@ -70,13 +76,20 @@ Question #7).
   `deposit-flow.md`'s Sweep-related invariants for that, unrelated,
   sequence.)
 - **Compensating Entry** — a new Ledger Transaction that credits the
-  user back after a Withdrawal Request ends up never having landed on
-  the canonical chain — either because it never broadcast successfully,
-  or because it was abandoned after a Nonce Gap (below). Never a
-  mutation of the original debit (`ledger.md`'s immutability
-  invariant). Uses its own idempotency key, deterministically derived
-  from the original — **`{idempotency_key}:refund`** — never the
-  original key itself (that's already taken by the Reservation, and
+  user back after a Withdrawal Request that had already **Settled**
+  (`ledger.md` — real money already left `total_balance`) turns out not
+  to have actually landed on the canonical chain. **This is now the
+  only case that needs one**, since Settle is the sole point where an
+  Entry is posted: it's the `disputed` → abandoned path after a Nonce
+  Gap (below), reached only from `confirmed` (invariant #9). Any
+  Withdrawal Request that fails *before* Settle — i.e., before
+  `confirmed` — never had an Entry posted for it in the first place, so
+  it's reversed by simply Releasing its Lock (`ledger.md`), not by a
+  Compensating Entry (see invariant #3, revised). Never a mutation of
+  the original debit (`ledger.md`'s immutability invariant). Uses its
+  own idempotency key, deterministically derived from the original —
+  **`{idempotency_key}:refund`** — never the original key itself
+  (that's already taken by the Settle-time debit, and
   `ledger_transactions.idempotency_key` is unique). A retried
   compensation attempt hits the same `{idempotency_key}:refund` key and
   no-ops via `ledger.md`'s own idempotent-apply mechanism, so a crash
@@ -144,38 +157,58 @@ Question #7).
 
 Withdrawal Request states: a row exists first (invariant #11), then
 moves `requested → validated → reserved → signed → broadcast →
-confirmed`, with `rejected` (failed validation or insufficient funds,
-terminal, no reservation made) and `failed` (terminal, triggers a
-Compensating Entry — reached either from `reserved` if it never
-broadcast, or from `disputed` if abandoned) as off-ramps, plus
-`disputed` (a `confirmed` request whose tx was reorged out — see
-invariants #7–9) which resolves back to `confirmed` or forward to
-`failed`, always by explicit operator action. See Open Questions #3
-for the one remaining unresolved failure mode.
+confirmed`, with `confirmed` the only transition that Settles the Lock
+(`ledger.md`) and posts the real debit Entry — everything before it is
+still just a Lock, no money has actually moved. `rejected` (failed
+validation or insufficient available funds, terminal, no Lock ever
+created) and `failed` (terminal) are the off-ramps: reached from
+`reserved`/`signed`/`broadcast` it means Releasing the Lock (no Entry
+was ever posted, so nothing needs compensating); reached from
+`disputed` (below) it means a Compensating Entry, since by then the
+Lock had already Settled and real money had already moved — see the
+revised invariant #3. `disputed` (a `confirmed` request whose tx was
+reorged out — see invariants #7–9) resolves back to `confirmed` or
+forward to `failed`, always by explicit operator action. See Open
+Questions #3 for the one remaining unresolved failure mode.
 
 ## Aggregates & invariants
 
 1. **A Withdrawal Request's ledger Reservation and its own status move
-   together.** `withdrawal-service` calls `ledger.apply()`; only on
-   success does it set status = `reserved`. On "insufficient funds," it
-   sets `rejected` — never a partial reservation.
+   together.** `withdrawal-service` calls `ledger.lock(idempotency_key,
+   user_id, asset_id, amount)` — **not `account_id`**: `withdrawal-service`
+   never knows `ledger-service`'s internal Account primary key, only the
+   `user_id` it already has (from the authenticated request) and the
+   `asset_id` the withdrawal names; `ledger-service` resolves the Account
+   internally (`ledger.md`'s Lock definition). Only on success does
+   `withdrawal-service` set status = `reserved`. On "insufficient
+   available funds," it sets `rejected` — never a partial lock.
 2. **A Withdrawal Request can be signed at most once.** Guarded the same
    way as ledger idempotency: `UPDATE withdrawal_requests SET
    status='signing' WHERE status='reserved'`, zero rows affected means
    a duplicate/retry, skip. Prevents a retried event from asking
    `wallet-service` to sign (and therefore spend) the same withdrawal
    twice.
-3. **A Withdrawal Request that fails before broadcast is refunded via a
-   Compensating Entry, never a mutation of the original debit.** Ties
-   directly to `ledger.md`'s entry-immutability invariant. Posted with
-   idempotency key `{idempotency_key}:refund` (see Compensating Entry
-   above) — a crash-and-retry of the refund step itself can't double-
-   credit the user.
+3. **A Withdrawal Request that fails before it Settles is reversed by
+   Releasing its Lock, never by a Compensating Entry.** Since the
+   Reservation (`ledger.md`'s Lock) never posts an Entry, a failure
+   anywhere between `reserved` and `broadcast` — a signing failure, a
+   broadcast failure, or any abandonment short of `confirmed` — is
+   undone with `ledger.release(idempotency_key)`: `locked_balance` goes
+   back down, `total_balance` was never touched, so there's nothing to
+   compensate. This replaces this doc's earlier design, where the
+   Reservation debited immediately and every such failure needed a
+   refund Entry. A Compensating Entry is now needed only for the one
+   case where real money already moved: a `confirmed` (already-Settled)
+   Withdrawal Request later reorged out and abandoned (`disputed` →
+   `failed`, invariant #9) — see the revised Compensating Entry
+   definition above.
 4. **A Withdrawal Request that has already been broadcast is never
-   auto-refunded.** Only a request that provably never reached the chain
-   is safe to reverse automatically. Anything with a tx hash needs
-   positive proof it didn't land before any compensating action — see
-   Open Questions #3.
+   auto-released.** Only a request that provably never reached the chain
+   is safe to reverse automatically — releasing a Lock for a broadcast
+   tx that later lands on-chain would let a Settle attempt run against
+   capacity that's already been given back to the user. Anything with a
+   tx hash needs positive proof it didn't land before any Lock
+   resolution — see Open Questions #3.
 5. **`wallet-service` signs for the Hot Wallet only, and the caller
    specifies *what* to send, never *which key* nor *how the transaction
    is built*.** The signing request carries `{to_address, asset_id,
@@ -294,6 +327,39 @@ for the one remaining unresolved failure mode.
     `deposit-flow.md`) — which have no pre-existing per-request key the
     way a Withdrawal Request does; see those docs for their **PROPOSED**
     key-minting schemes.
+17. **A Lock does not stay `active` forever.** Without this, a
+    Withdrawal Request that crashes mid-flight (before broadcast) or
+    whose broadcast tx never lands leaves its Lock's reserved capacity
+    permanently unavailable to the user — the Available Balance
+    invariant (`ledger.md` #1) would technically hold, but the user's
+    funds would be frozen with no path back. A periodic **Reaper** loop
+    in `withdrawal-service` reclaims stuck requests, but only ones it can
+    *prove* are safe to reclaim — resolves Open Questions #3:
+    - `reserved` or `signed` for longer than the **Stuck Reservation
+      Timeout** (**PROPOSED**, exact value Tech Lead's call — see Open
+      Questions #3): no `tx_hash` exists yet in either state, so nothing
+      was ever broadcast — always safe to Release. The Reaper Releases
+      the Lock (`ledger.md`) and marks the request `failed` terminally,
+      so a `signed`-but-never-broadcast raw tx can never be broadcast by
+      any later code path after its Lock is gone.
+    - `broadcast` for longer than the **Stuck Broadcast Timeout**
+      (**PROPOSED**, Tech Lead's call) **and** a live
+      `eth_getTransactionCount(hot_wallet, "pending")` read shows the Hot
+      Wallet's on-chain nonce has already advanced past this tx's nonce
+      — positive proof some *other* transaction consumed that nonce, so
+      this exact tx was replaced or dropped and can never land. Safe to
+      Release, same as above. This is the same proof technique the Nonce
+      Gap design already relies on (nonce comparison against the live
+      chain), applied to "never confirmed" instead of "confirmed then
+      reorged out."
+    - `broadcast` past the Stuck Broadcast Timeout but the on-chain nonce
+      has **not** advanced past it: the tx could still be sitting in
+      mempool, or the network could be stuck — the Reaper has no proof
+      it's dead, so it only raises an operator alert (identical posture
+      to invariant #9's Nonce Gap resolution: never auto-resolve what
+      can't be proven). An operator can then submit a nonce-filler (same
+      mechanism as Nonce Gap recovery) to force it dead, after which the
+      Reaper's second case above fires and Releases it.
 
 ## Diagram
 
@@ -314,12 +380,12 @@ sequenceDiagram
         WD-->>Gateway: existing request's current status
     else new row created
         WD->>WD: validate (well-formed address, asset registered,<br/>amount >= asset.min_withdrawal_amount,<br/>to_address is an active Whitelist Entry,<br/>to_address not on Screening List)
-        WD->>Ledger: apply(idempotency_key, [debit user, credit chain account])
-        alt insufficient funds
+        WD->>Ledger: lock(idempotency_key, user_id, asset_id, amount)<br/>Reservation — reserves capacity only, no Entry posted (ledger.md)
+        alt insufficient available funds
             Ledger-->>WD: error
             WD->>WD: status = rejected
             WD-->>Gateway: 422 insufficient funds
-        else reserved
+        else locked
             Ledger-->>WD: ok
             WD->>WD: status = reserved
             WD->>Wallet: sign({to_address, asset_id, amount, chain_id, idempotency_key})<br/>Hot Wallet only — no caller-chosen key
@@ -339,6 +405,8 @@ sequenceDiagram
                 WD->>RPC: get tx receipt / confirmation count
             end
             RPC-->>WD: confirmed
+            WD->>Ledger: settle(idempotency_key)<br/>Settle — Lock resolves, real debit Entry posted for the first time (ledger.md)
+            Ledger-->>WD: ok (settled)
             WD->>WD: status = confirmed
             WD->>Kafka: publish withdrawals.confirmed
         end
@@ -448,6 +516,17 @@ sequenceDiagram
   #16 (idempotency key persisted alongside the signed result) closes
   this without weakening invariant #2, which is still needed for the
   ordinary "don't sign a request that's still `reserved`" case.
+- **Debit the user's Account at Reservation time instead of
+  Lock-then-Settle** (this doc's original design). Rejected on review:
+  it meant every pre-broadcast failure — by far the common case — needed
+  a Compensating Entry just to undo something that never actually left
+  custody, touching `ledger.md`'s immutable Entries table for money that
+  never moved. The Lock/Settle/Release split (`ledger.md`) reserves
+  capacity without pretending funds moved until a Withdrawal Request
+  actually reaches `confirmed`, and confines Compensating Entries to the
+  one case that genuinely needs one: a `disputed` withdrawal abandoned
+  after it had already Settled (invariant #9). See the revised
+  invariant #3 and Compensating Entry definition above.
 
 ## Open questions
 
@@ -470,16 +549,38 @@ sequenceDiagram
    CN-based authorization design (the "which caller may call which
    endpoint" piece this decision didn't originally cover):
    `docs/design/service-auth-mtls.md`.
-3. **Stuck/dropped broadcast handling.** A withdrawal that's broadcast
-   but never confirms (underpriced, replaced, dropped from mempool) is
-   the trickiest failure mode here — refunding it safely requires
-   certainty it's truly dead, not just slow. I don't have a concrete
-   timeout/replacement policy yet and would rather work it out with you
-   than guess a number that's wrong in a way that loses money. This is
-   a separate question from Withdrawal Confirmation Depth (now resolved,
-   see below) — Confirmation Depth is about how long to wait once a tx
-   *is* included before calling it final; this is about what to do when
-   a broadcast tx never gets included at all. Still open.
+3. ~~**Stuck/dropped broadcast handling / stuck Locks.** A withdrawal
+   that's broadcast but never confirms (underpriced, replaced, dropped
+   from mempool) is the trickiest failure mode here — Releasing its Lock
+   safely (per the revised invariant #3/#4) requires certainty it's
+   truly dead, not just slow. Also raised independently on review: a
+   Lock that never resolves at all (crash before broadcast, or a
+   genuinely stuck tx) leaves the user's funds frozen forever with no
+   mechanism to reclaim them — someone has to release it eventually.~~
+   **Decided: mechanism resolved, exact numbers still Tech Lead's call.**
+   A periodic Reaper (new invariant #17) reclaims stuck requests using
+   the same proof technique the Nonce Gap design already established —
+   compare the Hot Wallet's live on-chain nonce against the stuck tx's
+   nonce, never a bare timeout alone: `reserved`/`signed` (no `tx_hash`
+   yet) is always safe to auto-Release once past a **Stuck Reservation
+   Timeout**; `broadcast` is safe to auto-Release once past a **Stuck
+   Broadcast Timeout** *and* the on-chain nonce has moved past it
+   (proof this exact tx was replaced/dropped, not just slow); otherwise
+   the Reaper alerts an operator rather than guessing. Two numbers are
+   still open, same shape as `wallet-tiering.md`'s Hot Floor/Ceiling
+   split (mechanism decided here, absolute values are a risk-tolerance
+   call): **Stuck Reservation Timeout** (recommend something short and
+   generous, e.g. a few minutes — nothing was ever broadcast in this
+   state, so there's no cost to reclaiming quickly) and **Stuck
+   Broadcast Timeout** (recommend at least Withdrawal Confirmation
+   Depth's 64-block window plus margin, e.g. 128 blocks (~25.6 min), so
+   the Reaper never races a tx that's simply slow to confirm). Confirm
+   these two values, or set your own — the mechanism doesn't change
+   either way. This is a separate question from Withdrawal Confirmation
+   Depth (resolved, see below) — Confirmation Depth is about how long to
+   wait once a tx *is* included before calling it final; this was about
+   what to do when a broadcast tx never gets included at all, or a
+   request never gets that far.
 4. ~~Confirmed-then-reorged withdrawal.~~ **Decided (recommendation
    accepted):** not automated. Full design: a **Nonce Gap** (a Hot
    Wallet tx at nonce N reorged out) invalidates every Hot Wallet tx at

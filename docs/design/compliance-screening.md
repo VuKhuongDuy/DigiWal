@@ -52,8 +52,12 @@ by three existing services:
    `apply()` — a match short-circuits into a Flagged Deposit record
    instead of a Ledger Transaction. This is a precondition on the
    *deposit-consumption codepath specifically*, not a change to
-   `apply()` itself, which withdrawals also use and don't need this
-   check on.
+   `apply()` itself, which corrections also use (`ledger.md` invariant
+   #11) and don't need this check on. (Withdrawals no longer go through
+   `apply()` at all for their Reservation — `ledger.md`'s Lock/Settle/
+   Release split moved that to its own `lock()`/`settle()`/`release()`
+   operations; `apply()`'s only remaining callers are deposits and
+   corrections.)
 2. **The same check independently blocks Sweep.** `sweeper` checks the
    Screening List itself before broadcasting — it does not rely on
    `ledger-service` having already decided, since it consumes

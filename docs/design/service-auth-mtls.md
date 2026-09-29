@@ -32,8 +32,9 @@ context (`wallet-service`) — the primary, mandatory scope, since that's
 where the two flow docs' security arguments actually live. By the same
 mechanism and for the same reasons, this doc also recommends (marked
 **PROPOSED** throughout) extending the identical treatment to the
-**Ledger** context's `apply()` endpoint (`ledger-service`, not yet
-built) and, once their own endpoints are actually designed, to the
+**Ledger** context's state-mutating endpoints (`apply()`,
+`lock`/`settle`/`release` — `ledger-service`, not yet built) and, once
+their own endpoints are actually designed, to the
 various `api-gateway → *` internal hops `integration-contracts.md` §3
 lists as "not specified for this internal hop itself." Nothing here
 changes any context's responsibilities — only how a caller proves, and
@@ -129,19 +130,25 @@ gets checked for, its identity when crossing into another service.
    `api-gateway`, …). No service is ever issued a certificate bearing
    another service's name, and no certificate/key pair is ever shared
    across two different services — one identity, one cert.
-7. **PROPOSED — extend the identical mechanism to `ledger-service`'s
-   `apply()` endpoint** (`POST /v1/ledger/transactions`,
+7. **PROPOSED — extend the identical mechanism to every `ledger-service`
+   endpoint that mutates state** (`POST /v1/ledger/transactions`,
+   `POST /v1/ledger/locks`, `.../settle`, `.../release` —
    `integration-contracts.md` §2), restricted to `CN=withdrawal-service`
-   only. The blast-radius argument here is less dramatic than the
-   signing endpoints' (a compromised `withdrawal-service` can already
-   move ledger balances via its normal validated flow), but an
-   unauthenticated or wrongly-authenticated caller of `apply()` could
-   post arbitrary debit/credit entries directly, bypassing every
-   validation step `withdrawal-flow.md` invariants #10–#14 place in
-   front of it — that's a real integrity gap, not a cosmetic one, so
-   the same treatment is worth applying for consistency. Since
-   `ledger-service` doesn't exist yet, this should be built in from the
-   start (Milestone 1, task 1.3) rather than retrofitted later — see
+   only, on every one of them. The blast-radius argument here is less
+   dramatic than the signing endpoints' (a compromised
+   `withdrawal-service` can already move ledger balances via its normal
+   validated flow), but an unauthenticated or wrongly-authenticated
+   caller of any of these four could post arbitrary debit/credit entries
+   or resolve someone else's Lock directly, bypassing every validation
+   step `withdrawal-flow.md` invariants #10–#14 place in front of them —
+   that's a real integrity gap, not a cosmetic one, so the same
+   treatment is worth applying for consistency, and applying to all four
+   uniformly rather than just the one that existed when this invariant
+   was first written: `lock`/`settle`/`release` are exactly as
+   security-sensitive as `apply()` was, just split across three
+   endpoints instead of one (`ledger.md`'s Lock/Settle/Release rework).
+   Since `ledger-service` doesn't exist yet, this should be built in
+   from the start (Milestone 1) rather than retrofitted later — see
    Open Questions #2.
 8. **A service's health-check endpoint is exempt from the client-
    certificate requirement, served on a separate plain (non-mTLS)
@@ -228,7 +235,7 @@ callers invented here.
 | `wallet-service` | `POST /v1/sign/user-address` | `sweeper` only | **Decided here** — same |
 | `wallet-service` | `GET`/`POST /v1/users/{userID}/deposit-address` | `api-gateway` | **PROPOSED** — see Open Questions #4 |
 | `wallet-service` | `GET /healthz` | (no client cert required — plain listener, invariant #8) | Decided here |
-| `ledger-service` | `POST /v1/ledger/transactions` (`apply`) | `withdrawal-service` only | **PROPOSED**, invariant #7 — build in at Milestone 1, task 1.3 |
+| `ledger-service` | `POST /v1/ledger/transactions` (`apply`), `POST /v1/ledger/locks`, `.../{key}/settle`, `.../{key}/release` | `withdrawal-service` only, on all four | **PROPOSED**, invariant #7 — build in at Milestone 1 |
 | `ledger-service` | any future `api-gateway`-facing read endpoint (balances, etc.) | `api-gateway` | **PROPOSED, not yet applicable** — no such endpoint is designed yet (`integration-contracts.md` §2 marks it **PROPOSED HERE, low confidence**); apply this row once it exists, don't invent its path now |
 | `withdrawal-service` | `POST /withdrawals`, `GET /withdrawals/{idempotency_key}`, `POST /whitelist`, `DELETE /whitelist/{id}` | `api-gateway` | **PROPOSED, deferred** — see Open Questions #4 |
 | `history-service` | (its API is a GAP per `integration-contracts.md` §2) | `api-gateway`, once designed | **PROPOSED, not yet applicable** |
@@ -404,9 +411,10 @@ technical requirement; see Open Questions #3.
    `api-gateway` join in.
 2. ~~Sequencing of the PROPOSED extensions.~~ **Decided, as
    recommended:** `wallet-service`'s two `/v1/sign/*` rules ship now,
-   as their own task (0.6 below). `ledger-service`'s `apply()` rule
-   (invariant #7) ships as part of Milestone 1 (task 1.3), built in
-   from the start since `ledger-service` doesn't exist yet, not
+   as their own task (0.6 below). `ledger-service`'s rule (invariant
+   #7) ships as part of Milestone 1, built in from the start on every
+   state-mutating endpoint (`apply()`, task 1.3; `lock`/`settle`/
+   `release`, task 1.7) since `ledger-service` doesn't exist yet, not
    retrofitted later. `api-gateway`'s various proxied-endpoint rules
    wait until each specific downstream endpoint is actually designed —
    no CN rule invented ahead of the endpoint it would attach to.
