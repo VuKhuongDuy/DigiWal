@@ -69,6 +69,18 @@ existing key-custody design does.
   explicit operator action — back to `confirmed` (original tx safely
   rebroadcast at the same nonce) or to `failed` with a Compensating
   Entry (abandoned, after a nonce-filler tx clears the gap).
+- **Minimum Withdrawal Amount** — the smallest amount of an asset a
+  Withdrawal Request may move, set per-asset on the Asset Registry
+  (`ledger.md`'s `min_withdrawal_amount` field) at registration time.
+  **Decided:** for native coin, 15× the current typical gas cost of a
+  withdrawal tx (e.g. ~21,000 gas × 2 gwei ≈ 0.000042 ETH gas cost →
+  min ≈ 0.0006 ETH); for ERC-20, set manually by the operator at
+  registration, since there's no price oracle to compare a token's
+  value against gas cost automatically (`ledger.md`'s Open Questions
+  #3). Exists both for economics (a withdrawal shouldn't cost the Hot
+  Wallet more in gas than it moves) and to make spamming
+  `withdrawal-service` with dust requests — and burning through Hot
+  Wallet nonces doing it — less attractive.
 
 Withdrawal Request states: `requested → validated → reserved → signed →
 broadcast → confirmed`, with `rejected` (failed validation or
@@ -128,6 +140,11 @@ Questions #3 for the one remaining unresolved failure mode.
    no double-spend risk), or submit a nonce-filler transaction to
    abandon it and trigger a Compensating Entry. This is the one case
    kept out of "fully automatic" — see Open Questions #4's resolution.
+10. **A Withdrawal Request below the asset's Minimum Withdrawal Amount
+    is rejected at validation, before any ledger Reservation is made.**
+    Same off-ramp as any other validation failure — `rejected`, no
+    Entry ever posted — so a dust request never even touches the
+    Ledger or claims a Hot Wallet nonce.
 
 ## Diagram
 
@@ -141,7 +158,7 @@ sequenceDiagram
     participant Kafka
 
     Gateway->>WD: POST /withdrawals<br/>{idempotency_key, user_id, asset, amount, to_address}
-    WD->>WD: validate (well-formed address, amount > 0, asset registered)
+    WD->>WD: validate (well-formed address, asset registered,<br/>amount >= asset.min_withdrawal_amount)
     WD->>Ledger: apply(idempotency_key, [debit user, credit chain account])
     alt insufficient funds
         Ledger-->>WD: error
@@ -273,6 +290,9 @@ sequenceDiagram
    triggers, doesn't eliminate it. Confirm you're good with this shape;
    the actual depth values still wait on chain choice (#3 above and
    deposit-flow.md #3/#6).
-5. **Dust/minimum withdrawal amount**, and whether the Hot Wallet's own
-   gas balance needs low-balance alerting — not designing now, flagging
-   for the observability phase (roadmap step 3).
+5. ~~Dust/minimum withdrawal amount~~ **Decided:** see Minimum
+   Withdrawal Amount above and invariant #10 — 15× gas cost for native
+   coin, operator-set for ERC-20, enforced at validation. **Still
+   open:** whether the Hot Wallet's own gas balance needs low-balance
+   alerting — not designing now, flagging for the observability phase
+   (roadmap step 3).
