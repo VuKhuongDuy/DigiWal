@@ -521,7 +521,8 @@ sequenceDiagram
    `user_id` is server-injected from it, never client-supplied. This
    was flagged as inherited from a project-wide gap; that gap is what
    `identity-auth.md` closes.
-8. **PROPOSED, not decided: should `wallet-service` own full EVM
+8. **Decided (Tech Lead, 2026-09-29): yes, and yes to `max_gas_price`.**
+   Original proposal: should `wallet-service` own full EVM
    transaction construction (gas price/limit, via its own EVM RPC
    client), rather than the caller supplying gas parameters?** This is
    a real, previously-unresolved gap — the signing request shape never

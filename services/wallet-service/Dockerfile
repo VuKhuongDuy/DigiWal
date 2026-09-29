@@ -9,5 +9,5 @@ FROM alpine:3.20
 RUN adduser -D -H app
 USER app
 COPY --from=build /out/service /usr/local/bin/service
-EXPOSE 8080
+EXPOSE 8080 8443
 ENTRYPOINT ["service"]

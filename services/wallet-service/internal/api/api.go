@@ -11,7 +11,8 @@ import (
 	"net/http"
 	"strings"
 
-	"digiwal/services/wallet-service/internal/hdwallet"
+	"digiwal/services/wallet-service/internal/authz"
+	"digiwal/services/wallet-service/internal/signing"
 	"digiwal/services/wallet-service/internal/storage"
 )
 
@@ -22,22 +23,114 @@ type Signer interface {
 	AddressAt(index uint32) (string, error)
 }
 
+// HotSigner signs Hot Wallet transactions (POST /v1/sign/hot-wallet).
+type HotSigner interface {
+	Sign(ctx context.Context, req signing.Request) (signing.Response, error)
+}
+
+// UserSigner signs Sweeps (POST /v1/sign/user-address).
+type UserSigner interface {
+	Sign(ctx context.Context, req signing.UserRequest) (signing.UserResponse, error)
+}
+
 type Server struct {
-	store  *storage.Store
-	cache  *storage.Cache
-	signer Signer // nil until the master wallet is initialized and loaded
+	store     *storage.Store
+	cache     *storage.Cache
+	signer    Signer     // nil until the user_derivation seed is initialized and loaded
+	hotSigner HotSigner  // nil until the hot_wallet seed, RPC and assets are configured
+	userSign  UserSigner // nil until both seeds, RPC and assets are configured
 }
 
-func NewServer(store *storage.Store, cache *storage.Cache, signer Signer) *Server {
-	return &Server{store: store, cache: cache, signer: signer}
+func NewServer(store *storage.Store, cache *storage.Cache, signer Signer, hotSigner HotSigner, userSign UserSigner) *Server {
+	return &Server{store: store, cache: cache, signer: signer, hotSigner: hotSigner, userSign: userSign}
 }
 
+// Routes is the plain-HTTP listener: /healthz (exempt from client certs,
+// service-auth-mtls.md invariant #8) plus the already-shipped
+// deposit-address endpoints. Moving those behind the mTLS listener with
+// CN=api-gateway is service-auth-mtls.md Open Question #4 — pending Tech
+// Lead's answer, so their behavior is unchanged for now.
 func (s *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 	mux.HandleFunc("POST /v1/users/{userID}/deposit-address", s.handleCreateOrGetDepositAddress)
 	mux.HandleFunc("GET /v1/users/{userID}/deposit-address", s.handleCreateOrGetDepositAddress)
 	return mux
+}
+
+// MTLSRoutes is the mTLS listener's mux: every endpoint here is wrapped in
+// authz.Require with its own CN allow-list before any handler logic runs.
+// The signing endpoints register here (tasks 0.3 and 0.5).
+func (s *Server) MTLSRoutes() http.Handler {
+	mux := http.NewServeMux()
+	mux.Handle("POST /v1/sign/hot-wallet", authz.Require(authz.HotWalletSigners, http.HandlerFunc(s.handleSignHotWallet)))
+	mux.Handle("POST /v1/sign/user-address", authz.Require(authz.UserAddressSigners, http.HandlerFunc(s.handleSignUserAddress)))
+	return mux
+}
+
+// handleSignUserAddress signs a Sweep: the caller picks whose key signs, but the
+// destination is enforced to be the Hot Wallet by the signer, not trusted here.
+func (s *Server) handleSignUserAddress(w http.ResponseWriter, r *http.Request) {
+	if s.userSign == nil {
+		writeErr(w, http.StatusServiceUnavailable, "user-address signing not configured")
+		return
+	}
+	var req signing.UserRequest
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, "malformed JSON body")
+		return
+	}
+	resp, err := s.userSign.Sign(r.Context(), req)
+	switch {
+	case err == nil:
+		writeJSON(w, http.StatusOK, resp)
+	case errors.Is(err, signing.ErrDestinationNotHotWallet):
+		writeErr(w, http.StatusForbidden, err.Error())
+	case errors.Is(err, signing.ErrUnknownUser):
+		writeErr(w, http.StatusNotFound, err.Error())
+	case errors.Is(err, signing.ErrBalanceBelowGas):
+		writeErr(w, http.StatusUnprocessableEntity, err.Error())
+	case errors.Is(err, signing.ErrInvalidRequest), errors.Is(err, signing.ErrUnknownAsset), errors.Is(err, signing.ErrUnsupportedChain):
+		writeErr(w, http.StatusBadRequest, err.Error())
+	default:
+		log.Printf("signing user-address tx: %v", err)
+		writeErr(w, http.StatusInternalServerError, "internal error")
+	}
+}
+
+// handleSignHotWallet: the request has no field that could select a key —
+// it only ever signs with the Hot Wallet (withdrawal-flow.md invariant #5).
+func (s *Server) handleSignHotWallet(w http.ResponseWriter, r *http.Request) {
+	if s.hotSigner == nil {
+		writeErr(w, http.StatusServiceUnavailable, "hot wallet signing not configured")
+		return
+	}
+	var req signing.Request
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, "malformed JSON body")
+		return
+	}
+	resp, err := s.hotSigner.Sign(r.Context(), req)
+	switch {
+	case err == nil:
+		writeJSON(w, http.StatusOK, resp)
+	case errors.Is(err, signing.ErrInvalidRequest), errors.Is(err, signing.ErrUnknownAsset), errors.Is(err, signing.ErrUnsupportedChain):
+		writeErr(w, http.StatusBadRequest, err.Error())
+	case errors.Is(err, storage.ErrIdempotencyKeyReused):
+		writeErr(w, http.StatusConflict, err.Error())
+	case errors.Is(err, signing.ErrGasCeilingExceeded):
+		writeErr(w, http.StatusUnprocessableEntity, err.Error())
+	case errors.Is(err, storage.ErrNonceGapOpen):
+		// Refuse rather than allocate while a Nonce Gap is open (invariant #7).
+		writeErr(w, http.StatusServiceUnavailable, "nonce gap open: hot wallet signing frozen")
+	default:
+		log.Printf("signing hot wallet tx: %v", err)
+		writeErr(w, http.StatusInternalServerError, "internal error")
+	}
 }
 
 func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
@@ -110,11 +203,4 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 
 func writeErr(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]string{"error": msg})
-}
-
-// LoadOrInitSigner loads the master wallet's decrypted seed into
-// memory, or returns storage.ErrNotFound if it hasn't been created yet
-// (see cmd/service's -init-master-wallet flag).
-func LoadOrInitSigner(_ context.Context, mnemonic string) (Signer, error) {
-	return hdwallet.FromMnemonic(mnemonic)
 }

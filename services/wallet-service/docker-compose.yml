@@ -10,7 +10,18 @@ services:
       REDIS_ADDR: redis:6379
       # Set in .env (gitignored) — `make gen-key` creates one.
       MASTER_KEY_HEX: ${MASTER_KEY_HEX:?run 'make gen-key' first, see README}
-    ports: ["8080:8080"]
+      # mTLS listener for /v1/sign/* — certs from `make certs` (infra/pki).
+      TLS_CERT_FILE: /certs/cert.pem
+      TLS_KEY_FILE: /certs/key.pem
+      TLS_CA_FILE: /certs/ca-cert.pem
+      # Signing builds the tx itself, so it needs an EVM RPC (unset = the sign
+      # endpoints answer 503) and the canonical Asset Registry (infra/assets.yaml).
+      RPC_URL: ${RPC_URL:-}
+      ASSETS_FILE: /config/assets.yaml
+    volumes:
+      - ../../infra/pki/out/wallet-service:/certs:ro
+      - ../../infra/assets.yaml:/config/assets.yaml:ro
+    ports: ["8080:8080", "8443:8443"]
     depends_on:
       postgres:
         condition: service_healthy
