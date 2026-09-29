@@ -35,7 +35,21 @@ Warm/Cold. The shape:
 - **Hot Wallet** — the address `wallet-service` holds a continuously
   decrypted key for; the only tier capable of fully automatic signing.
   Used exclusively for `withdrawal-service`'s automatic payouts and for
-  Treasury Sweeps out of itself.
+  Treasury Sweeps out of itself. **Decided: derived at `m/44'/60'/0'/0/0`
+  — index 0 of Hot's own dedicated seed** (invariant #1), reusing the
+  same BIP44 convention `wallet-service` already uses for user addresses
+  (`m/44'/60'/0'/0/{index}`, `internal/hdwallet/hdwallet.go`). Index 0
+  collides with nothing: it's a different seed entirely, so the
+  identical path derives a completely different key from any user's
+  address. Unlike user-address derivation, which allocates a fresh
+  index per user, Hot's seed only ever derives this one address — no
+  index-allocation scheme needed for it. Warm and Cold Wallets use the
+  same convention (index 0 of their own respective sealed seeds) for
+  consistency, so the operator's local signing CLI can reuse
+  `wallet-service`'s existing `hdwallet` package rather than a second
+  key-generation mechanism — lower-stakes to get right than Hot's path
+  since it's operator-driven, not automated, but stated here so it's a
+  deliberate choice, not whatever the CLI happens to hardcode.
 - **Warm Wallet** — an address whose key is sealed and never loaded by
   any always-on service. Replenishes Hot, operator-triggered, when
   Hot's balance drops below its Floor.
@@ -94,6 +108,13 @@ Warm/Cold. The shape:
    recorded in its own, much simpler table (which wallet address, which
    asset, how much, which direction, when) — it must stay clearly
    separate from anything that touches a user's Account.
+6. **Each tier's address is always index 0 of its own dedicated seed,
+   never incremented.** `m/44'/60'/0'/0/0` for Hot, Warm, and Cold
+   alike, each under a seed unique to that tier. There is no
+   multi-account or multi-address scheme within a tier — one seed, one
+   address, for the lifetime of that tier's key material. If a tier
+   ever needs a second address (not designed for here), that's a new
+   seed and a new tier label, not a second index under an existing one.
 
 ## Diagram
 
