@@ -159,7 +159,7 @@ the feature logic itself:
 |---|---|---|
 | `wallet-service` | Skeleton exists (HD derive, seal/unseal, Postgres+Redis) — no signing endpoint, no tiering yet | `wallet-tiering.md`, `withdrawal-flow.md`, `service-auth-mtls.md` |
 | `chain-watcher` | Not started | `deposit-flow.md` |
-| `ledger-service` | Not started | `ledger.md`, `compliance-screening.md`, `service-auth-mtls.md` (apply() auth, PROPOSED) |
+| `ledger-service` | Not started | `ledger.md`, `compliance-screening.md`, `service-auth-mtls.md` (`apply()`/`lock`/`settle`/`release` auth, all PROPOSED) |
 | `sweeper` | Not started | `deposit-flow.md` |
 | `withdrawal-service` | Not started | `withdrawal-flow.md`, `wallet-tiering.md`, `compliance-screening.md` |
 | `history-service` | Not started | `ARCHITECTURE.md` only (read-model, no dedicated design doc — schema-less enough not to need one) |
@@ -188,17 +188,20 @@ Estimated 6 PRs.
 
 | Task | Module | Input | Output | Depends on |
 |---|---|---|---|---|
-| 1.1 | `ledger-service` | `ledger.md` schema section | Postgres migrations, using **`golang-migrate`** (see "Decisions to make" #3 above — same tool and `services/ledger-service/migrations/{version}_{description}.up/down.sql` convention as `wallet-service`'s task 0.2, this being a fresh schema with no prior data to carry forward): `accounts`, `entries`/`ledger_transactions`, `asset_registry` (incl. `hot_floor`, `hot_ceiling`, `min_withdrawal_amount` fields) | — |
+| 1.1 | `ledger-service` | `ledger.md` schema section | Postgres migrations, using **`golang-migrate`** (see "Decisions to make" #3 above — same tool and `services/ledger-service/migrations/{version}_{description}.up/down.sql` convention as `wallet-service`'s task 0.2, this being a fresh schema with no prior data to carry forward): `accounts`, `entries`/`ledger_transactions`, `locks`, `asset_registry` (incl. `hot_floor`, `hot_ceiling`, `min_withdrawal_amount` fields). **Every `amount`/`*_balance` column is `NUMERIC(78,0)`, never `bigint`** (`ledger.md` invariant #10 — a `bigint` overflows at ~9.2 ETH in wei) | — |
 | 1.2 | `ledger-service` | `ledger.md` Asset Registry | Static config loader (env/YAML), validated at startup | 1.1 |
-| 1.3 | `ledger-service` | `ledger.md` invariants #1, #2; `service-auth-mtls.md` invariant #7 (PROPOSED) | `apply(idempotency_key, entries[])` — atomic, idempotent, sum-to-zero enforced in one DB transaction, served behind an mTLS listener with CN-authorization restricting it to `CN=withdrawal-service` only (built in from the start, using the same CA/leaf-cert tooling from task 0.6) | 1.1, 0.6 |
+| 1.3 | `ledger-service` | `ledger.md` invariants #2, #9, #11; `service-auth-mtls.md` invariant #7 (PROPOSED) | `apply(idempotency_key, source_type, entries[])` — atomic, idempotent, sum-to-zero-per-asset enforced in one DB transaction, served behind an mTLS listener with CN-authorization restricting it to `CN=withdrawal-service` only. **Scope: deposits and corrections only** — a withdrawal Reservation no longer goes through this endpoint (see task 1.7). For `source_type='correction'`, every entry must carry `corrects_entry_id`; `ledger-service` computes the entry's actual amount server-side as the exact negation of the referenced original, never trusting a caller-supplied amount (invariant #11 — this is what stops the endpoint minting an arbitrary credit). Debit check (corrections only — deposits never debit) uses Available Balance (`total_balance - locked_balance`), not bare `total_balance` (invariant #9) | 1.1, 0.6 |
 | 1.4 | `ledger-service` | `pkg/events` (0.1) | Kafka consumer scaffold for `deposits.confirmed` (interface only — real message comes in M2) | 0.1 |
 | 1.5 | `ledger-service` | `compliance-screening.md` invariant #1 | Screening-List check in the deposit-consumption path; `flagged_deposits` table, never auto-applied | 1.3, 1.4 |
-| 1.6 | `ledger-service` | invariants #1–#2 | Unit + integration tests: overdraft rejection, sum-to-zero, idempotent replay. **Integration tests run against a real Postgres via `testcontainers-go`** (see "Testing strategy" above) — these three invariants specifically depend on real transaction/constraint behavior a mock can't reproduce | 1.3 |
+| 1.6 | `ledger-service` | invariants #1–#2, #9 | Unit + integration tests: overdraft rejection (Available-Balance-based, not Total), sum-to-zero-per-asset, idempotent replay. **Integration tests run against a real Postgres via `testcontainers-go`** (see "Testing strategy" above) — these invariants specifically depend on real transaction/constraint behavior a mock can't reproduce | 1.3 |
+| 1.7 | `ledger-service` | `ledger.md` Lock/Settle/Release diagram and invariants #1, #6–#10; `service-auth-mtls.md` invariant #7 (PROPOSED) | `POST /v1/ledger/locks` (`lock(idempotency_key, user_id, asset_id, amount)` — resolves the Account server-side, never takes `account_id`), `.../{key}/settle`, `.../{key}/release`. **Settle is one atomic Postgres transaction** — the lock-status guard, both balance updates (debit user, credit chain account), and both entry inserts together, never split across two transactions and never routed through task 1.3's `apply()` as a nested call (an earlier design draft did both, which either let a crash leave a lock `settled` with no Entry, or double-decremented `total_balance` — see `ledger.md`'s Diagram section for the fixed version). Same mTLS + CN-authorization as task 1.3, `CN=withdrawal-service` only, on all three endpoints | 1.1, 0.6 |
+| 1.8 | `ledger-service` | invariants #6–#8 | Unit + integration tests: Lock idempotent creation, Lock resolves exactly once (Settled xor Released, never both, never twice), Settle's atomicity under a simulated mid-transaction crash, Release posts no Entry. Real Postgres via `testcontainers-go`, same reasoning as task 1.6 | 1.7 |
 
-**DoD:** `ledger-service` correctly applies/rejects transactions and
-flags blacklisted deposits, fully testable in isolation (no other
-unbuilt service needed — publish a fake `deposits.confirmed` message
-by hand). Estimated 5-6 PRs.
+**DoD:** `ledger-service` correctly applies/rejects deposits and
+corrections, locks/settles/releases withdrawal Reservations, and flags
+blacklisted deposits, fully testable in isolation (no other unbuilt
+service needed — publish a fake `deposits.confirmed` message by hand,
+or call `lock`/`settle`/`release` directly). Estimated 7-8 PRs.
 
 ## Milestone 2 — Deposit flow, end to end
 
@@ -208,7 +211,7 @@ by hand). Estimated 5-6 PRs.
 | 2.2 | `ledger-service` | 2.1's real topic | Wire M1.4's consumer scaffold to the live topic | 1.5, 2.1 |
 | 2.3 | `sweeper` | `deposit-flow.md` invariants (Gas Top-Up, Sweep idempotency #8, #10, #12, #13) | Consumes `deposits.confirmed`, independent compliance check, Gas Top-Up (0.001 ETH) via `wallet-service /v1/sign/hot-wallet` with idempotency key `gas-topup:{chain_id}:{tx_hash}:{log_index}` (**PROPOSED**), fresh-balance-read before signing, sweeps to Hot Wallet via `wallet-service /v1/sign/user-address` — calls made with `sweeper`'s own leaf certificate (`CN=sweeper`, from task 0.6's tooling) | 0.3, 0.5, 2.1, 0.6 |
 | 2.4 | `history-service` | `deposits.confirmed`/`deposits.detected` | Minimal MongoDB consumer, denormalized read model | 2.1 |
-| 2.5 | `api-gateway` | — | `GET /deposit-address` (proxies `wallet-service`), `GET /balance` (proxies `ledger-service`) | 1.3 |
+| 2.5 | `api-gateway` | — | `GET /deposit-address` (proxies `wallet-service`), `GET /balances` (proxies `ledger-service`, returns `total_balance`/`locked_balance`/`available_balance` per asset — `integration-contracts.md` §2, `ledger.md`'s Total/Locked/Available split) | 1.3 |
 | 2.6 | all of the above | — | e2e test against a local Sepolia fork (Anvil, now running via `docker compose up anvil` — see `infra/docker-compose.yml` and `docs/DEVELOPMENT.md`): simulate a deposit, assert balance updates | 2.1–2.5 |
 
 **DoD:** a user can request a deposit address, send testnet ETH, and
@@ -221,16 +224,19 @@ see their balance update after 32 blocks — first real demo. Estimated
 |---|---|---|---|---|
 | 3.1 | `withdrawal-service` | `withdrawal-flow.md` invariant #11 | Schema (state machine `requested→validated→reserved→signed→broadcast→confirmed`), `POST /withdrawals` idempotent creation (`INSERT...ON CONFLICT DO NOTHING` first, before anything else) | 0.1 |
 | 3.2 | `withdrawal-service` | invariant #10, whitelist (below), `compliance-screening.md` | Validation: min-withdrawal-amount, whitelist-active check, blacklist check — all before any ledger reservation | 3.1, 3.6 |
-| 3.3 | `withdrawal-service` | invariants #1–#6, #16 | Reserve (via `ledger.apply()`) → sign (via `wallet-service /v1/sign/hot-wallet`, passing the Withdrawal Request's own `idempotency_key`, using `withdrawal-service`'s own leaf certificate from task 0.6) → broadcast → poll to Withdrawal Confirmation Depth = 64 blocks | 3.2, 0.3, 0.4, 0.6 |
+| 3.3 | `withdrawal-service` | invariants #1–#6, #16 | Reserve (via `ledger-service`'s `POST /v1/ledger/locks` — `lock(idempotency_key, user_id, asset_id, amount)`, never `account_id`) → sign (via `wallet-service /v1/sign/hot-wallet`, passing the Withdrawal Request's own `idempotency_key`, using `withdrawal-service`'s own leaf certificate from task 0.6) → broadcast → poll to Withdrawal Confirmation Depth = 64 blocks → **Settle** (`.../{key}/settle`) at the `confirmed` transition, posting the real debit for the first time. Any failure before `confirmed` (signing failure, broadcast failure, abandonment) calls **Release** (`.../{key}/release`) instead — no Entry ever existed to compensate (`withdrawal-flow.md`'s revised invariant #3) | 3.2, 0.3, 0.4, 0.6, 1.7 |
 | 3.4 | `withdrawal-service` | invariants #7–#9 | Nonce Gap detection, `disputed` state, freeze via `wallet-service`, operator-resolution stub (manual DB action, no UI yet) | 3.3, 0.4 |
-| 3.5 | `withdrawal-service` | latest idempotency-gap fix | Compensating Entry using the deterministic `{idempotency_key}:refund` key | 3.3 |
+| 3.5 | `withdrawal-service` | invariant #9 (revised scope — see `withdrawal-flow.md`'s Compensating Entry definition) | Compensating Entry — **only** reached from `disputed` → abandoned (post-Settle reorg case; the ordinary pre-confirm failure path is task 3.3's Release, not this) — via `ledger-service`'s `POST /v1/ledger/transactions` with `source_type='correction'`, the deterministic `{idempotency_key}:refund` key, and `corrects_entry_id` set on every entry (`ledger.md` invariant #11 — the endpoint recomputes the amount server-side, `withdrawal-service` never gets to assert it) | 3.4 |
 | 3.6 | `withdrawal-service` | new Withdrawal Whitelist section | Add (pending → active after 24h cooldown) / remove (instant) whitelist entries | 3.1 |
 | 3.7 | `api-gateway` | — | `POST /withdrawals`, `POST /whitelist`, `DELETE /whitelist/:id` | 3.2, 3.6 |
 | 3.8 | all of the above | — | e2e test incl. a forced Nonce Gap (reorg simulation on the local fork, via Anvil's `anvil_snapshot`/`anvil_revert` — `docker compose up anvil`, see `docs/DEVELOPMENT.md`) | 3.1–3.5 |
+| 3.9 | `withdrawal-service` | `withdrawal-flow.md` invariant #17 (new — Reaper) | Periodic Reaper loop: auto-Release `reserved`/`signed` requests past the Stuck Reservation Timeout; auto-Release `broadcast` requests past the Stuck Broadcast Timeout **only when** a live nonce read proves the Hot Wallet's on-chain nonce has already passed this tx's nonce; otherwise alert an operator rather than guess. **Both timeout values are Tech Lead's call** (`withdrawal-flow.md` Open Questions #3), same shape as `wallet-tiering.md`'s Hot Floor/Ceiling — confirm before this task starts | 3.3, 3.4 |
 
 **DoD:** a user can withdraw to a whitelisted address and see it
 confirm; a simulated reorg correctly freezes and disputes affected
-withdrawals. Estimated 8 PRs.
+withdrawals; a Withdrawal Request stuck before broadcast is
+automatically reclaimed rather than freezing the user's funds forever.
+Estimated 9-10 PRs.
 
 ## Milestone 4 — Wallet tiering operator tooling
 
@@ -259,17 +265,21 @@ on how many PRs you can review per day, not developer headcount:
 | Milestone | PRs | Cumulative |
 |---|---|---|
 | 0 — Foundations | 6 | 6 |
-| 1 — Ledger core | 5-6 | 11-12 |
-| 2 — Deposit flow | 6 | 17-18 |
-| 3 — Withdrawal flow | 8 | 25-26 |
-| 4 — Tiering tooling | 3 | 28-29 |
-| 5 — Compliance completion | 2 | 30-31 |
+| 1 — Ledger core | 7-8 | 13-14 |
+| 2 — Deposit flow | 6 | 19-20 |
+| 3 — Withdrawal flow | 9-10 | 28-30 |
+| 4 — Tiering tooling | 3 | 31-33 |
+| 5 — Compliance completion | 2 | 33-35 |
 
-At a sustainable pace of 2-4 reviewed PRs/day, milestones 0-3 (the
-"it actually works end-to-end" core) land in roughly **6-12 working
-days**; 4-5 add **1-2 more**. Not included: Internal Transfer (blocked
-on a design doc — see above) and the observability phase (roadmap step
-3, deliberately deferred by several open questions already).
+(Milestones 1 and 3 both grew by ~2 PRs from the original estimate —
+`ledger.md`'s Lock/Settle/Release split added tasks 1.7/1.8, and
+`withdrawal-flow.md`'s new Reaper invariant added task 3.9, both real
+scope surfaced by Tech Lead review, not padding.) At a sustainable pace
+of 2-4 reviewed PRs/day, milestones 0-3 (the "it actually works
+end-to-end" core) land in roughly **7-13 working days**; 4-5 add **1-2
+more**. Not included: Internal Transfer (blocked on a design doc — see
+above) and the observability phase (roadmap step 3, deliberately
+deferred by several open questions already).
 
 ## Integration contracts
 

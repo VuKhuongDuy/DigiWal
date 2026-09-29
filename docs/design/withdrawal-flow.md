@@ -175,9 +175,13 @@ Questions #3 for the one remaining unresolved failure mode.
 
 1. **A Withdrawal Request's ledger Reservation and its own status move
    together.** `withdrawal-service` calls `ledger.lock(idempotency_key,
-   account_id, amount)`; only on success does it set status =
-   `reserved`. On "insufficient available funds," it sets `rejected` —
-   never a partial lock.
+   user_id, asset_id, amount)` — **not `account_id`**: `withdrawal-service`
+   never knows `ledger-service`'s internal Account primary key, only the
+   `user_id` it already has (from the authenticated request) and the
+   `asset_id` the withdrawal names; `ledger-service` resolves the Account
+   internally (`ledger.md`'s Lock definition). Only on success does
+   `withdrawal-service` set status = `reserved`. On "insufficient
+   available funds," it sets `rejected` — never a partial lock.
 2. **A Withdrawal Request can be signed at most once.** Guarded the same
    way as ledger idempotency: `UPDATE withdrawal_requests SET
    status='signing' WHERE status='reserved'`, zero rows affected means
@@ -323,6 +327,39 @@ Questions #3 for the one remaining unresolved failure mode.
     `deposit-flow.md`) — which have no pre-existing per-request key the
     way a Withdrawal Request does; see those docs for their **PROPOSED**
     key-minting schemes.
+17. **A Lock does not stay `active` forever.** Without this, a
+    Withdrawal Request that crashes mid-flight (before broadcast) or
+    whose broadcast tx never lands leaves its Lock's reserved capacity
+    permanently unavailable to the user — the Available Balance
+    invariant (`ledger.md` #1) would technically hold, but the user's
+    funds would be frozen with no path back. A periodic **Reaper** loop
+    in `withdrawal-service` reclaims stuck requests, but only ones it can
+    *prove* are safe to reclaim — resolves Open Questions #3:
+    - `reserved` or `signed` for longer than the **Stuck Reservation
+      Timeout** (**PROPOSED**, exact value Tech Lead's call — see Open
+      Questions #3): no `tx_hash` exists yet in either state, so nothing
+      was ever broadcast — always safe to Release. The Reaper Releases
+      the Lock (`ledger.md`) and marks the request `failed` terminally,
+      so a `signed`-but-never-broadcast raw tx can never be broadcast by
+      any later code path after its Lock is gone.
+    - `broadcast` for longer than the **Stuck Broadcast Timeout**
+      (**PROPOSED**, Tech Lead's call) **and** a live
+      `eth_getTransactionCount(hot_wallet, "pending")` read shows the Hot
+      Wallet's on-chain nonce has already advanced past this tx's nonce
+      — positive proof some *other* transaction consumed that nonce, so
+      this exact tx was replaced or dropped and can never land. Safe to
+      Release, same as above. This is the same proof technique the Nonce
+      Gap design already relies on (nonce comparison against the live
+      chain), applied to "never confirmed" instead of "confirmed then
+      reorged out."
+    - `broadcast` past the Stuck Broadcast Timeout but the on-chain nonce
+      has **not** advanced past it: the tx could still be sitting in
+      mempool, or the network could be stuck — the Reaper has no proof
+      it's dead, so it only raises an operator alert (identical posture
+      to invariant #9's Nonce Gap resolution: never auto-resolve what
+      can't be proven). An operator can then submit a nonce-filler (same
+      mechanism as Nonce Gap recovery) to force it dead, after which the
+      Reaper's second case above fires and Releases it.
 
 ## Diagram
 
@@ -343,7 +380,7 @@ sequenceDiagram
         WD-->>Gateway: existing request's current status
     else new row created
         WD->>WD: validate (well-formed address, asset registered,<br/>amount >= asset.min_withdrawal_amount,<br/>to_address is an active Whitelist Entry,<br/>to_address not on Screening List)
-        WD->>Ledger: lock(idempotency_key, account_id, amount)<br/>Reservation — reserves capacity only, no Entry posted (ledger.md)
+        WD->>Ledger: lock(idempotency_key, user_id, asset_id, amount)<br/>Reservation — reserves capacity only, no Entry posted (ledger.md)
         alt insufficient available funds
             Ledger-->>WD: error
             WD->>WD: status = rejected
@@ -512,17 +549,38 @@ sequenceDiagram
    CN-based authorization design (the "which caller may call which
    endpoint" piece this decision didn't originally cover):
    `docs/design/service-auth-mtls.md`.
-3. **Stuck/dropped broadcast handling.** A withdrawal that's broadcast
-   but never confirms (underpriced, replaced, dropped from mempool) is
-   the trickiest failure mode here — Releasing its Lock safely (per the
-   revised invariant #3/#4) requires certainty it's truly dead, not just
-   slow. I don't have a concrete
-   timeout/replacement policy yet and would rather work it out with you
-   than guess a number that's wrong in a way that loses money. This is
-   a separate question from Withdrawal Confirmation Depth (now resolved,
-   see below) — Confirmation Depth is about how long to wait once a tx
-   *is* included before calling it final; this is about what to do when
-   a broadcast tx never gets included at all. Still open.
+3. ~~**Stuck/dropped broadcast handling / stuck Locks.** A withdrawal
+   that's broadcast but never confirms (underpriced, replaced, dropped
+   from mempool) is the trickiest failure mode here — Releasing its Lock
+   safely (per the revised invariant #3/#4) requires certainty it's
+   truly dead, not just slow. Also raised independently on review: a
+   Lock that never resolves at all (crash before broadcast, or a
+   genuinely stuck tx) leaves the user's funds frozen forever with no
+   mechanism to reclaim them — someone has to release it eventually.~~
+   **Decided: mechanism resolved, exact numbers still Tech Lead's call.**
+   A periodic Reaper (new invariant #17) reclaims stuck requests using
+   the same proof technique the Nonce Gap design already established —
+   compare the Hot Wallet's live on-chain nonce against the stuck tx's
+   nonce, never a bare timeout alone: `reserved`/`signed` (no `tx_hash`
+   yet) is always safe to auto-Release once past a **Stuck Reservation
+   Timeout**; `broadcast` is safe to auto-Release once past a **Stuck
+   Broadcast Timeout** *and* the on-chain nonce has moved past it
+   (proof this exact tx was replaced/dropped, not just slow); otherwise
+   the Reaper alerts an operator rather than guessing. Two numbers are
+   still open, same shape as `wallet-tiering.md`'s Hot Floor/Ceiling
+   split (mechanism decided here, absolute values are a risk-tolerance
+   call): **Stuck Reservation Timeout** (recommend something short and
+   generous, e.g. a few minutes — nothing was ever broadcast in this
+   state, so there's no cost to reclaiming quickly) and **Stuck
+   Broadcast Timeout** (recommend at least Withdrawal Confirmation
+   Depth's 64-block window plus margin, e.g. 128 blocks (~25.6 min), so
+   the Reaper never races a tx that's simply slow to confirm). Confirm
+   these two values, or set your own — the mechanism doesn't change
+   either way. This is a separate question from Withdrawal Confirmation
+   Depth (resolved, see below) — Confirmation Depth is about how long to
+   wait once a tx *is* included before calling it final; this was about
+   what to do when a broadcast tx never gets included at all, or a
+   request never gets that far.
 4. ~~Confirmed-then-reorged withdrawal.~~ **Decided (recommendation
    accepted):** not automated. Full design: a **Nonce Gap** (a Hot
    Wallet tx at nonce N reorged out) invalidates every Hot Wallet tx at
