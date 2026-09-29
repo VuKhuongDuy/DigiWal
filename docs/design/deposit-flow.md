@@ -42,6 +42,12 @@ Deposit Detection's scope. `sweeper` is a new addition to
 `docs/ARCHITECTURE.md`'s service table — tracked as a follow-up
 alongside the other two (chain-watcher's Postgres, the seed split).
 
+**Decided: chosen testnet is Sepolia.** ~12s average block time,
+proof-of-stake, post-merge consensus. Its realistic reorg risk is
+shallow, short reorgs — typically 1-2 blocks — rather than the deep
+reorgs a pre-merge PoW chain could suffer. This is the basis for the
+concrete Confirmation Depth and Gas Top-Up numbers below.
+
 ## Ubiquitous language
 
 - **Watched Address** — an address `wallet-service` has issued to a
@@ -51,12 +57,23 @@ alongside the other two (chain-watcher's Postgres, the seed split).
   transfer is treated as final and eligible to credit the ledger. One
   config value for the whole chain in this phase (block-based, not
   asset-based — native and ERC-20 transfers in the same block reach
-  finality together).
+  finality together). **Decided: 32 blocks (~6.4 minutes at Sepolia's
+  ~12s average block time).** Sepolia's realistic reorg risk is shallow
+  — typically 1-2 blocks — so 32 blocks is already 16-32x that observed
+  depth, a comfortable safety margin without waiting for full protocol
+  finality. It also isn't an arbitrary constant: 32 blocks ≈ one epoch
+  under Ethereum's post-merge consensus, roughly what a full node
+  exposes via the `safe` block tag — a block very unlikely to be
+  reorged under normal network conditions, short of a large-scale
+  consensus fault.
 - **Observed Transfer** — a transfer chain-watcher has seen, keyed by
   `(chain_id, tx_hash, log_index)`, in one of two states: `pending`
   (seen, not yet confirmation-deep) or `confirmed` (confirmation-deep,
-  deposit event emitted). This is chain-watcher's own persisted state —
-  see Open Questions #1.
+  deposit event emitted). **Decided:** for a native-coin transfer, which
+  has no log at all, `log_index = -1` is the sentinel value used in this
+  key; an ERC-20 transfer keeps using its real, always ≥0 log index
+  (`ledger.md`'s Idempotency Key definition uses the same convention).
+  This is chain-watcher's own persisted state — see Open Questions #1.
 - **Deposit Detected** — event emitted the first time a matching
   transfer is seen (any depth), informational only, lets
   `history-service` show the user an incoming/pending deposit.
@@ -68,7 +85,11 @@ alongside the other two (chain-watcher's Postgres, the seed split).
   user's attribution address to the Hot Wallet (`wallet-tiering.md`).
   Triggered once a deposit reaches `deposits.confirmed`; closes the gap
   between "credited in the ledger" and "actually custodied where
-  withdrawals pay from."
+  withdrawals pay from." Signed via `POST /v1/sign/user-address`
+  (`integration-contracts.md` §2) — a **user address's own EVM nonce**,
+  a completely separate sequence from the Hot Wallet Nonce
+  (`withdrawal-flow.md`), is needed to sign it; see invariant #12 for how
+  `wallet-service` sources that nonce.
 - **Gas Top-Up** — a small native-coin transfer from the Hot Wallet to
   a user's attribution address, sent only when that address's native
   balance can't cover the Sweep transaction's own gas cost — which is
@@ -76,24 +97,35 @@ alongside the other two (chain-watcher's Postgres, the seed split).
   received any native coin. Not a Ledger Transaction and not a Treasury
   Movement (`wallet-tiering.md`) — it's an operating cost paid out of
   the Hot Wallet's balance, same category as any other gas the Hot
-  Wallet spends. Solves a *different* problem than Gas Reserve below:
-  Gas Top-Up applies when the asset being swept isn't the asset gas is
-  paid in (ERC-20); Gas Reserve applies when it's the *same* asset
-  (native coin) — the two never both apply to the same Sweep.
-- **Gas Reserve** — for a **native-coin** Sweep only: the amount of the
-  address's own native balance `sweeper` withholds so the Sweep
-  transaction can pay its own gas, instead of sweeping the entire
-  balance and leaving nothing to cover the fee. Computed fresh,
-  immediately before signing, from a live gas price read (never a
-  cached/earlier estimate) — the same freshness requirement invariant
-  #9 already puts on the balance read, extended to cover gas price too.
-- **Sweepable Amount** — the actual `amount` `sweeper` asks
-  `wallet-service` to sign for. For ERC-20: the full current token
-  balance (unchanged — Gas Top-Up already ensures gas is covered from a
-  *different* balance). For native coin: `current balance − Gas
-  Reserve`. If that's at or below a small dust threshold, `sweeper`
-  skips the Sweep entirely rather than attempting a transaction not
-  worth its own gas.
+  Wallet spends. **Decided: 0.001 ETH per Gas Top-Up.** Math: 65,000 gas
+  (typical cost of an ERC-20 `transfer()` call) × 10 gwei (a
+  conservative estimate for Sepolia's typical gas price — usually well
+  under that in normal conditions, but Sepolia is prone to price spikes
+  during faucet drains and load-testing/spam bursts, so this builds in
+  margin) ≈ 0.00065 ETH, rounded up to 0.001 ETH so the Sweep
+  transaction the top-up is funding always clears with room to spare
+  instead of being sized to the exact minimum. Signed via `POST
+  /v1/sign/hot-wallet` (Hot Wallet → user address), same endpoint
+  `withdrawal-service` uses for payouts — see invariant #13 (**PROPOSED**)
+  for the idempotency key `sweeper` supplies on that call. Solves a
+  *different* problem than Sweepable Amount below: Gas Top-Up applies
+  when the asset being swept isn't the asset gas is paid in (ERC-20);
+  Sweepable Amount applies when it's the *same* asset (native coin) —
+  the two never both apply to the same Sweep.
+- **Sweepable Amount** — for a **native-coin** Sweep specifically: the
+  actual `amount` sent, after reserving enough of the address's own
+  balance to pay the Sweep transaction's own gas. Sweeping the *entire*
+  balance as `amount` would leave nothing to cover the fee, since the
+  asset being moved and the asset paying for the move are the same
+  account here — a bug found by Dev while implementing `sweeper`,
+  unaddressed by Gas Top-Up (which only ever solves the ERC-20 case).
+  For ERC-20 Sweeps this concept doesn't apply — `amount` stays the
+  full token balance, unchanged, since gas is already covered separately
+  via Gas Top-Up. **Who computes it, and how, is not decided
+  independently here — it's the same question as
+  `integration-contracts.md` Open Questions #11** (does `wallet-service`
+  own gas construction, or does the caller?), applied to this specific
+  case. See invariant #14 and this doc's Open Questions #9.
 
 ## Aggregates & invariants
 
@@ -132,41 +164,116 @@ alongside the other two (chain-watcher's Postgres, the seed split).
    needs no new key material; custody of "who can move a user's swept
    funds" stays exactly where it already was. `sweeper` asks for the
    signature, it never holds or derives the key itself.
-7. **Gas Top-Up happens only when needed, and is idempotent per
+7. **`wallet-service` enforces server-side that a Sweep signing
+   request's destination is always the Hot Wallet — it never trusts the
+   caller's `to_address`.** `POST /v1/sign/user-address` (the endpoint
+   `sweeper` calls for the Sweep step, `docs/design/integration-contracts.md`
+   §2) lets the caller pick *which user key* signs, by design — that's
+   the whole point of the endpoint — but the destination is not
+   caller-controlled: `wallet-service` validates the request's
+   `to_address` against the Hot Wallet address itself before signing,
+   rather than accepting whatever `sweeper` sends. This caps a
+   compromised `sweeper`'s blast radius at "can move already-deposited,
+   not-yet-swept user funds into the Hot Wallet," never to an arbitrary
+   address — the same spirit as the "no caller-chosen key" constraint
+   `withdrawal-flow.md` invariant #5 places on the Hot Wallet's own
+   signing endpoint, mirrored here for the destination instead of the
+   key. **Decided** (`integration-contracts.md` Open Questions #5).
+   **Cross-reference:** this blast-radius argument likewise depends on
+   `wallet-service` enforcing, by client-certificate CN, that only
+   `sweeper` can call this endpoint at all — see
+   `docs/design/service-auth-mtls.md` invariants #2 and #4
+   (CN-based authorization).
+8. **Gas Top-Up happens only when needed, and is idempotent per
    deposit.** Before topping up, `sweeper` checks the address's current
    native balance — a retried Sweep attempt must never blindly re-fund
    an address that's already funded, or the Hot Wallet bleeds gas on
-   every retry.
-8. **A failed or stuck Sweep never touches the Ledger.** The user's
+   every retry. (This balance-check idempotency is separate from, and
+   in addition to, the idempotency-key protection at the signing call
+   itself — see invariant #13.)
+9. **A failed or stuck Sweep never touches the Ledger.** The user's
    credited balance (`ledger.md`) is set the moment `deposits.confirmed`
    is applied and is unaffected by whether the Sweep itself succeeds,
    fails, or needs a retry — Sweep is custody housekeeping, not a
    balance-affecting operation.
-9. **`sweeper` always re-reads the address's current on-chain balance
-   immediately before signing the Sweep itself, not just before Gas
-   Top-Up — and, for native coin, the current gas price too.** Never
-   reuses a balance or gas-price value read earlier in the same or a
-   prior (possibly crashed or Kafka-redelivered) attempt. This is what
-   makes a retried Sweep naturally idempotent: if an earlier attempt
-   already swept the funds, the current balance is at or near zero and
-   there's nothing meaningful left to move, rather than the retry
-   signing for a stale, possibly-wrong amount — and a stale gas price
-   is exactly what would make a native-coin Sweep under- or
-   over-reserve for its own fee.
-11. **`wallet-service` never computes Gas Reserve or Sweepable Amount
-    itself.** It signs for exactly the `amount` it's given — the same
-    invariant #5 in `withdrawal-flow.md` already establishes ("the
-    caller specifies *what* to send, never *which key*"), extended
-    here to say the caller also owns figuring out *how much* is
-    actually sendable. `wallet-service` stays a pure signer with no RPC
-    read access of its own; `sweeper` already reads chain state for
-    other reasons (balance checks, confirmation tracking), so gas-price
-    awareness belongs there, not as new scope for `wallet-service`.
-10. **A deposit whose `from_address` is on the Screening List is never
+10. **`sweeper` always re-reads the address's current on-chain balance
+    immediately before signing the Sweep itself, not just before Gas
+    Top-Up.** Never reuses a balance value read earlier in the same or a
+    prior (possibly crashed or Kafka-redelivered) attempt. This is what
+    makes a retried Sweep naturally idempotent: if an earlier attempt
+    already swept the funds, the current balance is at or near zero and
+    there's nothing meaningful left to move, rather than the retry
+    signing for a stale, possibly-wrong amount.
+11. **A deposit whose `from_address` is on the Screening List is never
     swept, and never credited by `ledger-service` either** — full
     design in `compliance-screening.md`. Both `sweeper` and
     `ledger-service` check independently, since they each consume
     `deposits.confirmed` directly.
+12. **A user address's nonce for a Sweep transaction is sourced by
+    `wallet-service` via a live `eth_getTransactionCount(address,
+    "pending")` RPC call at signing time, not a DB-tracked counter.**
+    **PROPOSED**, not previously decided anywhere — flagging explicitly
+    since a wrong nonce here is exactly the class of subtle correctness
+    bug this project cares about. This is a genuinely different nonce
+    sequence from the Hot Wallet Nonce (`withdrawal-flow.md` invariant
+    #6), which *is* a DB-tracked atomic counter precisely because the
+    Hot Wallet is shared across two concurrent callers
+    (`withdrawal-service` and `sweeper`) and genuinely needs
+    compare-and-swap allocation to avoid two callers claiming the same
+    value. A user address has none of that contention: it never sends
+    an outbound tx anywhere else in this system (user addresses only
+    ever receive deposits before being swept), and a given address sends
+    at most one Sweep transaction per deposit-then-sweep cycle, never
+    concurrently with another Sweep for that same address — so a live
+    RPC read at the moment of signing is both simpler than standing up a
+    per-address DB counter for addresses that will send at most one tx
+    in their lifetime, and correct, since there is no concurrent second
+    writer to race against the way there is for the Hot Wallet. If a
+    Gas Top-Up preceded the Sweep for the same address (invariant #8),
+    that top-up landed on the Hot Wallet's own nonce sequence, not this
+    address's — it doesn't affect this user address's nonce at all, so
+    ordering between the two doesn't matter here.
+13. **A Gas Top-Up's `POST /v1/sign/hot-wallet` call is idempotent per
+    idempotency key, same as every other caller of that endpoint**
+    (`withdrawal-flow.md` invariant #16). **PROPOSED** key:
+    `gas-topup:{chain_id}:{tx_hash}:{log_index}` — deterministically
+    derived from the triggering deposit's own natural key (the same
+    tuple `deposits.confirmed`/`ledger.md` already use as *their*
+    idempotency key, just namespaced with a `gas-topup:` prefix so it
+    can never collide with the deposit's own ledger-side idempotency
+    key or with a withdrawal's `idempotency_key`). This works because
+    exactly one Gas Top-Up is ever attempted per confirmed deposit
+    (invariant #8) — `sweeper` can always recompute this key
+    deterministically from the `deposits.confirmed` message it's
+    processing, including on Kafka redelivery, without needing to
+    persist a separate key of its own. If `sweeper`'s call to
+    `wallet-service` succeeds but the response is lost, a retry (with
+    the same recomputed key) gets back the original signed tx and nonce
+    instead of a second, stranding one.
+14. **A native-coin Sweep never signs for the address's full balance —
+    some is always reserved for the transaction's own gas.** The
+    mechanism depends on `integration-contracts.md` Open Questions #11's
+    resolution, not decided independently here:
+    - **If `wallet-service` owns gas construction** (that doc's
+      recommended option): `sweeper` requests `amount: "max"` on
+      `/v1/sign/user-address` for a native-coin Sweep; `wallet-service`,
+      already estimating gas to build the transaction it's about to
+      sign, computes `Sweepable Amount = balance − actual gas cost`
+      itself and signs for that. Strictly more accurate than a
+      caller-side estimate, since it uses the exact cost about to be
+      charged, not an earlier read that could go stale between
+      estimation and broadcast.
+    - **If the caller owns gas estimation instead:** `sweeper` must read
+      a live gas price immediately before signing (same freshness
+      requirement invariant #10 already puts on the balance read),
+      compute `Sweepable Amount = balance − (gasLimit × gasPrice ×
+      safety margin)` itself, and pass a concrete `amount` — matching
+      today's request shape exactly, no API change needed.
+    Either way: if the computed Sweepable Amount is at or below a small
+    dust threshold, skip the Sweep entirely rather than attempting a
+    transaction not worth its own gas, and leave the dust in place —
+    it's already credited in the ledger (invariant #9) regardless of
+    whether it's ever physically swept.
 
 ## Diagram
 
@@ -191,7 +298,7 @@ sequenceDiagram
         CW->>PG: SELECT pending transfers now >= confirmation_depth blocks old
         loop each newly-confirmed transfer
             CW->>PG: UPDATE observed_transfers SET status='confirmed'<br/>WHERE status='pending'
-            CW->>Kafka: publish deposits.confirmed<br/>{chain_id, tx_hash, log_index, asset_id, to_address, amount, block_number}
+            CW->>Kafka: publish deposits.confirmed<br/>{chain_id, tx_hash, log_index, asset_id, from_address, to_address, amount, block_number}
         end
         CW->>PG: advance watermark
     end
@@ -209,29 +316,28 @@ sequenceDiagram
     participant Wallet as wallet-service
     participant RPC as EVM testnet RPC
 
-    Kafka->>Sweeper: deliver deposits.confirmed
-    alt deposit is an ERC-20 token
-        Sweeper->>RPC: get user address's native balance
-        alt native balance insufficient for Sweep gas
-            Sweeper->>Wallet: sign(from=Hot Wallet, to=user address, amount=gas top-up)
-            Wallet-->>Sweeper: signed raw tx
-            Sweeper->>RPC: broadcast (Gas Top-Up)
-            Sweeper->>RPC: wait for inclusion
-        end
-        Sweeper->>RPC: get user address's current token balance (fresh read, invariant #9)
-        Note over Sweeper: Sweepable Amount = full token balance<br/>(gas paid separately, from native — no Gas Reserve needed)
-    else deposit is native coin
-        Sweeper->>RPC: get user address's current native balance (fresh read, invariant #9)
-        Sweeper->>RPC: get current gas price (fresh read, invariant #9)
-        Sweeper->>Sweeper: Gas Reserve = gasLimit × gasPrice × safety margin<br/>Sweepable Amount = balance − Gas Reserve
-        alt Sweepable Amount <= dust threshold
-            Note over Sweeper: skip — not worth its own gas, leave dust in place
-        end
+    Kafka->>Sweeper: deliver deposits.confirmed<br/>{chain_id, tx_hash, log_index, ...}
+    Sweeper->>RPC: get user address's native balance
+    alt native balance insufficient for Sweep gas
+        Sweeper->>Wallet: sign(from=Hot Wallet, to=user address, amount=gas top-up,<br/>idempotency_key=gas-topup:{chain_id}:{tx_hash}:{log_index})<br/>(PROPOSED key, invariant #13)
+        Note over Wallet: idempotent per key — a retry after a lost<br/>response returns the same signed tx/nonce (withdrawal-flow.md invariant #16)
+        Wallet-->>Sweeper: signed raw tx
+        Sweeper->>RPC: broadcast (Gas Top-Up)
+        Sweeper->>RPC: wait for inclusion
     end
-    Sweeper->>Wallet: sign(from=user address, to=Hot Wallet, asset, amount=Sweepable Amount)
+    Sweeper->>RPC: get user address's current asset balance (fresh read, invariant #10)
+    alt asset is native coin
+        Note over Sweeper,Wallet: Sweepable Amount = balance − gas cost (invariant #14)<br/>who computes it depends on integration-contracts.md Open Questions #11 —<br/>shown here assuming wallet-service owns gas construction (recommended)
+        Sweeper->>Wallet: sign(from=user address, to=Hot Wallet, asset, amount="max")
+        Wallet->>Wallet: estimate gas, compute Sweepable Amount = balance − actual gas cost
+    else asset is ERC-20
+        Sweeper->>Wallet: sign(from=user address, to=Hot Wallet, asset, amount=full token balance)
+    end
+    Wallet->>RPC: eth_getTransactionCount(user address, "pending") — live nonce read (PROPOSED, invariant #12)
+    Note over Wallet: enforces to_address == Hot Wallet server-side (invariant #7)
     Wallet-->>Sweeper: signed raw tx
     Sweeper->>RPC: broadcast (Sweep)
-    Note over Sweeper: retried on failure with a fresh balance/gas-price check,<br/>never touches the Ledger Transaction already applied
+    Note over Sweeper: retried on failure with a fresh balance/gas check,<br/>never touches the Ledger Transaction already applied
 ```
 
 ## Alternatives considered
@@ -260,6 +366,15 @@ sequenceDiagram
   observation (chain-watcher's job) with signing and broadcasting (a
   much higher-trust operation) inside one process. Rejected per your
   decision — Sweep gets its own service and its own trust boundary.
+- **Maintain a DB-tracked nonce counter per user address, mirroring the
+  Hot Wallet's.** Rejected (see invariant #12): a user address sends at
+  most one outbound tx in its entire lifetime (the Sweep), never
+  concurrently with anything else touching that same address, so
+  there's no race to protect against — the extra table, migration, and
+  allocation logic would exist purely to solve a concurrency problem
+  that doesn't occur for this key. A live `eth_getTransactionCount`
+  read is simpler and, in this specific single-writer situation, no
+  less correct.
 
 ## Open questions
 
@@ -276,15 +391,25 @@ sequenceDiagram
 2. ~~Asset Registry population~~ **Decided:** static, operator-
    maintained config (env/YAML list of `{symbol, contract_address,
    decimals}`) — no admin API/UI this phase. **Extended per Dev
-   feedback:** the same file is also loaded by `wallet-service`, not
-   just `chain-watcher` and `ledger-service` — it needs
-   `contract_address` to build ERC-20 calldata when signing. One
-   canonical file (`ledger.md`'s Bounded context(s) section), mounted
-   identically into all three containers — never a per-service copy.
-3. **Confirmation depth**: needs an actual block count once you pick the
-   specific testnet (e.g. Sepolia). No strong opinion yet beyond
+   feedback while implementing `wallet-service`:** the same file is
+   also loaded by `wallet-service`, not just `chain-watcher` and
+   `ledger-service` — it needs `contract_address` to build ERC-20
+   `transfer()` calldata for `/v1/sign/hot-wallet` and
+   `/v1/sign/user-address` (`integration-contracts.md` §2). **One
+   canonical file** (e.g. `infra/assets.yaml`), mounted identically —
+   same host path, same bytes — into all three containers; never a
+   per-service copy, so drift between services' views of the registry
+   is impossible by construction (`ledger.md`'s Bounded context(s)
+   section has the full decision).
+3. ~~**Confirmation depth**: needs an actual block count once you pick
+   the specific testnet (e.g. Sepolia). No strong opinion yet beyond
    "shallow depths risk crediting a deposit that later reorgs out" —
-   I'll propose a number once the chain is chosen.
+   I'll propose a number once the chain is chosen.~~
+   **Decided:** Sepolia chosen as the testnet. Confirmation Depth = 32
+   blocks (~6.4 minutes at Sepolia's ~12s average block time) — see the
+   Confirmation Depth entry in Ubiquitous language above for the full
+   rationale (margin over Sepolia's observed 1-2 block reorgs, aligned
+   with the `safe` block tag).
 4. **Reorg handling beyond confirmation depth** (a *confirmed* deposit's
    block gets reorged out anyway) is out of scope here — flagging
    rather than silently assuming it can't happen. Worth its own note
@@ -294,7 +419,34 @@ sequenceDiagram
    chain-watcher a pure observer and gives Sweep (a distinct trust
    boundary — it signs and broadcasts) its own home instead of quietly
    widening an existing service's scope.
-6. **Gas Top-Up amount** — needs a concrete number (enough for one
+6. ~~**Gas Top-Up amount** — needs a concrete number (enough for one
    ERC-20 `transfer()` call at the chosen testnet's typical gas price,
    plus margin) once the testnet is chosen alongside Confirmation Depth
-   (#3). Same "waiting on chain choice" reason, not guessing now.
+   (#3). Same "waiting on chain choice" reason, not guessing now.~~
+   **Decided:** 0.001 ETH per Gas Top-Up — see the Gas Top-Up entry in
+   Ubiquitous language above for the gas-cost math (65,000 gas × 10
+   gwei, rounded up for margin).
+7. **PROPOSED, not decided: user-address nonce sourced via live RPC read
+   (invariant #12), not a DB counter.** I'm fairly confident in the
+   reasoning (no concurrent writers for a user address, unlike the Hot
+   Wallet), but flagging explicitly per your standing instruction to
+   never silently decide something a wrong answer would make expensive.
+   Please confirm before Milestone 2 (`sweeper`) work starts.
+8. **PROPOSED, not decided: Gas Top-Up's idempotency key
+   (`gas-topup:{chain_id}:{tx_hash}:{log_index}`, invariant #13).** This
+   is a new key-minting scheme, not previously specified anywhere —
+   confirm the namespacing (`gas-topup:` prefix over the deposit's
+   natural key) is acceptable, or propose a different derivation.
+9. **New, from Dev feedback while implementing `sweeper`: native-coin
+   Sweep gas accounting (invariant #14) rides on
+   `integration-contracts.md` Open Questions #11's still-open answer.**
+   My recommendation: resolve #11 as option (a) (`wallet-service` owns
+   gas construction) partly *because* it also gives the cleanest answer
+   here — `wallet-service` already knows the exact gas cost it's about
+   to charge, at the exact moment of signing, so it's strictly more
+   accurate than `sweeper` estimating gas in advance and risking a
+   stale price by broadcast time. If you instead pick option (b), this
+   doc's fallback (`sweeper` estimates and passes a concrete `amount`)
+   needs no further design work — it already matches today's request
+   shape. Either way, please resolve #11 before Milestone 2's `sweeper`
+   work reaches the native-coin Sweep path.
