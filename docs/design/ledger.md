@@ -69,7 +69,12 @@ This doc also defines the **Asset Registry** as part of this context
 - **Idempotency Key** — what makes replaying the same source event a
   no-op. Deposits: `(chain_id, tx_hash, log_index)` — log_index matters
   because one tx can carry several ERC-20 `Transfer` events, each a
-  separate deposit. Withdrawals: a client-supplied UUID, minted by
+  separate deposit. **Decided:** a native-coin transfer has no log at
+  all, so for native deposits `log_index = -1` is used as the sentinel
+  value in this tuple; ERC-20 deposits keep using the real, always ≥0
+  log index (`docs/design/integration-contracts.md` Open Questions #2,
+  resolved; same convention used in `deposit-flow.md`'s Observed
+  Transfer definition). Withdrawals: a client-supplied UUID, minted by
   `api-gateway` at request time and carried through the whole withdrawal
   lifecycle (see `withdrawal-flow.md`).
 - **Available Balance** — an Account's current balance, materialized as
@@ -95,10 +100,11 @@ This doc also defines the **Asset Registry** as part of this context
    not just integration tests — Postgres has no simple constraint for
    "these rows I'm about to insert sum to zero."
 3. **A source event is applied at most once.** `UNIQUE(chain_id,
-   tx_hash, log_index)` for deposits / `UNIQUE(idempotency_key)` for
-   withdrawals on the `ledger_transactions` table. Insert uses
-   `ON CONFLICT DO NOTHING`; the caller treats a no-op as "already
-   applied" and acks/moves on, not as an error.
+   tx_hash, log_index)` for deposits (native deposits use `log_index =
+   -1` as their sentinel, per the Idempotency Key definition above) /
+   `UNIQUE(idempotency_key)` for withdrawals on the `ledger_transactions`
+   table. Insert uses `ON CONFLICT DO NOTHING`; the caller treats a
+   no-op as "already applied" and acks/moves on, not as an error.
 4. **Entries are immutable.** No code path issues `UPDATE` or `DELETE`
    against the entries table. A correction is a new, opposite Entry with
    `corrects_entry_id` set — the entries table is the audit log, the
