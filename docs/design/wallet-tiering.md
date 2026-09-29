@@ -44,9 +44,17 @@ Warm/Cold. The shape:
   inside the local signing CLI, by the operator, rarely. Holds the bulk
   reserve.
 - **Hot Ceiling** — balance above which Hot's excess is swept up to
-  Warm.
+  Warm. **Decided: Ceiling = Hot Floor × 4.**
 - **Hot Floor** — balance below which Hot needs replenishment from
-  Warm.
+  Warm. **Decided: Floor = 6 hours × this asset's expected peak hourly
+  withdrawal volume** — 6h chosen as a reasonable window for an operator
+  to notice a low-balance alert and manually replenish (per invariant
+  #4's decision to keep replenishment manual, not automatic). Both
+  values are set per-asset on the Asset Registry's `hot_floor` /
+  `hot_ceiling` fields (`ledger.md`), starting from this formula and
+  refined once real k6 load-test throughput exists (roadmap step 5) —
+  the ratio and mechanism are the architecture; the exact numbers are a
+  risk-tolerance call, yours to tune.
 - **Treasury Sweep** — automatic, threshold-triggered movement of funds
   *out* of Hot, up to Warm. Hot-signed — same trust boundary as an
   automatic withdrawal, just a different destination.
@@ -164,9 +172,14 @@ sequenceDiagram
    **Decided (PR #1): approved.** `wallet-service` will hold ≥2 sealed
    seeds. `ARCHITECTURE.md`'s "one master mnemonic" line still needs
    updating to match — tracked as a follow-up, not done in this doc.
-2. **Hot Ceiling / Hot Floor values** — need actual numbers (or a
-   policy like "N days of average withdrawal volume") once there's real
-   usage data or a rough estimate. Not guessing a number now.
+2. ~~Hot Ceiling / Hot Floor values~~ **Decided:** Floor = 6h × expected
+   peak hourly withdrawal volume (per asset); Ceiling = Floor × 4.
+   Worked example at a plausible demo/load-test scale (100
+   withdrawals/hour, avg 0.05 ETH each → 5 ETH/hour): Floor = 30 ETH,
+   Ceiling = 120 ETH. The absolute numbers don't matter on testnet —
+   what's decided is the formula and that it's per-asset, config-driven
+   (`ledger.md`'s `hot_floor`/`hot_ceiling` fields), and revisited once
+   real k6 throughput data exists (roadmap step 5).
 3. **What happens to a withdrawal when Hot's real on-chain balance can't
    cover it** even though the ledger already reserved/debited the user
    (Hot underfunded relative to what's been promised)? My inclination:

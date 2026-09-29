@@ -32,7 +32,18 @@ This doc also defines the **Asset Registry** as part of this context
   (`asset_type = native`) or an ERC-20 token (`asset_type = erc20`,
   identified by `contract_address`). Has a `symbol` and `decimals` for
   display only — the ledger itself stores integer minor units (wei /
-  token base units), never floats.
+  token base units), never floats. Also carries three operational
+  parameters, set per-asset at registration time:
+  - `hot_floor` / `hot_ceiling` — **Decided:** Floor = 6h × this asset's
+    expected peak hourly withdrawal volume; Ceiling = Floor × 4. Full
+    rationale and the Treasury Sweep/Replenishment mechanics that use
+    them: `wallet-tiering.md`.
+  - `min_withdrawal_amount` — **Decided:** for native coin, 15× the
+    current typical gas cost of a withdrawal tx; for ERC-20, set
+    manually by the operator at registration (no price oracle exists to
+    compare a token's value against gas cost automatically — see Open
+    Questions #3 below). Enforced at withdrawal validation time: see
+    `withdrawal-flow.md`.
 - **Asset Registry** — the allow-list of assets the system will credit
   deposits for and permit withdrawals of. A transfer of an asset *not*
   in the registry is observed by `chain-watcher` but never reaches the
@@ -112,6 +123,9 @@ erDiagram
         string contract_address "null for native"
         string symbol
         int decimals
+        bigint hot_floor "wallet-tiering.md"
+        bigint hot_ceiling "wallet-tiering.md"
+        bigint min_withdrawal_amount "withdrawal-flow.md"
     }
     ACCOUNT {
         uuid id
