@@ -161,11 +161,14 @@ sequenceDiagram
    sidesteps per-address gas funding. I didn't fold this into
    `deposit-flow.md` silently since it changes that doc's shape — want
    your sign-off first, then I'll add that section.
+   **Decided (PR #1): approved.** The Sweep section is now written up
+   in `deposit-flow.md`, including the gas-funding mechanics.
 2. **`withdrawal-service` ↔ `wallet-service` auth.** This is new surface
    that can move funds. Options range from "same Docker network, no
    auth, testnet-only" (matches the project's current low-ceremony local
    setup) to a shared bearer secret or mTLS. This is a security-posture
    call, not something I'll default silently.
+   **Decided (PR #1): mTLS.**
 3. **Stuck/dropped broadcast handling.** A withdrawal that's broadcast
    but never confirms (underpriced, replaced, dropped from mempool) is
    the trickiest failure mode here — refunding it safely requires

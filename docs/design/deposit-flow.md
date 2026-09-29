@@ -24,6 +24,14 @@ deposit-address set (Redis, populated by `wallet-service`) and the
 an external EVM testnet RPC node. Producer to Kafka; consumed by
 `ledger-service`.
 
+**Decided (PR #1): sweep model approved** (per `withdrawal-flow.md` and
+`wallet-tiering.md`) — confirmed deposits sweep from the user's
+attribution address to the Hot Wallet. This doc now also owns the
+**Sweep** step (see below), which means chain-watcher's role widens
+from pure observation (read chain, emit events) to also triggering a
+custody movement — flagged explicitly in Open Questions #5, since it's
+a real boundary change, not something to fold in silently.
+
 ## Ubiquitous language
 
 - **Watched Address** — an address `wallet-service` has issued to a
@@ -46,6 +54,19 @@ an external EVM testnet RPC node. Producer to Kafka; consumed by
   crosses Confirmation Depth. The only thing `ledger-service` consumes;
   carries `{chain_id, tx_hash, log_index, asset_id, from_address,
   to_address, amount, block_number}`.
+- **Sweep** — the transaction moving a confirmed deposit from the
+  user's attribution address to the Hot Wallet (`wallet-tiering.md`).
+  Triggered once a deposit reaches `deposits.confirmed`; closes the gap
+  between "credited in the ledger" and "actually custodied where
+  withdrawals pay from."
+- **Gas Top-Up** — a small native-coin transfer from the Hot Wallet to
+  a user's attribution address, sent only when that address's native
+  balance can't cover the Sweep transaction's own gas cost — which is
+  *always* true for a pure ERC-20 deposit, since the address never
+  received any native coin. Not a Ledger Transaction and not a Treasury
+  Movement (`wallet-tiering.md`) — it's an operating cost paid out of
+  the Hot Wallet's balance, same category as any other gas the Hot
+  Wallet spends.
 
 ## Aggregates & invariants
 
@@ -73,6 +94,26 @@ an external EVM testnet RPC node. Producer to Kafka; consumed by
    at least `pending` — otherwise a crash mid-block could skip a
    deposit permanently instead of just reprocessing it (reprocessing is
    safe by invariant #3; skipping isn't).
+5. **A Sweep only ever triggers after `deposits.confirmed`.** Sweeping
+   an unconfirmed deposit risks moving funds a later reorg takes back —
+   the Sweep's finality guarantee rides on the same Confirmation Depth
+   the ledger credit already depends on, not a separate, weaker check.
+6. **A Sweep is signed by the user's own derived key, never a new key.**
+   `wallet-service` already holds the seed that derives every user
+   address — unchanged by `wallet-tiering.md`'s seed split, which only
+   separates the *Hot Wallet's* key from that seed. So signing a Sweep
+   needs no new key material; custody of "who can move a user's swept
+   funds" stays exactly where it already was.
+7. **Gas Top-Up happens only when needed, and is idempotent per
+   deposit.** Before topping up, chain-watcher checks the address's
+   current native balance — a retried Sweep attempt must never blindly
+   re-fund an address that's already funded, or the Hot Wallet bleeds
+   gas on every retry.
+8. **A failed or stuck Sweep never touches the Ledger.** The user's
+   credited balance (`ledger.md`) is set the moment `deposits.confirmed`
+   is applied and is unaffected by whether the Sweep itself succeeds,
+   fails, or needs a retry — Sweep is custody housekeeping, not a
+   balance-affecting operation.
 
 ## Diagram
 
@@ -106,6 +147,29 @@ sequenceDiagram
     Note over Ledger: applied as a Ledger Transaction<br/>{credit user account, debit chain account}<br/>— see ledger.md's apply() sequence
 ```
 
+Sweep, triggered right after a deposit confirms (see Open Questions #5
+for which service owns this loop):
+
+```mermaid
+sequenceDiagram
+    participant CW as chain-watcher
+    participant Wallet as wallet-service
+    participant RPC as EVM testnet RPC
+
+    Note over CW: deposits.confirmed just emitted for this transfer
+    CW->>RPC: get user address's native balance
+    alt native balance insufficient for Sweep gas
+        CW->>Wallet: sign(from=Hot Wallet, to=user address, amount=gas top-up)
+        Wallet-->>CW: signed raw tx
+        CW->>RPC: broadcast (Gas Top-Up)
+        CW->>RPC: wait for inclusion
+    end
+    CW->>Wallet: sign(from=user address, to=Hot Wallet, asset, amount=full balance)
+    Wallet-->>CW: signed raw tx
+    CW->>RPC: broadcast (Sweep)
+    Note over CW: retried on failure with a fresh balance check;<br/>never touches the Ledger Transaction already applied
+```
+
 ## Alternatives considered
 
 - **Single-phase: only emit `deposits.confirmed`, drop the
@@ -137,6 +201,9 @@ sequenceDiagram
    correctness (see Alternatives above). Want me to update
    `ARCHITECTURE.md`'s service table once you sign off, or is there a
    constraint I'm missing that keeps chain-watcher stateless?
+   **Decided (PR #1): approved.** `ARCHITECTURE.md`'s service table
+   still needs updating to reflect this — tracked as a follow-up, not
+   done in this doc.
 2. **Asset Registry population**: proposing a static, operator-
    maintained config (env/YAML list of `{symbol, contract_address,
    decimals}`) loaded at chain-watcher and ledger-service startup — no
@@ -149,3 +216,17 @@ sequenceDiagram
    block gets reorged out anyway) is out of scope here — flagging
    rather than silently assuming it can't happen. Worth its own note
    later if it matters for the HA/chaos-testing story in roadmap step 5.
+5. **Which service owns the Sweep loop?** I'm proposing chain-watcher —
+   it already knows the exact moment a transfer becomes confirmed, so
+   triggering Sweep right there avoids adding a new Kafka consumer
+   elsewhere. But this does widen chain-watcher from "observes the chain
+   and emits events" to "also signs and broadcasts custody movements" —
+   a real bounded-context change, not a detail. Alternative: a small
+   separate consumer of `deposits.confirmed` (symmetric with how
+   `wallet-tiering.md` put its Hot→Warm sweep-monitor loop inside
+   `withdrawal-service` rather than chain-watcher). Your call — didn't
+   want to expand chain-watcher's scope silently.
+6. **Gas Top-Up amount** — needs a concrete number (enough for one
+   ERC-20 `transfer()` call at the chosen testnet's typical gas price,
+   plus margin) once the testnet is chosen alongside Confirmation Depth
+   (#3). Same "waiting on chain choice" reason, not guessing now.

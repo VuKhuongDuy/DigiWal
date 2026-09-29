@@ -161,6 +161,9 @@ sequenceDiagram
    two sealed seeds." That's exactly the kind of repo-level,
    expensive-to-reverse call `docs/TEAM_OPERATING_MODEL.md` says is
    yours, not mine to default on.
+   **Decided (PR #1): approved.** `wallet-service` will hold ≥2 sealed
+   seeds. `ARCHITECTURE.md`'s "one master mnemonic" line still needs
+   updating to match — tracked as a follow-up, not done in this doc.
 2. **Hot Ceiling / Hot Floor values** — need actual numbers (or a
    policy like "N days of average withdrawal volume") once there's real
    usage data or a rough estimate. Not guessing a number now.
@@ -178,6 +181,9 @@ sequenceDiagram
    revisit it. I haven't edited `withdrawal-flow.md` or `deposit-flow.md`
    to reflect this yet — holding off until you confirm, since you asked
    me not to rush ahead of your agreement.
+   **Decided (PR #1): approved.** `deposit-flow.md` now has the Sweep
+   section (address → Hot Wallet, including gas top-up); this doc's own
+   diagram already assumed it.
 5. Sweep-monitor loop living inside `withdrawal-service` (recommended)
    vs. its own service — your call if you disagree with the
    recommendation in Alternatives.
