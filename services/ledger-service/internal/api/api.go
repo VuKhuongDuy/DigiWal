@@ -1,6 +1,6 @@
-// Package api is ledger-service's HTTP surface. POST /v1/ledger/transactions is the
-// only mutating endpoint and is served on the mTLS listener, restricted by client
-// certificate CN to withdrawal-service (service-auth-mtls.md invariant #7).
+// Package api is ledger-service's HTTP surface. Every state-changing endpoint is served on
+// the mTLS listener and restricted by client certificate CN to withdrawal-service
+// (service-auth-mtls.md invariant #7): correction posting and the Lock/Settle/Release trio.
 package api
 
 import (
@@ -15,14 +15,17 @@ import (
 	"digiwal/services/ledger-service/internal/ledger"
 )
 
-// Applier is the slice of ledger.Store the API needs.
-type Applier interface {
+// Ledger is the slice of ledger.Store the API needs.
+type Ledger interface {
 	Apply(ctx context.Context, t ledger.Transaction) (ledger.Status, error)
+	Lock(ctx context.Context, r ledger.LockRequest) (ledger.Lock, error)
+	Settle(ctx context.Context, key string) (ledger.SettleResult, error)
+	Release(ctx context.Context, key string) error
 }
 
-type Server struct{ ledger Applier }
+type Server struct{ ledger Ledger }
 
-func NewServer(l Applier) *Server { return &Server{ledger: l} }
+func NewServer(l Ledger) *Server { return &Server{ledger: l} }
 
 // Routes is the plain listener: /healthz only, exempt from client certs
 // (service-auth-mtls.md invariant #8).
@@ -38,7 +41,11 @@ func (s *Server) Routes() http.Handler {
 // MTLSRoutes is the mTLS listener's mux; every endpoint is wrapped in authz.Require.
 func (s *Server) MTLSRoutes() http.Handler {
 	mux := http.NewServeMux()
-	mux.Handle("POST /v1/ledger/transactions", authz.Require(authz.ApplyCallers, http.HandlerFunc(s.handleApply)))
+	guard := func(h http.HandlerFunc) http.Handler { return authz.Require(authz.ApplyCallers, h) }
+	mux.Handle("POST /v1/ledger/transactions", guard(s.handleApply))
+	mux.Handle("POST /v1/ledger/locks", guard(s.handleLock))
+	mux.Handle("POST /v1/ledger/locks/{key}/settle", guard(s.handleSettle))
+	mux.Handle("POST /v1/ledger/locks/{key}/release", guard(s.handleRelease))
 	return mux
 }
 
@@ -46,54 +53,114 @@ type applyRequest struct {
 	IdempotencyKey string `json:"idempotency_key"`
 	SourceType     string `json:"source_type"`
 	Entries        []struct {
-		AccountRef string `json:"account_ref"`
-		UserID     string `json:"user_id"`
-		AssetID    string `json:"asset_id"`
-		Amount     string `json:"amount"` // signed decimal string, minor units
+		AccountRef      string `json:"account_ref"`
+		UserID          string `json:"user_id"`
+		AssetID         string `json:"asset_id"`
+		Amount          string `json:"amount"`
+		CorrectsEntryID string `json:"corrects_entry_id"`
 	} `json:"entries"`
 }
 
-// handleApply maps the wire request onto ledger.Apply.
-//
-// A deposit is never accepted here: deposits enter only through the
-// deposits.confirmed consumer (which screens the sender first,
-// compliance-screening.md invariant #1). Otherwise a caller with this endpoint's
+// handleApply posts a correction. A deposit is never accepted here: deposits enter only
+// through the deposits.confirmed consumer, which screens the sender first
+// (compliance-screening.md invariant #1). Otherwise a caller holding this endpoint's
 // certificate could credit any user directly and skip screening.
+//
+// For a correction the account and amount of every entry are derived from
+// corrects_entry_id (ledger.md invariant #11); whatever the caller sends for them is ignored.
 func (s *Server) handleApply(w http.ResponseWriter, r *http.Request) {
 	var req applyRequest
-	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "malformed JSON body"})
+	if !decode(w, r, &req) {
 		return
 	}
-	src := ledger.SourceType(req.SourceType)
-	if src != ledger.SourceWithdrawal && src != ledger.SourceCorrection {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "source_type must be withdrawal or correction on this endpoint"})
+	if ledger.SourceType(req.SourceType) != ledger.SourceCorrection {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "source_type must be correction on this endpoint"})
 		return
 	}
-	tx := ledger.Transaction{IdempotencyKey: req.IdempotencyKey, Source: src}
+	tx := ledger.Transaction{IdempotencyKey: req.IdempotencyKey, Source: ledger.SourceCorrection}
 	for _, e := range req.Entries {
-		amt, ok := new(big.Int).SetString(e.Amount, 10)
-		if !ok {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "amount must be a signed decimal string"})
-			return
-		}
-		tx.Entries = append(tx.Entries, ledger.Entry{Ref: ledger.AccountRef(e.AccountRef), UserID: e.UserID, AssetID: e.AssetID, Amount: amt})
+		tx.Entries = append(tx.Entries, ledger.Entry{CorrectsEntryID: e.CorrectsEntryID})
 	}
-
 	status, err := s.ledger.Apply(r.Context(), tx)
 	switch {
 	case err == nil:
 		writeJSON(w, http.StatusOK, map[string]string{"status": string(status)})
+	case errors.Is(err, ledger.ErrInvalidCorrection):
+		writeJSON(w, http.StatusBadRequest, map[string]string{"status": "invalid_correction", "reason": err.Error()})
+	default:
+		writeLedgerErr(w, "apply", req.IdempotencyKey, err)
+	}
+}
+
+type lockRequest struct {
+	IdempotencyKey string `json:"idempotency_key"`
+	UserID         string `json:"user_id"`
+	AssetID        string `json:"asset_id"`
+	Amount         string `json:"amount"`
+}
+
+// handleLock reserves capacity. The caller names (user_id, asset_id), never an account id.
+func (s *Server) handleLock(w http.ResponseWriter, r *http.Request) {
+	var req lockRequest
+	if !decode(w, r, &req) {
+		return
+	}
+	amount, ok := new(big.Int).SetString(req.Amount, 10)
+	if !ok {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "amount must be a decimal string"})
+		return
+	}
+	l, err := s.ledger.Lock(r.Context(), ledger.LockRequest{IdempotencyKey: req.IdempotencyKey, UserID: req.UserID, AssetID: req.AssetID, Amount: amount})
+	if err != nil {
+		writeLedgerErr(w, "lock", req.IdempotencyKey, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"idempotency_key": l.IdempotencyKey, "status": string(l.Status), "amount": l.Amount.String()})
+}
+
+func (s *Server) handleSettle(w http.ResponseWriter, r *http.Request) {
+	key := r.PathValue("key")
+	res, err := s.ledger.Settle(r.Context(), key)
+	if err != nil {
+		writeLedgerErr(w, "settle", key, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"idempotency_key": res.IdempotencyKey, "status": "settled", "ledger_transaction_id": res.LedgerTransactionID})
+}
+
+func (s *Server) handleRelease(w http.ResponseWriter, r *http.Request) {
+	key := r.PathValue("key")
+	if err := s.ledger.Release(r.Context(), key); err != nil {
+		writeLedgerErr(w, "release", key, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"idempotency_key": key, "status": "released"})
+}
+
+func decode(w http.ResponseWriter, r *http.Request, v any) bool {
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(v); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "malformed JSON body"})
+		return false
+	}
+	return true
+}
+
+// writeLedgerErr maps a ledger error onto the wire contract. A lock that was resolved the
+// other way is a 409, never a 200: the caller must not believe money moved (or didn't).
+func writeLedgerErr(w http.ResponseWriter, op, key string, err error) {
+	switch {
 	case errors.Is(err, ledger.ErrInsufficientFunds):
 		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"status": "insufficient_funds"})
-	case errors.Is(err, ledger.ErrIdempotencyKeyReused):
+	case errors.Is(err, ledger.ErrLockNotFound):
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+	case errors.Is(err, ledger.ErrIdempotencyKeyReused), errors.Is(err, ledger.ErrLockAlreadySettled), errors.Is(err, ledger.ErrLockAlreadyReleased):
 		writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
 	case errors.Is(err, ledger.ErrInvalid), errors.Is(err, ledger.ErrUnbalanced), errors.Is(err, ledger.ErrUnknownAsset):
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 	default:
-		log.Printf("apply %q: %v", req.IdempotencyKey, err)
+		log.Printf("%s %q: %v", op, key, err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
 	}
 }
