@@ -24,7 +24,20 @@ separate contexts, exactly as the architecture doc already implies.
 
 This doc also defines the **Asset Registry** as part of this context
 (ledger owns "what assets exist and can be credited"), even though
-`chain-watcher` (see `deposit-flow.md`) reads from it too.
+`chain-watcher` and `wallet-service` (see `deposit-flow.md`'s Open
+Questions #2) also read from it — `wallet-service` needs
+`contract_address` to build ERC-20 `transfer()` calldata when it signs
+a Withdrawal, Sweep, or Gas Top-Up.
+
+**Decided: one canonical Asset Registry file, not per-service copies.**
+A single file (e.g. `infra/assets.yaml`, checked into the repo) is
+mounted identically — same host path, same bytes — into every
+container that reads it (`chain-watcher`, `ledger-service`,
+`wallet-service`). None of them gets its own local copy; there is
+exactly one file to edit, so drift between services' views of the
+registry is impossible by construction, not just discouraged by
+convention. This is the answer to the risk Dev flagged while
+implementing `wallet-service`'s side of this.
 
 ## Ubiquitous language
 
