@@ -85,7 +85,11 @@ concrete Confirmation Depth and Gas Top-Up numbers below.
   user's attribution address to the Hot Wallet (`wallet-tiering.md`).
   Triggered once a deposit reaches `deposits.confirmed`; closes the gap
   between "credited in the ledger" and "actually custodied where
-  withdrawals pay from."
+  withdrawals pay from." Signed via `POST /v1/sign/user-address`
+  (`integration-contracts.md` §2) — a **user address's own EVM nonce**,
+  a completely separate sequence from the Hot Wallet Nonce
+  (`withdrawal-flow.md`), is needed to sign it; see invariant #12 for how
+  `wallet-service` sources that nonce.
 - **Gas Top-Up** — a small native-coin transfer from the Hot Wallet to
   a user's attribution address, sent only when that address's native
   balance can't cover the Sweep transaction's own gas cost — which is
@@ -100,7 +104,10 @@ concrete Confirmation Depth and Gas Top-Up numbers below.
   during faucet drains and load-testing/spam bursts, so this builds in
   margin) ≈ 0.00065 ETH, rounded up to 0.001 ETH so the Sweep
   transaction the top-up is funding always clears with room to spare
-  instead of being sized to the exact minimum.
+  instead of being sized to the exact minimum. Signed via `POST
+  /v1/sign/hot-wallet` (Hot Wallet → user address), same endpoint
+  `withdrawal-service` uses for payouts — see invariant #13 (**PROPOSED**)
+  for the idempotency key `sweeper` supplies on that call.
 
 ## Aggregates & invariants
 
@@ -154,11 +161,18 @@ concrete Confirmation Depth and Gas Top-Up numbers below.
    `withdrawal-flow.md` invariant #5 places on the Hot Wallet's own
    signing endpoint, mirrored here for the destination instead of the
    key. **Decided** (`integration-contracts.md` Open Questions #5).
+   **Cross-reference:** this blast-radius argument likewise depends on
+   `wallet-service` enforcing, by client-certificate CN, that only
+   `sweeper` can call this endpoint at all — see
+   `docs/design/service-auth-mtls.md` invariants #2 and #4
+   (CN-based authorization).
 8. **Gas Top-Up happens only when needed, and is idempotent per
    deposit.** Before topping up, `sweeper` checks the address's current
    native balance — a retried Sweep attempt must never blindly re-fund
    an address that's already funded, or the Hot Wallet bleeds gas on
-   every retry.
+   every retry. (This balance-check idempotency is separate from, and
+   in addition to, the idempotency-key protection at the signing call
+   itself — see invariant #13.)
 9. **A failed or stuck Sweep never touches the Ledger.** The user's
    credited balance (`ledger.md`) is set the moment `deposits.confirmed`
    is applied and is unaffected by whether the Sweep itself succeeds,
@@ -177,6 +191,47 @@ concrete Confirmation Depth and Gas Top-Up numbers below.
     design in `compliance-screening.md`. Both `sweeper` and
     `ledger-service` check independently, since they each consume
     `deposits.confirmed` directly.
+12. **A user address's nonce for a Sweep transaction is sourced by
+    `wallet-service` via a live `eth_getTransactionCount(address,
+    "pending")` RPC call at signing time, not a DB-tracked counter.**
+    **PROPOSED**, not previously decided anywhere — flagging explicitly
+    since a wrong nonce here is exactly the class of subtle correctness
+    bug this project cares about. This is a genuinely different nonce
+    sequence from the Hot Wallet Nonce (`withdrawal-flow.md` invariant
+    #6), which *is* a DB-tracked atomic counter precisely because the
+    Hot Wallet is shared across two concurrent callers
+    (`withdrawal-service` and `sweeper`) and genuinely needs
+    compare-and-swap allocation to avoid two callers claiming the same
+    value. A user address has none of that contention: it never sends
+    an outbound tx anywhere else in this system (user addresses only
+    ever receive deposits before being swept), and a given address sends
+    at most one Sweep transaction per deposit-then-sweep cycle, never
+    concurrently with another Sweep for that same address — so a live
+    RPC read at the moment of signing is both simpler than standing up a
+    per-address DB counter for addresses that will send at most one tx
+    in their lifetime, and correct, since there is no concurrent second
+    writer to race against the way there is for the Hot Wallet. If a
+    Gas Top-Up preceded the Sweep for the same address (invariant #8),
+    that top-up landed on the Hot Wallet's own nonce sequence, not this
+    address's — it doesn't affect this user address's nonce at all, so
+    ordering between the two doesn't matter here.
+13. **A Gas Top-Up's `POST /v1/sign/hot-wallet` call is idempotent per
+    idempotency key, same as every other caller of that endpoint**
+    (`withdrawal-flow.md` invariant #16). **PROPOSED** key:
+    `gas-topup:{chain_id}:{tx_hash}:{log_index}` — deterministically
+    derived from the triggering deposit's own natural key (the same
+    tuple `deposits.confirmed`/`ledger.md` already use as *their*
+    idempotency key, just namespaced with a `gas-topup:` prefix so it
+    can never collide with the deposit's own ledger-side idempotency
+    key or with a withdrawal's `idempotency_key`). This works because
+    exactly one Gas Top-Up is ever attempted per confirmed deposit
+    (invariant #8) — `sweeper` can always recompute this key
+    deterministically from the `deposits.confirmed` message it's
+    processing, including on Kafka redelivery, without needing to
+    persist a separate key of its own. If `sweeper`'s call to
+    `wallet-service` succeeds but the response is lost, a retry (with
+    the same recomputed key) gets back the original signed tx and nonce
+    instead of a second, stranding one.
 
 ## Diagram
 
@@ -219,16 +274,18 @@ sequenceDiagram
     participant Wallet as wallet-service
     participant RPC as EVM testnet RPC
 
-    Kafka->>Sweeper: deliver deposits.confirmed
+    Kafka->>Sweeper: deliver deposits.confirmed<br/>{chain_id, tx_hash, log_index, ...}
     Sweeper->>RPC: get user address's native balance
     alt native balance insufficient for Sweep gas
-        Sweeper->>Wallet: sign(from=Hot Wallet, to=user address, amount=gas top-up)
+        Sweeper->>Wallet: sign(from=Hot Wallet, to=user address, amount=gas top-up,<br/>idempotency_key=gas-topup:{chain_id}:{tx_hash}:{log_index})<br/>(PROPOSED key, invariant #13)
+        Note over Wallet: idempotent per key — a retry after a lost<br/>response returns the same signed tx/nonce (withdrawal-flow.md invariant #16)
         Wallet-->>Sweeper: signed raw tx
         Sweeper->>RPC: broadcast (Gas Top-Up)
         Sweeper->>RPC: wait for inclusion
     end
     Sweeper->>RPC: get user address's current asset balance (fresh read, invariant #10)
     Sweeper->>Wallet: sign(from=user address, to=Hot Wallet, asset, amount=current balance)
+    Wallet->>RPC: eth_getTransactionCount(user address, "pending") — live nonce read (PROPOSED, invariant #12)
     Note over Wallet: enforces to_address == Hot Wallet server-side (invariant #7)
     Wallet-->>Sweeper: signed raw tx
     Sweeper->>RPC: broadcast (Sweep)
@@ -261,6 +318,15 @@ sequenceDiagram
   observation (chain-watcher's job) with signing and broadcasting (a
   much higher-trust operation) inside one process. Rejected per your
   decision — Sweep gets its own service and its own trust boundary.
+- **Maintain a DB-tracked nonce counter per user address, mirroring the
+  Hot Wallet's.** Rejected (see invariant #12): a user address sends at
+  most one outbound tx in its entire lifetime (the Sweep), never
+  concurrently with anything else touching that same address, so
+  there's no race to protect against — the extra table, migration, and
+  allocation logic would exist purely to solve a concurrency problem
+  that doesn't occur for this key. A live `eth_getTransactionCount`
+  read is simpler and, in this specific single-writer situation, no
+  less correct.
 
 ## Open questions
 
@@ -303,3 +369,14 @@ sequenceDiagram
    **Decided:** 0.001 ETH per Gas Top-Up — see the Gas Top-Up entry in
    Ubiquitous language above for the gas-cost math (65,000 gas × 10
    gwei, rounded up for margin).
+7. **PROPOSED, not decided: user-address nonce sourced via live RPC read
+   (invariant #12), not a DB counter.** I'm fairly confident in the
+   reasoning (no concurrent writers for a user address, unlike the Hot
+   Wallet), but flagging explicitly per your standing instruction to
+   never silently decide something a wrong answer would make expensive.
+   Please confirm before Milestone 2 (`sweeper`) work starts.
+8. **PROPOSED, not decided: Gas Top-Up's idempotency key
+   (`gas-topup:{chain_id}:{tx_hash}:{log_index}`, invariant #13).** This
+   is a new key-minting scheme, not previously specified anywhere —
+   confirm the namespacing (`gas-topup:` prefix over the deposit's
+   natural key) is acceptable, or propose a different derivation.

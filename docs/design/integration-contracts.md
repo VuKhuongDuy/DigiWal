@@ -195,11 +195,23 @@ and its README) rather than inventing a new one.
 | Endpoint | Status | Request | Response | Cites |
 |---|---|---|---|---|
 | `POST /v1/users/{userID}/deposit-address`<br/>`GET /v1/users/{userID}/deposit-address` | **Already implemented** (`services/wallet-service/internal/api/api.go`) | — (path param only) | `{"user_id","chain","address"}`, 200/201/404 | Existing code, not a design doc |
-| `POST /v1/sign/hot-wallet` | **PROPOSED HERE** — path is invented; the *contract* (fields + no-caller-chosen-key constraint) is decided | `{"to_address","asset_id","amount","chain_id"}` | `{"signed_raw_tx"}` (hex) | Request shape + "no parameter that lets a caller pick a derivation index": `withdrawal-flow.md` invariant #5. Nonce allocation happens inside this call, atomically: invariant #6. Task table's shorthand path `POST /sign`: `docs/IMPLEMENTATION_PLAN.md` task 0.3 — not itself a design doc, cited for continuity only. |
-| `POST /v1/sign/user-address` | **Decided: approved as proposed** (Open Questions #5, resolved) | `{"user_id","to_address","asset_id","amount","chain_id"}` | `{"signed_raw_tx"}` | Needed for the Sweep step: `deposit-flow.md` invariant #6 ("signed by the user's own derived key... `sweeper` asks for the signature, it never holds or derives the key itself") and its Sweep diagram (`Sweeper->>Wallet: sign(from=user address, to=Hot Wallet, ...)`). This is a **second, distinct signing capability** from the Hot Wallet one above, deliberately: the caller picks *which user key* signs (Sweep's whole job) but **never picks the destination** — `wallet-service` must enforce server-side that the destination is always the Hot Wallet, never trusting the caller's `to_address` for this endpoint. Now a standing invariant: `deposit-flow.md` invariant #7. |
+| `POST /v1/sign/hot-wallet` | **PROPOSED HERE** — path is invented; the *contract* (fields + no-caller-chosen-key constraint) is decided; the gas-construction approach below is **PROPOSED, pending Tech Lead sign-off** (new, see Open Questions #11) | `{"to_address","asset_id","amount","chain_id","idempotency_key"}`. **Decided** (Tech Lead review): `idempotency_key` is required — the same key the Withdrawal Request already carries throughout its lifecycle for that caller (`withdrawal-flow.md`, Ubiquitous language > *Withdrawal Request*), or the caller-specific PROPOSED key for the other two callers (see §3, §4). **PROPOSED HERE**, pending sign-off (Open Questions #11): no gas-parameter field at all — `wallet-service` is proposed to construct the transaction itself (fetch gas price, estimate gas limit) via its own EVM RPC client, rather than accept a caller-supplied gas price/limit. An optional `max_gas_price` field (a caller-supplied safety **ceiling**, never a dictated price) is also **PROPOSED**, as a separate yes/no from the construction-ownership question — see Open Questions #11. | `{"signed_raw_tx","nonce"}` (hex tx, integer nonce). **Decided:** `nonce` is now part of the response — the caller needs it for its own state (e.g. `withdrawals.broadcast`'s payload already carries `nonce`, §1 above). On a **repeated call with an already-seen `idempotency_key`**, returns the *identical* stored `{signed_raw_tx, nonce}` instead of allocating/signing anything new — **Decided** (Tech Lead review, `withdrawal-flow.md` invariant #16): closes a lost-response gap where a retried call would otherwise claim a second nonce and strand the first, since EVM's strict per-account nonce ordering means the stranded nonce can never confirm. | Request shape + "no parameter that lets a caller pick a derivation index": `withdrawal-flow.md` invariant #5. Nonce allocation happens inside this call, atomically: invariant #6. Idempotency-per-key requirement: invariant #16 (new). Gas-construction proposal and the `max_gas_price` option: this doc's Open Questions #11, `withdrawal-flow.md` Open Questions #8. Task table's shorthand path `POST /sign`: `docs/IMPLEMENTATION_PLAN.md` task 0.3 — not itself a design doc, cited for continuity only. |
+| `POST /v1/sign/user-address` | **Decided: approved as proposed** (Open Questions #5, resolved) | `{"user_id","to_address","asset_id","amount","chain_id"}` | `{"signed_raw_tx"}` | Needed for the Sweep step: `deposit-flow.md` invariant #6 ("signed by the user's own derived key... `sweeper` asks for the signature, it never holds or derives the key itself") and its Sweep diagram (`Sweeper->>Wallet: sign(from=user address, to=Hot Wallet, ...)`). This is a **second, distinct signing capability** from the Hot Wallet one above, deliberately: the caller picks *which user key* signs (Sweep's whole job) but **never picks the destination** — `wallet-service` must enforce server-side that the destination is always the Hot Wallet, never trusting the caller's `to_address` for this endpoint. Now a standing invariant: `deposit-flow.md` invariant #7. **No idempotency key on this endpoint** — unchanged by this round of fixes; it stays idempotent-by-construction via `deposit-flow.md` invariants #8/#10 (`sweeper` always re-reads the live balance before signing), not by key, since a retried call naturally signs whatever's actually left rather than a stale amount. **The user address's own EVM nonce for this call is sourced by `wallet-service` via a live `eth_getTransactionCount(address, "pending")` RPC read at signing time — PROPOSED, `deposit-flow.md` invariant #12** — a different, simpler mechanism than the Hot Wallet's DB-allocated counter (invariant #6 above), justified there by the fact a user address never has two concurrent outbound signers the way the Hot Wallet does. |
 
-Both `/v1/sign/*` endpoints: **mTLS**, per `withdrawal-flow.md` Open
-Questions #2 ("Decided (PR #1): mTLS").
+**Both `/v1/sign/*` endpoints: mTLS**, per `withdrawal-flow.md` Open
+Questions #2 ("Decided (PR #1): mTLS"). **Which caller's certificate is
+allowed on which endpoint — the CN-based authorization policy that
+makes this mTLS decision actually enforce anything by identity, plus
+the CA/certificate-issuance design behind it — is now a fully specified,
+separate doc: `docs/design/service-auth-mtls.md`.** Concretely (see that
+doc's Authorization matrix): `POST /v1/sign/hot-wallet` accepts client
+certs with `CN=withdrawal-service` or `CN=sweeper`; `POST
+/v1/sign/user-address` accepts `CN=sweeper` only —
+`withdrawal-service`'s certificate is never on that second endpoint's
+allow-list. `wallet-service`'s deposit-address endpoints below are also
+**PROPOSED** (`service-auth-mtls.md` Open Questions #4) to move behind
+the same mTLS listener with `CN=api-gateway` required, for consistency —
+not yet decided, since it touches already-shipped code.
 
 **Note (post-`identity-auth.md`):** the `{userID}` in
 `POST/GET /v1/users/{userID}/deposit-address` and the `user_id` fields
@@ -239,7 +251,7 @@ param (`identity-auth.md` invariants #3, #4). Missing/invalid header →
 
 | Endpoint | Request | Response | Cites |
 |---|---|---|---|
-| `POST /v1/ledger/transactions` (**PROPOSED HERE** — path invented; **transport decided: REST**, resolving Open Questions #7) | `{"idempotency_key","source_type","entries":[{"account_ref":"user"\|"chain","user_id"?,"asset_id","amount"}]}` | `{"status":"applied"\|"already_applied"}` or `422 {"status":"insufficient_funds"}` | Operation semantics and the exact accept/reject/no-op branches: `ledger.md`'s `apply()` sequence diagram — the diagram itself only draws `Producer->>Ledger: apply(idempotency_key, entries[])` as a generic arrow, never stating whether this is REST, gRPC, or something else. Sum-to-zero enforcement: `ledger.md` invariant #2. Idempotent replay: invariant #3. Transport: **Decided — REST**, matching `wallet-service`'s already-implemented convention. |
+| `POST /v1/ledger/transactions` (**PROPOSED HERE** — path invented; **transport decided: REST**, resolving Open Questions #7) | `{"idempotency_key","source_type","entries":[{"account_ref":"user"\|"chain","user_id"?,"asset_id","amount"}]}` | `{"status":"applied"\|"already_applied"}` or `422 {"status":"insufficient_funds"}` | Operation semantics and the exact accept/reject/no-op branches: `ledger.md`'s `apply()` sequence diagram — the diagram itself only draws `Producer->>Ledger: apply(idempotency_key, entries[])` as a generic arrow, never stating whether this is REST, gRPC, or something else. Sum-to-zero enforcement: `ledger.md` invariant #2. Idempotent replay: invariant #3. Transport: **Decided — REST**, matching `wallet-service`'s already-implemented convention. **Auth: PROPOSED** — same mTLS + CN-authorization mechanism as `wallet-service`'s signing endpoints, restricted to `CN=withdrawal-service` only; see `docs/design/service-auth-mtls.md` invariant #7 and its Authorization matrix. Not yet built (ledger-service doesn't exist yet) — recommended to be built in from the start at Milestone 1 rather than retrofitted. |
 
 ---
 
@@ -253,15 +265,22 @@ on top of it (`ledger-service`'s `apply()`, which none of the docs call
 out as an exception to the Kafka-only rule but which is drawn as a
 direct call in every sequence diagram that uses it).
 
+**Auth column note:** "mTLS" below means "decided, per
+`withdrawal-flow.md` Open Questions #2." Which CN is authorized for
+each row, the CA behind it, and the enforcement mechanism inside the
+receiving service are now specified in one place:
+`docs/design/service-auth-mtls.md` — cited per-row below instead of
+repeating the detail on every line.
+
 | Caller | Callee | Call | Auth | Constraint | Cites |
 |---|---|---|---|---|---|
-| `withdrawal-service` | `wallet-service` | `POST /v1/sign/hot-wallet` `{to_address, asset_id, amount, chain_id}` → `{signed_raw_tx}` | mTLS | Hot Wallet only; **no caller-chosen key** — the request has no field that could select a derivation index, capping blast radius at "can spend from the Hot Wallet" even if `withdrawal-service` is fully compromised | `withdrawal-flow.md` invariant #5, diagram |
-| `sweeper` | `wallet-service` | `POST /v1/sign/hot-wallet` — for **Gas Top-Up** (Hot Wallet → user address) | mTLS | Same Hot Wallet endpoint/constraint as above; only the destination varies | `deposit-flow.md` Sweep diagram, `Sweeper->>Wallet: sign(from=Hot Wallet, to=user address, amount=gas top-up)` |
-| `sweeper` | `wallet-service` | `POST /v1/sign/user-address` — for the **Sweep** itself (user address → Hot Wallet) | mTLS | Signs as the specified user's derived key — this one *does* let the caller pick which key, by design (Sweep's whole job). **Decided (Open Questions #5, resolved): `wallet-service` enforces `to_address == Hot Wallet` server-side, never trusting the caller** — bounds this endpoint's blast radius the same way invariant #5 does for the other one. | `deposit-flow.md` invariants #6, #7; Sweep diagram |
-| `withdrawal-service` (sweep-monitor loop) | `wallet-service` | `POST /v1/sign/hot-wallet` — for **Treasury Sweep** (Hot Wallet → Warm) | mTLS | Same Hot Wallet endpoint; destination is the Warm address instead of an external one | `wallet-tiering.md` diagram, `Monitor->>Wallet: sign(to=Warm address, ...)` |
-| `withdrawal-service` | `ledger-service` | `POST /v1/ledger/transactions` (`apply`) — for the Reservation, and again (with the `{idempotency_key}:refund` key) for a Compensating Entry | **Decided: REST** (Open Questions #7, resolved) | Idempotent — see §4 | `ledger.md` `apply()` diagram; `withdrawal-flow.md` invariants #1, #3 |
-| `api-gateway` | `wallet-service` | Proxies `GET/POST /v1/users/{userID}/deposit-address` | Not specified for this internal hop itself (no mTLS documented here, unlike the `/v1/sign/*` endpoints) — but the general "who can be trusted to call this" gap is resolved: the `userID`/`user_id` this call carries is now always the one `api-gateway` resolved from the caller's `Authorization: Bearer <api_key>` (`identity-auth.md` invariants #3-#5), never a value asserted by the external client directly. See Open Questions #8, resolved. | Pass-through | `docs/IMPLEMENTATION_PLAN.md` task 2.5 |
-| `api-gateway` | `ledger-service`, `history-service`, `withdrawal-service` | Proxies balance/history/withdrawal/whitelist endpoints in §2 | Not specified for this internal hop itself (same caveat as above — no mTLS documented for it) — but the `user_id` each of these calls carries is now always the `api-gateway`-authenticated one, never client-supplied (`identity-auth.md` invariants #3-#5). See Open Questions #8, resolved. | Pass-through | `docs/ARCHITECTURE.md` `api-gateway` row: "Talks to: all of the above" |
+| `withdrawal-service` | `wallet-service` | `POST /v1/sign/hot-wallet` `{to_address, asset_id, amount, chain_id, idempotency_key}` → `{signed_raw_tx, nonce}` | mTLS — client cert `CN=withdrawal-service`, on this endpoint's allow-list (`service-auth-mtls.md` Authorization matrix) | Hot Wallet only; **no caller-chosen key** — the request has no field that could select a derivation index, capping blast radius at "can spend from the Hot Wallet" even if `withdrawal-service` is fully compromised. **`idempotency_key` = the Withdrawal Request's own `idempotency_key`** (unchanged, reused as-is — not minted fresh per call). A repeated call with this key (e.g. after a lost response) gets back the identical `{signed_raw_tx, nonce}`, never a second nonce. | `withdrawal-flow.md` invariants #5, #16, diagram; CN-authorization enforcement: `service-auth-mtls.md` invariants #2, #4 |
+| `sweeper` | `wallet-service` | `POST /v1/sign/hot-wallet` `{to_address, asset_id, amount, chain_id, idempotency_key}` → `{signed_raw_tx, nonce}` — for **Gas Top-Up** (Hot Wallet → user address) | mTLS — client cert `CN=sweeper`, also on this endpoint's allow-list | Same Hot Wallet endpoint/constraint as above; only the destination varies. **`idempotency_key` = `gas-topup:{chain_id}:{tx_hash}:{log_index}` — PROPOSED** (`deposit-flow.md` invariant #13), deterministically derived from the triggering deposit's own natural key (namespaced with a `gas-topup:` prefix so it can never collide with that deposit's ledger-side idempotency key). | `deposit-flow.md` Sweep diagram, invariant #13 (new); `withdrawal-flow.md` invariant #16; `service-auth-mtls.md` Authorization matrix |
+| `sweeper` | `wallet-service` | `POST /v1/sign/user-address` — for the **Sweep** itself (user address → Hot Wallet) | mTLS — client cert `CN=sweeper` **only**; `withdrawal-service`'s certificate is explicitly **not** on this endpoint's allow-list (`service-auth-mtls.md` invariant #4) — this is what makes invariant #7's "no caller-chosen key" argument for this endpoint actually enforced, not just a request-shape convention | Signs as the specified user's derived key — this one *does* let the caller pick which key, by design (Sweep's whole job). **Decided (Open Questions #5, resolved): `wallet-service` enforces `to_address == Hot Wallet` server-side, never trusting the caller.** No idempotency key on this call — stays idempotent-by-construction (fresh balance read before signing, `deposit-flow.md` invariants #8/#10), unaffected by this round of fixes. **The user address's nonce for this call is sourced by `wallet-service` via a live `eth_getTransactionCount(address, "pending")` RPC read — PROPOSED** (`deposit-flow.md` invariant #12), not a DB-tracked counter. | `deposit-flow.md` invariants #6, #7, #12 (new); Sweep diagram; `service-auth-mtls.md` invariants #2, #4 |
+| `withdrawal-service` (sweep-monitor loop) | `wallet-service` | `POST /v1/sign/hot-wallet` `{to_address, asset_id, amount, chain_id, idempotency_key}` → `{signed_raw_tx, nonce}` — for **Treasury Sweep** (Hot Wallet → Warm) | mTLS — same `CN=withdrawal-service` certificate as `withdrawal-service`'s other calls to this endpoint (it's the same service/process, not a separate identity) | Same Hot Wallet endpoint; destination is the Warm address instead of an external one. **`idempotency_key` = a fresh UUID minted once per Treasury Sweep Attempt row, reused across retries until that sweep broadcasts — PROPOSED** (`wallet-tiering.md` invariant #6), since a Treasury Sweep has no pre-existing client request to derive a key from the way a withdrawal or a gas top-up does. | `wallet-tiering.md` invariant #6 (new), diagram; `service-auth-mtls.md` Authorization matrix |
+| `withdrawal-service` | `ledger-service` | `POST /v1/ledger/transactions` (`apply`) — for the Reservation, and again (with the `{idempotency_key}:refund` key) for a Compensating Entry | **Decided: REST** (Open Questions #7, resolved). **Auth: PROPOSED** — mTLS, client cert `CN=withdrawal-service` only, same mechanism as `wallet-service`'s endpoints, extended here for consistency (`service-auth-mtls.md` invariant #7) — not yet built, since `ledger-service` doesn't exist yet | Idempotent — see §4 | `ledger.md` `apply()` diagram; `withdrawal-flow.md` invariants #1, #3; `service-auth-mtls.md` invariant #7 |
+| `api-gateway` | `wallet-service` | Proxies `GET/POST /v1/users/{userID}/deposit-address` | **PROPOSED** — mTLS, client cert `CN=api-gateway`, deferred (`service-auth-mtls.md` Open Questions #4): the general "who can be trusted to call this" question is already resolved at the *user-identity* level (the `userID`/`user_id` this call carries is always the one `api-gateway` resolved from the caller's `Authorization: Bearer <api_key>`, `identity-auth.md` invariants #3-#5), but at the *service-identity* level this hop still has no client-cert check today, unlike the `/v1/sign/*` endpoints | Pass-through | `docs/IMPLEMENTATION_PLAN.md` task 2.5; `service-auth-mtls.md` Authorization matrix and Open Questions #4 |
+| `api-gateway` | `ledger-service`, `history-service`, `withdrawal-service` | Proxies balance/history/withdrawal/whitelist endpoints in §2 | **PROPOSED** — same as the row above: mTLS with `CN=api-gateway`, applicable once each specific downstream endpoint is actually designed (several are still GAP/PROPOSED HERE, §2) — `service-auth-mtls.md` deliberately doesn't invent those paths just to attach a CN rule to them yet | Pass-through | `docs/ARCHITECTURE.md` `api-gateway` row: "Talks to: all of the above"; `service-auth-mtls.md` Authorization matrix |
 
 ---
 
@@ -276,8 +295,8 @@ direct call in every sequence diagram that uses it).
 | `withdrawals.confirmed` | `idempotency_key` | Same |
 | `transfers.internal` | **GAP** — not designed | — |
 | `POST /v1/withdrawals` | `idempotency_key`, client-supplied in the request body | `UNIQUE(idempotency_key)` on `withdrawal_requests`, `INSERT ... ON CONFLICT DO NOTHING`, `withdrawal-flow.md` invariant #11 |
-| `POST /v1/sign/hot-wallet` | **None at the endpoint itself.** Every call allocates a fresh nonce (invariant #6). What prevents a double-spend is the *caller's* state machine: `withdrawal-service` only calls this once per request, guarded by `status='signing' WHERE status='reserved'` (invariant #2) | `withdrawal-flow.md` invariants #2, #6 |
-| `POST /v1/sign/user-address` (Sweep) | **None; idempotent by construction instead of by key** — `sweeper` always re-reads the address's live balance immediately before signing (invariant #10), so a retried call signs whatever's actually left (near-zero after a successful earlier attempt), never a stale amount | `deposit-flow.md` invariants #8, #10 |
+| `POST /v1/sign/hot-wallet` | **Decided (Tech Lead review): required, per-caller.** `wallet-service` persists `(idempotency_key -> nonce, signed_raw_tx)`; a repeated call with the same key returns the identical stored result instead of allocating a new nonce — closes a lost-response gap invariant #2/#6 alone didn't cover (a lost response followed by a retry would otherwise strand a nonce forever, the same failure shape as a Nonce Gap but from a different cause). Three distinct callers, three key sources: (1) `withdrawal-service` → the Withdrawal Request's own `idempotency_key`, unchanged/reused (`withdrawal-flow.md`, Ubiquitous language); (2) `sweeper` (Gas Top-Up) → **PROPOSED** `gas-topup:{chain_id}:{tx_hash}:{log_index}`, derived from the triggering deposit's natural key (`deposit-flow.md` invariant #13); (3) `withdrawal-service` sweep-monitor (Treasury Sweep) → **PROPOSED** a fresh UUID minted once per Treasury Sweep Attempt row and reused across retries (`wallet-tiering.md` invariant #6). | `withdrawal-flow.md` invariant #16 (new); `deposit-flow.md` invariant #13 (new, PROPOSED); `wallet-tiering.md` invariant #6 (new, PROPOSED) |
+| `POST /v1/sign/user-address` (Sweep) | **None; idempotent by construction instead of by key** — `sweeper` always re-reads the address's live balance immediately before signing (invariant #10), so a retried call signs whatever's actually left (near-zero after a successful earlier attempt), never a stale amount. Unchanged by this round of fixes — Gap 1's idempotency-key requirement was scoped to `/v1/sign/hot-wallet`'s three callers only, not this endpoint. | `deposit-flow.md` invariants #8, #10 |
 | `POST /v1/ledger/transactions` (`apply`) | `idempotency_key` (deposit: `(chain_id, tx_hash, log_index)`; withdrawal/refund: client/`withdrawal-service`-supplied key, `{idempotency_key}:refund` for compensations) | `ledger_transactions.idempotency_key` unique, `ON CONFLICT DO NOTHING`, `ledger.md` invariant #3; refund key derivation: `withdrawal-flow.md`, Ubiquitous language > *Compensating Entry* |
 | `POST /v1/whitelist` | **Decided:** `UNIQUE(user_id, address)` — re-adding an already-`pending`/`active` entry no-ops rather than erroring or restarting its cooldown (Open Questions #10, resolved) | `whitelist_entries` unique constraint; now also `withdrawal-flow.md` invariant #15 |
 | `DELETE /v1/whitelist/{id}` | Naturally idempotent — deleting a non-existent id is a no-op, not an error | — |
@@ -369,7 +388,10 @@ direct call in every sequence diagram that uses it).
    enforce server-side that `/v1/sign/user-address`'s destination is
    always the Hot Wallet — never trust the caller's `to_address` for
    this endpoint. This is now a standing invariant, not just a note in
-   this doc: `deposit-flow.md` invariant #7.
+   this doc: `deposit-flow.md` invariant #7. **Which caller's
+   certificate may reach which of these two endpoints at all** was a
+   separate, still-open gap until now — closed by
+   `docs/design/service-auth-mtls.md`.
 6. ~~**No documented way to poll a Withdrawal Request's status after the
    initial `POST /v1/withdrawals` response.** `withdrawal-flow.md`
    explicitly decided the response returns quickly rather than blocking
@@ -414,7 +436,11 @@ direct call in every sequence diagram that uses it).
    authenticated value `api-gateway` supplies — never a value an
    external client could assert directly, since only `api-gateway` is
    reachable from outside the deployment (`identity-auth.md` invariant
-   #5).
+   #5). **Note this resolves *user*-identity trust for these calls, a
+   separate question from *service*-identity trust (which service
+   process is making the call) — the latter is what
+   `docs/design/service-auth-mtls.md` now covers, including for these
+   same `api-gateway` hops (PROPOSED, see §3 above).**
 9. ~~**`amount` as a decimal string on the wire, not a JSON number.**
    `ledger.md`'s schema stores amounts as Postgres `bigint` (fits
    int64), but that's a *storage* choice, not a wire-format one, and it
@@ -438,3 +464,47 @@ direct call in every sequence diagram that uses it).
     **Decided: `UNIQUE(user_id, address)`.** Re-adding an existing
     pending/active entry no-ops rather than erroring or restarting its
     cooldown. Now also stated in `withdrawal-flow.md` as invariant #15.
+11. **PROPOSED, pending Tech Lead sign-off: `wallet-service` owns full
+    EVM transaction construction for `/v1/sign/hot-wallet`, gaining its
+    own EVM RPC client.** Raised by Tech Lead review of tasks 0.3/0.4.
+    Previously the request shape (`{to_address, asset_id, amount,
+    chain_id}`) had no gas parameters and no doc said how they'd be
+    sourced — a real, unresolved question, not an oversight to paper
+    over. Two options: (a) **recommended here** — `wallet-service`
+    fetches current gas price and estimates gas limit itself via a new
+    EVM testnet RPC dependency (Sepolia, per `deposit-flow.md`'s chain
+    choice), so the caller supplies business intent only
+    (`to_address, asset_id, amount, chain_id, idempotency_key`) and can
+    never influence how the tx is built — consistent with invariant #5's
+    existing "caller can't pick a derivation index" spirit, extended to
+    "caller can't pick the gas price either"; or (b) the caller
+    (`withdrawal-service`/`sweeper`) estimates gas itself and passes
+    fully-specified gas parameters for `wallet-service` to sign as
+    given — architecturally simpler, no new RPC dependency for
+    `wallet-service`, but weakens that security property and duplicates
+    gas-estimation logic across every caller. Recommending (a).
+    `docs/ARCHITECTURE.md`'s `wallet-service` row has been updated to
+    list "EVM testnet RPC" as a dependency, flagged there as PROPOSED —
+    this is a real addition to that service's footprint (today it's
+    Postgres + Redis only), not something to silently assume. **Also
+    open, as a separate yes/no within this same proposal:** whether to
+    accept an optional caller-supplied `max_gas_price` field as a safety
+    ceiling (bounds cost exposure without dictating the actual price
+    used) — recommending yes, since it costs little and gives callers a
+    lever without reopening who controls tx construction, but flagging
+    it as separable in case you'd rather keep v1's request minimal and
+    defer this to the observability phase. See `withdrawal-flow.md`
+    invariant #5 and Open Questions #8 for the same flag from that doc's
+    side.
+12. **New, from `docs/design/service-auth-mtls.md`: which internal hops
+    get CN-based authorization enforcement now vs. later.** That doc
+    recommends `wallet-service`'s two `/v1/sign/*` endpoints ship the
+    CN check immediately (this is what the two flow docs' blast-radius
+    arguments depend on); `ledger-service`'s `apply()` gets the same
+    treatment built in at Milestone 1 (not retrofitted); and every
+    `api-gateway → *` proxied hop gets it only once each specific
+    downstream endpoint is itself designed (several are still
+    GAP/PROPOSED HERE in §2 above). Flagging here too since it directly
+    affects this doc's own §3 Auth column, several of whose rows are now
+    marked PROPOSED rather than silently assumed. See that doc's Open
+    Questions #1-#5 for the specific decisions still pending.

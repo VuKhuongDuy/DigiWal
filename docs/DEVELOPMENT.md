@@ -14,7 +14,7 @@ talk to Sepolia — only the RPC URL and Confirmation Depth config change
 between environments (both are already config values in the design
 docs, never hardcoded).
 
-## Install
+## Install (for `cast`/`forge` — still used locally even though `anvil` itself runs in Docker below)
 
 ```bash
 curl -L https://foundry.paradigm.xyz | bash
@@ -23,14 +23,36 @@ foundryup
 
 ## Run a local node
 
+Anvil now runs as a proper `infra/docker-compose.yml` service (the
+`ghcr.io/foundry-rs/foundry` image, whose CLI entrypoint runs `anvil`
+directly) instead of a manually-run separate process — this keeps the
+local chain reproducible and scriptable, matching how e2e tests
+(`docs/IMPLEMENTATION_PLAN.md` tasks 2.6, 3.8) need to bring it up and
+tear it down the same way as every other infra dependency:
+
 ```bash
-anvil
+docker compose -f infra/docker-compose.yml up anvil
 ```
 
-Defaults: RPC at `http://127.0.0.1:8545`, chain id `31337`, 10
-pre-funded accounts with 10,000 ETH each (private keys printed to
-stdout on startup) — usually enough on its own without needing to mint
-more.
+(or just `docker compose -f infra/docker-compose.yml up` to bring up
+the whole stack, which now includes `anvil` alongside postgres/redis/
+kafka/mongo/prometheus/grafana).
+
+Same defaults as running `anvil` directly: RPC at `http://127.0.0.1:8545`
+(published from the container), chain id `31337`, 10 pre-funded accounts
+with 10,000 ETH each (private keys printed to the container's stdout on
+startup — `docker compose logs anvil` to see them) — usually enough on
+its own without needing to mint more. State is in-memory and ephemeral
+by design: `docker compose down`/restarting the `anvil` service gives
+you a fresh chain, which is what the snapshot/revert workflow below
+already assumes.
+
+If you don't want the dependency on Docker for a quick one-off session,
+running Anvil directly still works exactly as before (`foundryup` once,
+then `anvil` in a terminal) — just make sure nothing else is bound to
+`8545` if you also have the compose service running. The rest of this
+doc (the `cast` walkthroughs, snapshot/revert) is identical either way,
+since both put Anvil at the same `localhost:8545`.
 
 Point any service at it the same way you'd point it at Sepolia:
 

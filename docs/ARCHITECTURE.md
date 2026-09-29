@@ -30,7 +30,7 @@ you instead of letting you fake them:
 
 | Service | Responsibility | Talks to |
 |---|---|---|
-| `wallet-service` | Holds ≥2 sealed HD seeds (encrypted at rest): one derives every user's deposit address (BIP44 `m/44'/60'/0'/0/{index}`), a separate one is the Hot Wallet's signing key — kept apart so a compromised `wallet-service` process can never expose both at once. Signs outgoing transactions (withdrawals, Sweep, Gas Top-Up) on request; never exposes private keys. Warm/Cold tier keys live outside this service entirely (see `docs/design/wallet-tiering.md`). | Postgres (wallets, addresses, sealed seeds), Redis (address-set cache) |
+| `wallet-service` | Holds ≥2 sealed HD seeds (encrypted at rest): one derives every user's deposit address (BIP44 `m/44'/60'/0'/0/{index}`), a separate one is the Hot Wallet's signing key — kept apart so a compromised `wallet-service` process can never expose both at once. Signs outgoing transactions (withdrawals, Sweep, Gas Top-Up) on request; never exposes private keys. Warm/Cold tier keys live outside this service entirely (see `docs/design/wallet-tiering.md`). | Postgres (wallets, addresses, sealed seeds), Redis (address-set cache), **EVM testnet RPC — PROPOSED, pending Tech Lead sign-off** (gas price/limit estimation so `wallet-service` can construct outgoing transactions itself instead of trusting caller-supplied gas parameters, and to source a user address's live nonce for Sweep signing; see `docs/design/integration-contracts.md` §2 Open Questions #11 and `docs/design/deposit-flow.md` invariant #12) |
 | `chain-watcher` | Polls/subscribes to the EVM testnet RPC, checks incoming transfers against the known-address set, waits for confirmations, emits deposit events. Purely an observer — never signs or broadcasts. | Redis (address lookup), Postgres (watermark, observed transfers), Kafka (producer) |
 | `sweeper` | Consumes confirmed deposits, tops up a user's deposit address with gas when its native balance can't cover it, then sweeps the deposit to the Hot Wallet. Signs via `wallet-service`; holds no key material of its own. See `docs/design/deposit-flow.md`. | `wallet-service` (sign, mTLS), EVM testnet RPC (broadcast), Kafka (consumer) |
 | `ledger-service` | Source of truth for balances. Double-entry bookkeeping in Postgres. Consumes deposit/withdrawal/transfer events idempotently (dedupe by tx hash + log index, or a client-supplied idempotency key for internal transfers). | Postgres (ledger), Kafka (consumer + producer) |
@@ -78,6 +78,15 @@ system where sloppy key handling is the whole point of the lesson:
 - Each mnemonic is shown exactly once, at generation time, to stdout —
   simulating "write this down and put it in a safe" — and is never
   returned by any API afterward.
+- **Internal service-to-service calls that need mTLS** (`wallet-service`'s
+  `/v1/sign/*` endpoints today; `ledger-service`'s `apply()` and other
+  internal hops as PROPOSED extensions) are backed by a small,
+  project-owned local CA and per-service client certificates whose
+  Common Name is checked against a per-endpoint allow-list before any
+  request is processed — mTLS alone ("some cert the server trusts") was
+  not enough to cap blast radius by *which* service is calling. Full
+  CA/issuance/rotation design and the CN-authorization mechanism:
+  `docs/design/service-auth-mtls.md`.
 - Testnet only. No real funds, ever. If you later want to point this at
   a real chain, that's a much bigger conversation about HSMs, multi-sig,
   withdrawal review queues, and key ceremony — out of scope here.
