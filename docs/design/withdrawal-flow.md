@@ -25,6 +25,12 @@ gains a signing endpoint. That's a real widening of its trust boundary
 funds on request — so the invariants below treat it as seriously as the
 existing key-custody design does.
 
+**Depends on `identity-auth.md`**: every `user_id` referenced below is
+the authenticated caller's, resolved by `api-gateway` from an API Key —
+never a client-supplied field. This doc assumed that dependency existed
+before `identity-auth.md` actually specified it (see former Open
+Question #7).
+
 ## Ubiquitous language
 
 - **Withdrawal Request** — one user ask to send `amount` of `asset` to
@@ -213,7 +219,8 @@ sequenceDiagram
     participant RPC as EVM testnet RPC
     participant Kafka
 
-    Gateway->>WD: POST /withdrawals<br/>{idempotency_key, user_id, asset, amount, to_address}
+    Note over Gateway: Authorization: Bearer <api_key> already resolved<br/>to an authenticated user_id — identity-auth.md
+    Gateway->>WD: POST /withdrawals<br/>{idempotency_key, user_id, asset, amount, to_address}<br/>user_id is server-injected, never client-supplied
     WD->>WD: INSERT withdrawal_requests (idempotency_key, ...)<br/>ON CONFLICT (idempotency_key) DO NOTHING
     alt row already existed (duplicate request)
         WD->>WD: read back existing row
@@ -278,6 +285,7 @@ sequenceDiagram
     participant Gateway as api-gateway
     participant WD as withdrawal-service
 
+    Note over Gateway: user_id resolved from Authorization header — identity-auth.md
     Gateway->>WD: add whitelist entry (user_id, address)
     WD->>WD: INSERT whitelist_entries (status=pending, added_at=now())
     Note over WD: not usable for withdrawal yet
@@ -395,9 +403,9 @@ sequenceDiagram
    whitelist page. Do you want a minimal notification mechanism in
    scope now, or accept this as a known gap until `history-service`/
    notifications exist?
-7. **How is "add a Whitelist Entry" itself authenticated?** This
-   project has no user-auth design yet at all (not even Withdrawal
-   Requests specify how `api-gateway` authenticates the caller) — so
-   this inherits that same, already-existing gap rather than being a
-   new one. Flagging so it's not mistaken for solved just because
-   whitelist entries now exist.
+7. ~~How is "add a Whitelist Entry" itself authenticated?~~ **Decided,
+   resolved:** see `identity-auth.md` — every `api-gateway` request
+   (whitelist management included) now requires a valid API Key, and
+   `user_id` is server-injected from it, never client-supplied. This
+   was flagged as inherited from a project-wide gap; that gap is what
+   `identity-auth.md` closes.
