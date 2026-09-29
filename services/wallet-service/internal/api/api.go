@@ -30,11 +30,24 @@ func NewServer(store *storage.Store, cache *storage.Cache, signer Signer) *Serve
 	return &Server{store: store, cache: cache, signer: signer}
 }
 
+// Routes is the plain-HTTP listener: /healthz (exempt from client certs,
+// service-auth-mtls.md invariant #8) plus the already-shipped
+// deposit-address endpoints. Moving those behind the mTLS listener with
+// CN=api-gateway is service-auth-mtls.md Open Question #4 — pending Tech
+// Lead's answer, so their behavior is unchanged for now.
 func (s *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 	mux.HandleFunc("POST /v1/users/{userID}/deposit-address", s.handleCreateOrGetDepositAddress)
 	mux.HandleFunc("GET /v1/users/{userID}/deposit-address", s.handleCreateOrGetDepositAddress)
+	return mux
+}
+
+// MTLSRoutes is the mTLS listener's mux: every endpoint here is wrapped in
+// authz.Require with its own CN allow-list before any handler logic runs.
+// The signing endpoints register here (tasks 0.3 and 0.5).
+func (s *Server) MTLSRoutes() http.Handler {
+	mux := http.NewServeMux()
 	return mux
 }
 

@@ -464,7 +464,7 @@ repeating the detail on every line.
     **Decided: `UNIQUE(user_id, address)`.** Re-adding an existing
     pending/active entry no-ops rather than erroring or restarting its
     cooldown. Now also stated in `withdrawal-flow.md` as invariant #15.
-11. **PROPOSED, pending Tech Lead sign-off: `wallet-service` owns full
+11. **Decided (Tech Lead): (a) + `max_gas_price` — `wallet-service` owns full
     EVM transaction construction for `/v1/sign/hot-wallet`, gaining its
     own EVM RPC client.** Raised by Tech Lead review of tasks 0.3/0.4.
     Previously the request shape (`{to_address, asset_id, amount,
@@ -496,6 +496,10 @@ repeating the detail on every line.
     defer this to the observability phase. See `withdrawal-flow.md`
     invariant #5 and Open Questions #8 for the same flag from that doc's
     side.
+    **Decision (Tech Lead, 2026-09-29): option (a), and yes to the optional
+    `max_gas_price` ceiling.** The remaining `PROPOSED` markers on
+    `/v1/sign/hot-wallet` for gas construction and `max_gas_price` in §2 are
+    now settled; the SA can drop them on the next pass.
 12. **New, from `docs/design/service-auth-mtls.md`: which internal hops
     get CN-based authorization enforcement now vs. later.** That doc
     recommends `wallet-service`'s two `/v1/sign/*` endpoints ship the

@@ -10,7 +10,13 @@ services:
       REDIS_ADDR: redis:6379
       # Set in .env (gitignored) — `make gen-key` creates one.
       MASTER_KEY_HEX: ${MASTER_KEY_HEX:?run 'make gen-key' first, see README}
-    ports: ["8080:8080"]
+      # mTLS listener for /v1/sign/* — certs from `make certs` (infra/pki).
+      TLS_CERT_FILE: /certs/cert.pem
+      TLS_KEY_FILE: /certs/key.pem
+      TLS_CA_FILE: /certs/ca-cert.pem
+    volumes:
+      - ../../infra/pki/out/wallet-service:/certs:ro
+    ports: ["8080:8080", "8443:8443"]
     depends_on:
       postgres:
         condition: service_healthy

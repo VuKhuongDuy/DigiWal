@@ -4,7 +4,7 @@
 # of the including file's, and breaks).
 COMPOSE = docker compose
 
-.PHONY: gen-key up init-seeds down logs test
+.PHONY: gen-key certs up init-seeds down logs test
 
 # Generates a fresh AES-256 key into .env (gitignored). Run once per
 # environment (local, staging, ...) — never reuse a key across them.
@@ -13,7 +13,14 @@ gen-key:
 	@echo "MASTER_KEY_HEX=$$(openssl rand -hex 32)" > .env
 	@echo "wrote .env"
 
-up:
+# Creates the project CA once (key stays in ~/.digiwal-ca, never in the repo or a
+# container) and issues the leaf certs the signing path uses. Safe to re-run:
+# an existing CA is kept, missing leaf certs are issued (delete infra/pki/out/<svc> to rotate). See docs/design/service-auth-mtls.md.
+certs:
+	@test -f "$${CA_DIR:-$$HOME/.digiwal-ca}/ca-key.pem" || ../../infra/pki/gen-ca.sh
+	@for svc in wallet-service withdrawal-service sweeper; do test -f ../../infra/pki/out/$$svc/cert.pem || ../../infra/pki/gen-leaf.sh $$svc; done
+
+up: certs
 	$(COMPOSE) up -d --build postgres redis wallet-service
 	@echo "waiting for wallet-service to be healthy..."
 	@until curl -sf http://localhost:8080/healthz > /dev/null; do sleep 1; done

@@ -20,6 +20,7 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	"digiwal/services/wallet-service/internal/api"
+	"digiwal/services/wallet-service/internal/authz"
 	"digiwal/services/wallet-service/internal/crypto"
 	"digiwal/services/wallet-service/internal/hdwallet"
 	"digiwal/services/wallet-service/internal/storage"
@@ -115,6 +116,23 @@ func runServer(ctx context.Context, store *storage.Store, sealer *crypto.Sealer)
 	}
 
 	server := api.NewServer(store, cache, signer)
+
+	// mTLS listener for /v1/sign/* (service-auth-mtls.md). Fail closed: without
+	// certs it simply isn't started, so nothing can be signed.
+	if certFile := os.Getenv("TLS_CERT_FILE"); certFile != "" {
+		tlsCfg, err := authz.ServerTLSConfig(certFile, requireEnv("TLS_KEY_FILE"), requireEnv("TLS_CA_FILE"))
+		if err != nil {
+			log.Fatalf("configuring mTLS: %v", err)
+		}
+		mtlsPort := envOr("MTLS_PORT", "8443")
+		srv := &http.Server{Addr: ":" + mtlsPort, Handler: server.MTLSRoutes(), TLSConfig: tlsCfg}
+		go func() {
+			log.Printf("wallet-service mTLS listening on :%s", mtlsPort)
+			log.Fatal(srv.ListenAndServeTLS("", ""))
+		}()
+	} else {
+		log.Println("WARNING: TLS_CERT_FILE not set — mTLS listener disabled, signing endpoints unavailable (run `make certs`)")
+	}
 
 	port := envOr("PORT", "8080")
 	log.Printf("wallet-service listening on :%s", port)

@@ -1,3 +1,6 @@
 go.work.sum
 bin/
 .env
+
+# Per-service leaf certs/keys (infra/pki/gen-leaf.sh). The CA key lives outside the repo.
+infra/pki/out/
