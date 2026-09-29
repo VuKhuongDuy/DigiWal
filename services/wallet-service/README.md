@@ -1,12 +1,12 @@
 # wallet-service
 
-Owns the sealed HD seed(s) for the DigiWal system. Today (phase 1):
-one seed, deriving one EVM deposit address per user
-(BIP44 `m/44'/60'/0'/0/{index}`). A second, separate seed for the Hot
-Wallet's signing key is coming in a later phase — see
-`docs/design/wallet-tiering.md` invariant #1 — deliberately never the
-same seed that derives user addresses, so one compromised seed can't
-expose both. See `../../docs/ARCHITECTURE.md` for how this fits into
+Owns the sealed HD seeds for the DigiWal system, one per role
+(`wallet_seeds` table): `user_derivation` derives one EVM deposit
+address per user (BIP44 `m/44'/60'/0'/0/{index}`); `hot_wallet` is the
+Hot Wallet's signing key (single address at index 0) — deliberately
+never the same seed (`docs/design/wallet-tiering.md` invariant #1).
+Schema is versioned under `migrations/` (golang-migrate) and applied on
+startup. Signing endpoints are not implemented yet (tasks 0.3+). See `../../docs/ARCHITECTURE.md` for how this fits into
 the rest of the system and the security reasoning behind the design.
 
 ## Running it
@@ -14,8 +14,9 @@ the rest of the system and the security reasoning behind the design.
 ```bash
 make gen-key             # writes a fresh AES-256 key to .env (once, per environment)
 make up                  # starts Postgres + Redis + this service
-make init-master-wallet  # generates the master wallet — RUN EXACTLY ONCE, EVER, PER ENVIRONMENT
-                          # prints the mnemonic to your terminal: write it down, it's never shown again
+make init-seeds         # generates the user_derivation + hot_wallet seeds — RUN EXACTLY ONCE, EVER, PER ENVIRONMENT
+                          # (or one at a time: make init-seed ROLE=hot_wallet)
+                          # prints each mnemonic to your terminal: write it down, it's never shown again
 make down
 ```
 

@@ -1,18 +1,21 @@
 // Command service is wallet-service. Two modes:
 //
-//	service -init-master-wallet   generate the one master seed, seal it, store it, print the
-//	                              mnemonic once, exit. Run this exactly once, ever.
-//	service                       normal mode: decrypt the sealed seed already in Postgres
-//	                              (using the same MASTER_KEY_HEX) and serve the HTTP API.
+//	service -init-seed <role>     generate the seed for <role> (user_derivation | hot_wallet),
+//	                              seal it, store it, print the mnemonic once, exit. Run this
+//	                              exactly once per role, ever, per environment.
+//	service                       normal mode: decrypt the sealed seeds already in Postgres
+//	                              (using MASTER_KEY_HEX) and serve the HTTP API.
 package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
+	"strings"
 
 	"github.com/redis/go-redis/v9"
 
@@ -23,7 +26,7 @@ import (
 )
 
 func main() {
-	initMasterWallet := flag.Bool("init-master-wallet", false, "generate + seal + store the master wallet seed, print the mnemonic once, then exit")
+	initSeed := flag.String("init-seed", "", "generate + seal + store the seed for this role (user_derivation|hot_wallet), print the mnemonic once, then exit")
 	flag.Parse()
 
 	ctx := context.Background()
@@ -40,15 +43,18 @@ func main() {
 	}
 	defer store.Close()
 
-	if *initMasterWallet {
-		runInit(ctx, store, sealer)
+	if *initSeed != "" {
+		if *initSeed != storage.RoleUserDerivation && *initSeed != storage.RoleHotWallet {
+			log.Fatalf("unknown seed role %q (want %s or %s)", *initSeed, storage.RoleUserDerivation, storage.RoleHotWallet)
+		}
+		runInit(ctx, store, sealer, *initSeed)
 		return
 	}
 
 	runServer(ctx, store, sealer)
 }
 
-func runInit(ctx context.Context, store *storage.Store, sealer *crypto.Sealer) {
+func runInit(ctx context.Context, store *storage.Store, sealer *crypto.Sealer, role string) {
 	mnemonic, err := hdwallet.NewMnemonic()
 	if err != nil {
 		log.Fatalf("generating mnemonic: %v", err)
@@ -57,12 +63,12 @@ func runInit(ctx context.Context, store *storage.Store, sealer *crypto.Sealer) {
 	if err != nil {
 		log.Fatalf("sealing mnemonic: %v", err)
 	}
-	if err := store.InitMasterWallet(ctx, sealed); err != nil {
-		log.Fatalf("storing master wallet: %v (if you meant to rotate it, that's not supported by this flag)", err)
+	if err := store.InitSeed(ctx, role, sealed); err != nil {
+		log.Fatalf("storing %s seed: %v (if you meant to rotate it, that's not supported by this flag)", role, err)
 	}
 
 	fmt.Println("=====================================================================")
-	fmt.Println(" MASTER WALLET CREATED. THIS MNEMONIC WILL NEVER BE SHOWN AGAIN.")
+	fmt.Printf(" %s SEED CREATED. THIS MNEMONIC WILL NEVER BE SHOWN AGAIN.\n", strings.ToUpper(role))
 	fmt.Println(" Write it down and store it offline. Anyone with this phrase can")
 	fmt.Println(" derive and spend from every address this system ever generates.")
 	fmt.Println("=====================================================================")
@@ -80,22 +86,32 @@ func runServer(ctx context.Context, store *storage.Store, sealer *crypto.Sealer)
 	cache := storage.NewCache(rdb)
 
 	var signer api.Signer
-	sealedSeed, err := store.SealedSeed(ctx)
+	userWallet, err := loadWallet(ctx, store, sealer, storage.RoleUserDerivation)
 	switch {
 	case err == nil:
-		mnemonic, err := sealer.Open(sealedSeed)
-		if err != nil {
-			log.Fatalf("decrypting master wallet seed (wrong MASTER_KEY_HEX?): %v", err)
-		}
-		signer, err = api.LoadOrInitSigner(ctx, string(mnemonic))
-		if err != nil {
-			log.Fatalf("loading master wallet: %v", err)
-		}
-		log.Println("master wallet loaded")
-	case err == storage.ErrNotFound:
-		log.Println("WARNING: no master wallet found — deposit-address requests will fail until you run with -init-master-wallet")
+		signer = userWallet
+		log.Println("user_derivation wallet loaded")
+	case errors.Is(err, storage.ErrNotFound):
+		log.Println("WARNING: no user_derivation seed found — deposit-address requests will fail until you run with -init-seed user_derivation")
 	default:
-		log.Fatalf("reading master wallet: %v", err)
+		log.Fatalf("loading user_derivation wallet: %v", err)
+	}
+
+	// The Hot Wallet is a separate seed (wallet-tiering.md invariant #1),
+	// one address at BIP44 index 0. Nothing signs with it yet (task 0.3);
+	// loading it here surfaces a wrong MASTER_KEY_HEX or corrupt seed at boot.
+	hotWallet, err := loadWallet(ctx, store, sealer, storage.RoleHotWallet)
+	switch {
+	case err == nil:
+		addr, err := hotWallet.AddressAt(0)
+		if err != nil {
+			log.Fatalf("deriving hot wallet address: %v", err)
+		}
+		log.Printf("hot_wallet wallet loaded, address %s", addr)
+	case errors.Is(err, storage.ErrNotFound):
+		log.Println("WARNING: no hot_wallet seed found — run with -init-seed hot_wallet before Hot Wallet signing is used")
+	default:
+		log.Fatalf("loading hot_wallet wallet: %v", err)
 	}
 
 	server := api.NewServer(store, cache, signer)
@@ -103,6 +119,21 @@ func runServer(ctx context.Context, store *storage.Store, sealer *crypto.Sealer)
 	port := envOr("PORT", "8080")
 	log.Printf("wallet-service listening on :%s", port)
 	log.Fatal(http.ListenAndServe(":"+port, server.Routes()))
+}
+
+// loadWallet decrypts the sealed seed for a role and builds an in-memory
+// wallet from it. Returns storage.ErrNotFound if the role's seed hasn't
+// been initialized yet.
+func loadWallet(ctx context.Context, store *storage.Store, sealer *crypto.Sealer, role string) (*hdwallet.Wallet, error) {
+	sealed, err := store.SealedSeed(ctx, role)
+	if err != nil {
+		return nil, err
+	}
+	mnemonic, err := sealer.Open(sealed)
+	if err != nil {
+		return nil, fmt.Errorf("decrypting %s seed (wrong MASTER_KEY_HEX?): %w", role, err)
+	}
+	return hdwallet.FromMnemonic(string(mnemonic))
 }
 
 func requireEnv(key string) string {

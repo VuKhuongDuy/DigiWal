@@ -4,7 +4,7 @@
 # of the including file's, and breaks).
 COMPOSE = docker compose
 
-.PHONY: gen-key up init-master-wallet down logs test
+.PHONY: gen-key up init-seeds down logs test
 
 # Generates a fresh AES-256 key into .env (gitignored). Run once per
 # environment (local, staging, ...) — never reuse a key across them.
@@ -19,14 +19,22 @@ up:
 	@until curl -sf http://localhost:8080/healthz > /dev/null; do sleep 1; done
 	@echo "up: http://localhost:8080"
 
-# Run exactly once per environment, after `make up` — see docs/ARCHITECTURE.md's
-# security notes. Prints the mnemonic to your terminal; write it down,
-# it is never shown again and never stored in plaintext. Restarts the
-# running service afterward so it picks up the now-available wallet
-# (it only checks once, at boot).
-init-master-wallet:
-	$(COMPOSE) run --rm wallet-service /usr/local/bin/service -init-master-wallet
+# Run exactly once per role per environment, after `make up` — see
+# docs/design/wallet-tiering.md invariant #1: the user_derivation seed and
+# the hot_wallet seed are separate. Each prints its mnemonic to your
+# terminal once; write it down, it is never shown again and never stored
+# in plaintext. Restarts the running service afterward so it picks up the
+# new seed (it only checks at boot).
+#   make init-seed ROLE=user_derivation
+#   make init-seed ROLE=hot_wallet
+init-seed:
+	@test -n "$(ROLE)" || (echo "usage: make init-seed ROLE=user_derivation|hot_wallet" && exit 1)
+	$(COMPOSE) run --rm wallet-service /usr/local/bin/service -init-seed $(ROLE)
 	$(COMPOSE) restart wallet-service
+
+init-seeds:
+	$(MAKE) init-seed ROLE=user_derivation
+	$(MAKE) init-seed ROLE=hot_wallet
 
 down:
 	$(COMPOSE) down
@@ -34,5 +42,7 @@ down:
 logs:
 	$(COMPOSE) logs -f wallet-service
 
+# Storage tests need a real Postgres: they start one via testcontainers
+# (Docker required), or use TEST_POSTGRES_DSN if set.
 test:
 	go test ./...

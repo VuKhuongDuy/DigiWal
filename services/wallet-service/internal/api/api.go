@@ -4,14 +4,12 @@
 package api
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"log"
 	"net/http"
 	"strings"
 
-	"digiwal/services/wallet-service/internal/hdwallet"
 	"digiwal/services/wallet-service/internal/storage"
 )
 
@@ -110,11 +108,4 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 
 func writeErr(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]string{"error": msg})
-}
-
-// LoadOrInitSigner loads the master wallet's decrypted seed into
-// memory, or returns storage.ErrNotFound if it hasn't been created yet
-// (see cmd/service's -init-master-wallet flag).
-func LoadOrInitSigner(_ context.Context, mnemonic string) (Signer, error) {
-	return hdwallet.FromMnemonic(mnemonic)
 }

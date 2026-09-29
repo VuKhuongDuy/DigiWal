@@ -1,6 +1,6 @@
-// Package storage is wallet-service's Postgres access layer: the one
-// master wallet row (encrypted seed + next derivation index) and the
-// per-user address assignments. This is the source of truth — Redis
+// Package storage is wallet-service's Postgres access layer: the sealed
+// seeds (one per role, plus the user-derivation index counter) and the
+// per-user address assignments. Schema lives in ../../migrations. This is the source of truth — Redis
 // only ever caches what's here.
 package storage
 
@@ -8,31 +8,26 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
+	"github.com/golang-migrate/migrate/v4"
+	_ "github.com/golang-migrate/migrate/v4/database/pgx/v5"
+	"github.com/golang-migrate/migrate/v4/source/iofs"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"digiwal/services/wallet-service/migrations"
 )
 
-const schema = `
-CREATE TABLE IF NOT EXISTS master_wallet (
-	id             INT PRIMARY KEY DEFAULT 1 CHECK (id = 1), -- singleton row
-	sealed_seed    BYTEA NOT NULL,
-	next_index     INT NOT NULL DEFAULT 0,
-	created_at     TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-
-CREATE TABLE IF NOT EXISTS wallet_addresses (
-	user_id          TEXT NOT NULL,
-	chain            TEXT NOT NULL DEFAULT 'evm',
-	derivation_index INT NOT NULL,
-	address          TEXT NOT NULL UNIQUE,
-	created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
-	PRIMARY KEY (user_id, chain)
-);
-`
+// Seed roles (wallet-tiering.md invariant #1): the seed deriving user
+// deposit addresses is never the Hot Wallet's key.
+const (
+	RoleUserDerivation = "user_derivation"
+	RoleHotWallet      = "hot_wallet"
+)
 
 var ErrNotFound = errors.New("not found")
-var ErrAlreadyInitialized = errors.New("master wallet already initialized")
+var ErrAlreadyInitialized = errors.New("seed already initialized")
 
 type Store struct {
 	pool *pgxpool.Pool
@@ -46,25 +41,54 @@ func Connect(ctx context.Context, dsn string) (*Store, error) {
 	if err := pool.Ping(ctx); err != nil {
 		return nil, fmt.Errorf("pinging postgres: %w", err)
 	}
-	if _, err := pool.Exec(ctx, schema); err != nil {
-		return nil, fmt.Errorf("applying schema: %w", err)
+	if err := MigrateUp(dsn); err != nil {
+		pool.Close()
+		return nil, err
 	}
 	return &Store{pool: pool}, nil
+}
+
+// NewMigrator returns a golang-migrate instance over the embedded
+// migrations for the given Postgres DSN. Callers must Close it.
+func NewMigrator(dsn string) (*migrate.Migrate, error) {
+	src, err := iofs.New(migrations.FS, ".")
+	if err != nil {
+		return nil, fmt.Errorf("loading embedded migrations: %w", err)
+	}
+	url := "pgx5://" + strings.TrimPrefix(strings.TrimPrefix(dsn, "postgres://"), "postgresql://")
+	m, err := migrate.NewWithSourceInstance("iofs", src, url)
+	if err != nil {
+		return nil, fmt.Errorf("creating migrator: %w", err)
+	}
+	return m, nil
+}
+
+// MigrateUp applies every pending migration. No-op when up to date.
+func MigrateUp(dsn string) error {
+	m, err := NewMigrator(dsn)
+	if err != nil {
+		return err
+	}
+	defer m.Close()
+	if err := m.Up(); err != nil && !errors.Is(err, migrate.ErrNoChange) {
+		return fmt.Errorf("applying migrations: %w", err)
+	}
+	return nil
 }
 
 func (s *Store) Close() {
 	s.pool.Close()
 }
 
-// InitMasterWallet stores the sealed seed exactly once. Returns
+// InitSeed stores the sealed seed for a role exactly once. Returns
 // ErrAlreadyInitialized on a second call — this is a one-time,
 // operator-driven action, not something that silently no-ops.
-func (s *Store) InitMasterWallet(ctx context.Context, sealedSeed []byte) error {
+func (s *Store) InitSeed(ctx context.Context, role string, sealedSeed []byte) error {
 	tag, err := s.pool.Exec(ctx,
-		`INSERT INTO master_wallet (id, sealed_seed) VALUES (1, $1) ON CONFLICT (id) DO NOTHING`,
-		sealedSeed)
+		`INSERT INTO wallet_seeds (seed_role, sealed_seed) VALUES ($1, $2) ON CONFLICT (seed_role) DO NOTHING`,
+		role, sealedSeed)
 	if err != nil {
-		return fmt.Errorf("inserting master wallet: %w", err)
+		return fmt.Errorf("inserting %s seed: %w", role, err)
 	}
 	if tag.RowsAffected() == 0 {
 		return ErrAlreadyInitialized
@@ -72,16 +96,16 @@ func (s *Store) InitMasterWallet(ctx context.Context, sealedSeed []byte) error {
 	return nil
 }
 
-// SealedSeed returns the stored ciphertext, or ErrNotFound if the
-// master wallet hasn't been initialized yet.
-func (s *Store) SealedSeed(ctx context.Context) ([]byte, error) {
+// SealedSeed returns the stored ciphertext for a role, or ErrNotFound
+// if that seed hasn't been initialized yet.
+func (s *Store) SealedSeed(ctx context.Context, role string) ([]byte, error) {
 	var seed []byte
-	err := s.pool.QueryRow(ctx, `SELECT sealed_seed FROM master_wallet WHERE id = 1`).Scan(&seed)
+	err := s.pool.QueryRow(ctx, `SELECT sealed_seed FROM wallet_seeds WHERE seed_role = $1`, role).Scan(&seed)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
 	}
 	if err != nil {
-		return nil, fmt.Errorf("reading master wallet: %w", err)
+		return nil, fmt.Errorf("reading %s seed: %w", role, err)
 	}
 	return seed, nil
 }
@@ -109,7 +133,7 @@ func (s *Store) AddressFor(ctx context.Context, userID, chain string) (string, e
 func (s *Store) allocateIndex(ctx context.Context, tx pgx.Tx) (uint32, error) {
 	var idx uint32
 	err := tx.QueryRow(ctx,
-		`UPDATE master_wallet SET next_index = next_index + 1 WHERE id = 1 RETURNING next_index - 1`).
+		`UPDATE wallet_seeds SET next_index = next_index + 1 WHERE seed_role = $1 RETURNING next_index - 1`, RoleUserDerivation).
 		Scan(&idx)
 	if err != nil {
 		return 0, fmt.Errorf("allocating derivation index: %w", err)
