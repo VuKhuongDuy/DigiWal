@@ -39,12 +39,24 @@ Question #7).
   idempotency key too — one key, one meaning, across both contexts).
   `UNIQUE(idempotency_key)` on the `withdrawal_requests` table — the
   request's own creation is idempotent, not just its later steps (see
-  invariant #11).
+  invariant #11). **This same `idempotency_key` is also reused, unchanged,
+  as the idempotency key on the `POST /v1/sign/hot-wallet` call this
+  request eventually makes** — see invariant #16.
 - **Hot Wallet** — the single on-chain address (per this doc's
   recommendation — see Open Questions #1) that every withdrawal is
   actually paid out from, regardless of which address the user
-  originally deposited to. A reserved derivation index in
-  `wallet-service`'s existing HD wallet, distinct from user addresses.
+  originally deposited to. Derived from its own, separate seed that
+  `wallet-service` holds apart from the seed that derives user deposit
+  addresses — **not** a reserved index in the same HD tree as user
+  addresses. (This entry previously said the opposite — "a reserved
+  derivation index in `wallet-service`'s existing HD wallet, distinct
+  from user addresses" — written before `wallet-tiering.md` existed.
+  That was stale, not a live disagreement: `wallet-tiering.md` invariant
+  #1 later decided, and the Tech Lead approved, that Hot's signing key
+  must be a separate seed precisely so one compromised seed can never
+  expose both "every user's transient private key" and "the automated
+  payout key." Fixed here to match. Source of truth going forward:
+  `wallet-tiering.md` invariant #1, not this doc.)
 - **Reservation** — the Ledger Transaction that debits the user's
   Account the moment a Withdrawal Request is accepted (not when it
   finally confirms on-chain). Uses the invariant already defined in
@@ -53,7 +65,10 @@ Question #7).
   address. Must be allocated atomically and monotonically, exactly like
   `wallet-service`'s existing per-user derivation-index allocation — the
   same class of bug (two concurrent signs claiming the same value)
-  applies here too.
+  applies here too. (This is a distinct nonce sequence from a user
+  address's own EVM nonce, used only for Sweep transactions — see
+  `deposit-flow.md`'s Sweep-related invariants for that, unrelated,
+  sequence.)
 - **Compensating Entry** — a new Ledger Transaction that credits the
   user back after a Withdrawal Request ends up never having landed on
   the canonical chain — either because it never broadcast successfully,
@@ -74,12 +89,25 @@ Question #7).
   on the new canonical chain too — not just the one at N. Both
   `withdrawal-service` and `sweeper` draw nonces from the same Hot
   Wallet sequence, so a Nonce Gap can freeze both withdrawals and
-  Sweeps/Gas Top-Ups (`deposit-flow.md`) at once.
+  Sweeps/Gas Top-Ups (`deposit-flow.md`) at once. **A second, distinct
+  cause of the same failure shape (a stranded, never-confirmable nonce)
+  is now also prevented separately: see invariant #16** — that one is
+  caused by a lost HTTP response, not a reorg, and is prevented at
+  allocation time rather than detected after the fact.
 - **Withdrawal Confirmation Depth** — a deeper confirmation threshold
   than deposits use (`deposit-flow.md`'s Confirmation Depth) before
   marking a Withdrawal Request `confirmed`, since funds leaving custody
   are more sensitive than funds arriving. Reduces how often a Nonce Gap
-  happens; can't eliminate it.
+  happens; can't eliminate it. **Decided: 64 blocks (~12.8 minutes at
+  Sepolia's ~12s average block time)** — exactly double
+  `deposit-flow.md`'s 32-block Confirmation Depth, per this term's own
+  stated invariant. Also grounded in a real Ethereum post-merge concept,
+  same as the deposit-side number: 64 blocks ≈ two epochs, roughly what
+  a full node exposes via the `finalized` block tag (reverting a
+  finalized block requires a large-scale validator-slashing event, not
+  an ordinary short reorg) — a meaningfully stronger guarantee than
+  deposit-flow.md's `safe`-tag-equivalent depth, appropriate since these
+  are funds leaving custody rather than arriving.
 - **Disputed** — the state a `confirmed` Withdrawal Request moves to
   when a Nonce Gap is detected at or above its nonce. Resolved only by
   explicit operator action — back to `confirmed` (original tx safely
@@ -102,8 +130,9 @@ Question #7).
   be an `active` entry in the requester's whitelist, checked at
   validation alongside Minimum Withdrawal Amount.
 - **Whitelist Entry** — one `(user_id, address)` pair, state `pending`
-  (just added) or `active` (usable for withdrawal). Removal is instant
-  — an entry simply stops existing, no state needed for that direction.
+  (just added) or `active` (usable for withdrawal). `(user_id, address)`
+  is unique — see invariant #15. Removal is instant — an entry simply
+  stops existing, no state needed for that direction.
 - **Whitelist Cooldown** — **Decided: 24 hours.** The delay between a
   Whitelist Entry's `added_at` and the moment it becomes `active`. This
   is the actual security property, not the whitelist's existence: an
@@ -148,16 +177,39 @@ for the one remaining unresolved failure mode.
    positive proof it didn't land before any compensating action — see
    Open Questions #3.
 5. **`wallet-service` signs for the Hot Wallet only, and the caller
-   specifies *what* to send, never *which key*.** The signing request
-   carries `{to_address, asset, amount, chain_id}` — there is no
-   parameter that lets a caller pick a derivation index. This means even
-   a fully compromised `withdrawal-service` can't turn the signing
-   endpoint into a way to drain an arbitrary user's address; the blast
-   radius is capped at "can spend from the Hot Wallet."
+   specifies *what* to send, never *which key* nor *how the transaction
+   is built*.** The signing request carries `{to_address, asset_id,
+   amount, chain_id, idempotency_key}` (the `idempotency_key` addition
+   is new — see invariant #16) — there is no parameter that lets a
+   caller pick a derivation index, and (**PROPOSED**, Tech Lead sign-off
+   pending — full design in `docs/design/integration-contracts.md` §2)
+   no gas parameter either: `wallet-service` is proposed to construct
+   the transaction itself, fetching current gas price and estimating gas
+   limit via its own EVM RPC client, rather than trusting a caller-
+   supplied gas price/limit. Either way, the caller can never dictate a
+   derivation index; the gas-construction question is the one part of
+   this invariant not yet decided. This means even a fully compromised
+   `withdrawal-service` can't turn the signing endpoint into a way to
+   drain an arbitrary user's address; the blast radius is capped at "can
+   spend from the Hot Wallet" (and, if the gas-construction proposal is
+   approved, "at a price it doesn't get to pick either"). An optional
+   caller-supplied `max_gas_price` safety ceiling (never a dictated
+   price, just a cap on cost exposure) is also **PROPOSED** — see
+   `integration-contracts.md` §2 and this doc's Open Questions.
+   **Cross-reference:** this "blast radius capped" argument depends on
+   `wallet-service` actually enforcing *who* is allowed to call this
+   endpoint by client-certificate identity, not just that the request
+   body has no key-selecting field — see
+   `docs/design/service-auth-mtls.md` invariants #2 and #4
+   (CN-based authorization).
 6. **Hot Wallet nonce allocation is atomic and monotonic** — same
    `UPDATE ... RETURNING` pattern `wallet-service` already uses for
    derivation-index allocation (`internal/storage/postgres.go`'s
    `allocateIndex`). No two signing calls can be issued the same nonce.
+   This prevents two *different* signing calls from colliding on one
+   nonce; it does not, by itself, prevent one caller's *retried* call
+   from being allocated a *different* nonce for what should have been
+   the same request — see invariant #16, which closes that gap.
 7. **`wallet-service` refuses to allocate a new Hot Wallet nonce while a
    Nonce Gap is open, regardless of who's asking.** `withdrawal-service`
    and `sweeper` both draw from the same Hot Wallet nonce sequence, so
@@ -207,6 +259,41 @@ for the one remaining unresolved failure mode.
     Screening List** (`compliance-screening.md`) at the same validation
     step, alongside the whitelist and minimum-amount checks — a match
     rejects the request before any Reservation.
+15. **A Whitelist Entry's `(user_id, address)` pair is unique.**
+    **Decided** (`docs/design/integration-contracts.md` Open Questions
+    #10). `UNIQUE(user_id, address)` on `whitelist_entries` —
+    `INSERT ... ON CONFLICT (user_id, address) DO NOTHING`. Re-adding an
+    address that already has a `pending` or `active` entry for that
+    user is a no-op: it neither errors nor restarts that entry's
+    Whitelist Cooldown clock.
+16. **Hot Wallet signing is idempotent per `idempotency_key` —
+    `wallet-service` never signs twice for the same key.** Strengthens
+    invariant #6: atomic nonce allocation alone prevents two *different*
+    calls from ever colliding on the same nonce, but it does not prevent
+    one caller's *retried* call — e.g. after the HTTP response to a
+    successful sign was lost in transit (timeout, connection reset) —
+    from being treated as a brand-new request and allocated a
+    *different* nonce for what should have been the same transaction.
+    That strands the first nonce forever, because EVM's strict
+    per-account nonce ordering means a later nonce can never confirm
+    while an earlier one from the same account is missing — the exact
+    same failure shape as a Nonce Gap (invariants #7–9), just caused by
+    a lost response instead of a reorg, and happening at the point of
+    allocation rather than being detected later. `wallet-service`
+    persists `(idempotency_key -> nonce, signed_raw_tx)` the first time
+    it signs for a given key; every subsequent `POST /v1/sign/hot-wallet`
+    call carrying that same key returns the identical stored
+    `{nonce, signed_raw_tx}` instead of allocating anything new or
+    signing again. The `idempotency_key` used here is the *same* key the
+    Withdrawal Request already carries throughout its lifecycle
+    (Ubiquitous language > *Withdrawal Request*) — reused as-is on this
+    call, never minted fresh per signing attempt. The identical
+    requirement applies to this endpoint's other two callers — the
+    Treasury Sweep caller (`wallet-tiering.md`, `withdrawal-service`'s
+    sweep-monitor loop) and the Gas Top-Up caller (`sweeper`,
+    `deposit-flow.md`) — which have no pre-existing per-request key the
+    way a Withdrawal Request does; see those docs for their **PROPOSED**
+    key-minting schemes.
 
 ## Diagram
 
@@ -235,9 +322,14 @@ sequenceDiagram
         else reserved
             Ledger-->>WD: ok
             WD->>WD: status = reserved
-            WD->>Wallet: sign({to_address, asset, amount, chain_id})<br/>Hot Wallet only — no caller-chosen key
-            Wallet->>Wallet: allocate next Hot Wallet nonce atomically
-            Wallet-->>WD: signed raw tx
+            WD->>Wallet: sign({to_address, asset_id, amount, chain_id, idempotency_key})<br/>Hot Wallet only — no caller-chosen key
+            alt idempotency_key already seen (retry after a lost response)
+                Wallet-->>WD: same stored {signed_raw_tx, nonce} (invariant #16) — no new nonce allocated
+            else first call for this idempotency_key
+                Wallet->>RPC: fetch gas price / estimate gas limit (PROPOSED — wallet-service-owned tx construction, see integration-contracts.md §2)
+                Wallet->>Wallet: allocate next Hot Wallet nonce atomically (invariant #6)<br/>persist (idempotency_key -> nonce, signed_raw_tx) (invariant #16)
+                Wallet-->>WD: {signed_raw_tx, nonce}
+            end
             WD->>WD: status = signed
             WD->>RPC: broadcast(raw tx)
             RPC-->>WD: tx_hash
@@ -278,7 +370,7 @@ sequenceDiagram
     end
 ```
 
-Whitelist Entry lifecycle (invariants #12–13):
+Whitelist Entry lifecycle (invariants #12–13, #15):
 
 ```mermaid
 sequenceDiagram
@@ -287,8 +379,8 @@ sequenceDiagram
 
     Note over Gateway: user_id resolved from Authorization header — identity-auth.md
     Gateway->>WD: add whitelist entry (user_id, address)
-    WD->>WD: INSERT whitelist_entries (status=pending, added_at=now())
-    Note over WD: not usable for withdrawal yet
+    WD->>WD: INSERT whitelist_entries (status=pending, added_at=now())<br/>ON CONFLICT (user_id, address) DO NOTHING
+    Note over WD: not usable for withdrawal yet<br/>(re-adding an existing pending/active entry no-ops, invariant #15)
 
     loop 24h Whitelist Cooldown elapses
     end
@@ -344,6 +436,18 @@ sequenceDiagram
   Not offering this for v1 — matches the project's existing conservative
   stance (fully automatic withdrawals, mandatory Minimum Withdrawal
   Amount) of not giving users a lever to weaken custody controls.
+- **Leave `POST /v1/sign/hot-wallet` without an idempotency key and rely
+  solely on invariant #2's `status='signing' WHERE status='reserved'`
+  guard, as originally designed.** Rejected on Tech Lead review: that
+  guard only prevents `withdrawal-service` from *asking* twice in the
+  normal case; it does nothing if the first call's response is simply
+  lost (timeout/connection reset) after `wallet-service` already signed
+  server-side — a retry (by `withdrawal-service` itself, an operator, or
+  a retry mechanism) would then be indistinguishable from a genuinely
+  new request and would allocate a second, stranding nonce. Invariant
+  #16 (idempotency key persisted alongside the signed result) closes
+  this without weakening invariant #2, which is still needed for the
+  ordinary "don't sign a request that's still `reserved`" case.
 
 ## Open questions
 
@@ -362,13 +466,20 @@ sequenceDiagram
    auth, testnet-only" (matches the project's current low-ceremony local
    setup) to a shared bearer secret or mTLS. This is a security-posture
    call, not something I'll default silently.
-   **Decided (PR #1): mTLS.**
+   **Decided (PR #1): mTLS.** Full CA/certificate-issuance and
+   CN-based authorization design (the "which caller may call which
+   endpoint" piece this decision didn't originally cover):
+   `docs/design/service-auth-mtls.md`.
 3. **Stuck/dropped broadcast handling.** A withdrawal that's broadcast
    but never confirms (underpriced, replaced, dropped from mempool) is
    the trickiest failure mode here — refunding it safely requires
    certainty it's truly dead, not just slow. I don't have a concrete
    timeout/replacement policy yet and would rather work it out with you
-   than guess a number that's wrong in a way that loses money.
+   than guess a number that's wrong in a way that loses money. This is
+   a separate question from Withdrawal Confirmation Depth (now resolved,
+   see below) — Confirmation Depth is about how long to wait once a tx
+   *is* included before calling it final; this is about what to do when
+   a broadcast tx never gets included at all. Still open.
 4. ~~Confirmed-then-reorged withdrawal.~~ **Decided (recommendation
    accepted):** not automated. Full design: a **Nonce Gap** (a Hot
    Wallet tx at nonce N reorged out) invalidates every Hot Wallet tx at
@@ -384,10 +495,11 @@ sequenceDiagram
    Nonce Gap / Disputed terms above, and the recovery diagram. Also
    recommending **Withdrawal Confirmation Depth be deeper than
    deposit-flow.md's Confirmation Depth**, since funds leaving custody
-   are more sensitive than funds arriving — reduces how often this
-   triggers, doesn't eliminate it. Confirm you're good with this shape;
-   the actual depth values still wait on chain choice (#3 above and
-   deposit-flow.md #3/#6).
+   are more sensitive than funds arriving. **Depth values now resolved:**
+   Sepolia is the chosen testnet — Withdrawal Confirmation Depth = 64
+   blocks (~12.8 minutes), double deposit-flow.md's 32-block
+   Confirmation Depth. See the Withdrawal Confirmation Depth entry in
+   Ubiquitous language above for the full rationale.
 5. ~~Dust/minimum withdrawal amount~~ **Decided:** see Minimum
    Withdrawal Amount above and invariant #10 — 15× gas cost for native
    coin, operator-set for ERC-20, enforced at validation. **Still
@@ -409,3 +521,24 @@ sequenceDiagram
    `user_id` is server-injected from it, never client-supplied. This
    was flagged as inherited from a project-wide gap; that gap is what
    `identity-auth.md` closes.
+8. **PROPOSED, not decided: should `wallet-service` own full EVM
+   transaction construction (gas price/limit, via its own EVM RPC
+   client), rather than the caller supplying gas parameters?** This is
+   a real, previously-unresolved gap — the signing request shape never
+   said how gas gets set. Recommending `wallet-service` own it (invariant
+   #5 above), since it keeps "caller can't influence how the tx is built
+   beyond what it's for" true for gas the same way it's already true for
+   the destination key. This is a genuine new dependency, though: it
+   means `wallet-service` needs its own EVM RPC client, which
+   `docs/ARCHITECTURE.md`'s `wallet-service` row doesn't list today
+   (proposed addition there too, marked pending). Full design and the
+   request/response shape this implies: `docs/design/integration-contracts.md`
+   §2. Please confirm this is the right call before Milestone 0 work on
+   the signing endpoint starts — the alternative (caller estimates gas,
+   passes it in) is architecturally simpler but weakens the
+   invariant-#5 security property and was not silently chosen instead.
+   Also open within the same proposal: whether to accept an optional
+   caller-supplied `max_gas_price` ceiling (a cost-exposure cap, not a
+   dictated price) — recommending yes, but flagging it as a separate
+   yes/no since it could reasonably be deferred to the observability
+   phase instead.
