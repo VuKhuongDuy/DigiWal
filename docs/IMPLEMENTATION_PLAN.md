@@ -13,7 +13,12 @@ inside a milestone is sized to be one dev PR. Tasks are ordered by
 dependency, not by service — a milestone typically touches 3-4
 services because that's what a real user-visible flow requires.
 
-## Two things to decide before/while starting
+## Decisions to make before/while starting
+
+(Three items now, not two — a migration-tool choice was added after a
+Tech Lead review of the actual `wallet-service` code found there wasn't
+one yet. Renamed from "Two things to decide" for that reason; nothing
+else about how this section works changed.)
 
 1. **Shared event-schema package.** Every service that produces or
    consumes a Kafka event (`chain-watcher`, `ledger-service`,
@@ -37,6 +42,116 @@ services because that's what a real user-visible flow requires.
    it needs a `solution-architect` design note before any task for it
    can be scheduled. Not included in the milestones below — say the
    word and I'll kick off that design note in parallel with M0-M3.
+3. **Migration tool: recommending `golang-migrate`.** **New, flagged
+   decision** — a gap a Tech Lead review of the actual code surfaced.
+   `services/wallet-service/internal/storage/postgres.go` currently
+   applies its schema via an inline `CREATE TABLE IF NOT EXISTS` string
+   run at connection time (`storage.Connect`) — there is no migration
+   tool in this repo at all yet, and no versioned migration files.
+   That's fine for a schema that only ever grows new tables, but task
+   0.2 below needs to *transform* an existing table's shape (singleton
+   `master_wallet` → multi-row `wallet_seeds`) and carry existing data
+   forward, which an inline `CREATE TABLE IF NOT EXISTS` string
+   structurally cannot do — it has no concept of "already applied" vs.
+   "not yet applied," so it can't express "add this column, backfill
+   it, then drop that other column" without hand-rolled guards. That
+   needs a real migration tool with an applied-versions table and
+   ordered up/down `.sql` files.
+   - **Recommendation: [`golang-migrate/migrate`](https://github.com/golang-migrate/migrate).**
+     Plain, hand-written up/down `.sql` files (no Go-code migrations,
+     no ORM), a single `schema_migrations` tracking table, a CLI for
+     local/manual use and a Go library (`database/postgres` driver) for
+     running migrations from `main()` on service startup, no cgo. This
+     fits the project's established pattern of picking the smaller,
+     more direct tool over the more "batteries-included" one for the
+     same reason `kafka-go` was picked over `confluent-kafka-go` (no
+     cgo) and JSON was picked over Avro/Protobuf for Kafka payloads
+     (no schema-registry infra to run) — this is currently pure-SQL
+     schema work with no need for a Go-code-based migration framework's
+     extra machinery (e.g. `goose`'s Go-function migrations, `atlas`'s
+     declarative-diffing engine). `golang-migrate` is also the most
+     widely used option in the Go ecosystem for exactly this shape of
+     problem, so it's a safe default to standardize on across every
+     service, not just `wallet-service`.
+   - **Convention (applies to every service from here on):** migration
+     files live under `services/<service-name>/migrations/`, named
+     `{version}_{description}.up.sql` / `{version}_{description}.down.sql`
+     with a 6-digit zero-padded sequential version (`golang-migrate`'s
+     own default convention, e.g. `000001_baseline_schema.up.sql`). Each
+     service's `main()` runs pending migrations against its own
+     Postgres connection on startup before serving traffic (same
+     "migrate then serve" pattern most Go services using this tool
+     follow) — no separate manual migration step to remember, but the
+     tracking table means it only ever applies what hasn't already run.
+   - **Alternative considered:** `goose` (Go-function or SQL
+     migrations, more built-in conveniences like embedding via
+     `embed.FS` helpers) — rejected only because `golang-migrate`'s CLI
+     + library split and plain-SQL-only file format is slightly more
+     minimal for what's currently pure-SQL work, not because `goose` is
+     unreasonable; either would work. Flagging this as the real
+     decision it is rather than assuming it silently — **your call if
+     you'd rather standardize on `goose` instead.**
+
+## Testing strategy
+
+Also new — nothing in this doc previously said how any task actually
+gets tested beyond "estimated N PRs." Two things to call out explicitly
+so they don't get skipped when a task's row is otherwise busy describing
+the feature logic itself:
+
+- **Integration tests against a real Postgres, not mocks, for anything
+  that depends on the database's own atomicity/constraint guarantees.**
+  `wallet-service`'s derivation-index allocation (`allocateIndex`'s
+  atomic `UPDATE ... RETURNING`, and its Milestone-0 sibling, Hot
+  Wallet nonce allocation) and `ledger-service`'s sum-to-zero
+  enforcement + idempotent replay (`apply()`, task 1.3) are exactly the
+  kind of correctness invariant a mocked DB can assert "was called
+  correctly" for but can't actually verify — a mock can't reproduce a
+  real unique-constraint conflict under concurrent inserts, or confirm
+  an `UPDATE ... RETURNING` really is atomic across two goroutines
+  racing it. These need to run against a real Postgres instance.
+  Required starting at task 0.2 (`wallet-service`) and throughout
+  Milestone 1 (`ledger-service`), and expected to be the default for
+  any later task making the same kind of claim (`withdrawal-service`'s
+  state machine, Milestone 3).
+  - **Recommendation: [`testcontainers-go`](https://golang.testcontainers.org/)**
+    (Postgres module) to spin up a real, ephemeral Postgres in Docker
+    per test run, started and torn down directly from `go test` (e.g.
+    a package's `TestMain`) — not a shared, long-lived dev database
+    that tests would otherwise have to carefully clean up after
+    themselves to avoid cross-test pollution. **Flagging this as a
+    tooling decision**, same as the migration-tool one above: the
+    project doesn't have a test-infra convention yet either.
+    Alternative considered: reusing the existing
+    `infra/docker-compose.yml` Postgres service and pointing
+    integration tests at it directly — rejected as the default,
+    because it means tests can only run one at a time against shared
+    mutable state (no test isolation without hand-rolled schema/table
+    prefixing), and it couples "can I run this test" to "do I remember
+    to have `docker compose up postgres` running first," which
+    `testcontainers-go` avoids by managing the container's lifecycle
+    from the test binary itself. `docker-compose.yml`'s Postgres stays
+    exactly what it already is — the shared stack for local
+    service-to-service dev/demo runs, not a test fixture.
+  - Each service's migration files (see the decision above) are also
+    what seeds schema into these ephemeral test containers — the same
+    `.sql` files run in test, dev, and (eventually) production, so
+    there's only ever one definition of the schema to keep in sync.
+- **A signature-recovery test for the Hot Wallet signing endpoint,
+  specifically** (called out on task 0.3 below, since that's where
+  `POST /v1/sign/hot-wallet` lands): sign a known payload through the
+  real endpoint, then independently recover the signer's public
+  key/address from the returned signature — Ethereum's `ecrecover`
+  equivalent, `go-ethereum`'s `crypto.SigToPub` /
+  `crypto.PubkeyToAddress` — and assert the recovered address equals
+  the actual configured Hot Wallet address (not merely "the call
+  returned 200 and a hex string that looks like a signature"). This is
+  the one test that actually proves the endpoint signed with the Hot
+  Wallet's key specifically, as opposed to, say, the wrong derivation
+  index or the wrong seed entirely (signing with the user-derivation
+  seed by accident, for instance) — a class of bug a happy-path
+  "response shape is correct" test would not catch, and one that would
+  otherwise only surface once real funds are on the line.
 
 ## Module map
 
@@ -56,8 +171,8 @@ services because that's what a real user-visible flow requires.
 | Task | Module | Input | Output | Depends on |
 |---|---|---|---|---|
 | 0.1 | `pkg/events` | This doc's recommendation above | Shared Go structs for the 4 Kafka event payloads, versioned | — |
-| 0.2 | `wallet-service` | `wallet-tiering.md` invariant #1 | Hot seed split from user-derivation seed — ≥2 sealed seeds, config surface for which key material backs which | — |
-| 0.3 | `wallet-service` | `withdrawal-flow.md` invariants #5, #16; `integration-contracts.md` §2 | `POST /v1/sign/hot-wallet {to_address, asset_id, amount, chain_id, idempotency_key}` → `{signed_raw_tx, nonce}`, over mTLS, Hot-Wallet-only, no caller-chosen key, no caller-supplied gas params (**PROPOSED**, pending sign-off — `integration-contracts.md` Open Questions #11), idempotent per `idempotency_key` (persist `idempotency_key -> nonce, signed_raw_tx`, never sign twice for the same key) | 0.2, 0.6 |
+| 0.2 | `wallet-service` | `wallet-tiering.md` invariant #1 | Hot seed split from user-derivation seed — ≥2 sealed seeds, config surface for which key material backs which. **Concrete schema change, migrated with `golang-migrate`** (see "Decisions to make" #3 above): introduces `services/wallet-service/migrations/` with a baseline migration (`000001_baseline_schema`) that reproduces today's inline schema as-is (`master_wallet` singleton + `wallet_addresses`, `IF NOT EXISTS` so it's a no-op against an already-provisioned dev DB and just backfills `golang-migrate`'s `schema_migrations` tracking table), followed by `000002_wallet_seeds` which does the actual transform: <br/>**Before:** `master_wallet(id INT PK CHECK (id=1), sealed_seed BYTEA, next_index INT, created_at)` — one singleton row.<br/>**After:** `wallet_seeds(seed_role TEXT PK CHECK (seed_role IN ('user_derivation','hot_wallet')), sealed_seed BYTEA NOT NULL, next_index INT NOT NULL DEFAULT 0, created_at TIMESTAMPTZ NOT NULL DEFAULT now())` — `next_index` keeps its current meaning (the atomic per-user derivation-index counter, `allocateIndex`'s `UPDATE ... RETURNING`) for the `user_derivation` row; the `hot_wallet` row doesn't use per-user derivation at all (it's one address, not one per user) so it carries `next_index = 0`, unused. The `000002` migration's `up` does `INSERT INTO wallet_seeds (seed_role, sealed_seed, next_index, created_at) SELECT 'user_derivation', sealed_seed, next_index, created_at FROM master_wallet WHERE id = 1` (a no-op insert if `master_wallet` was never initialized) then `DROP TABLE master_wallet` — so an already-initialized seed becomes the `user_derivation` row instead of being lost or requiring a fresh `init-master-wallet` run that would orphan already-derived users' addresses (their `derivation_index` values are meaningless against a new, different seed). The `hot_wallet` row is **not** fabricated by this migration — that would mean the migration inventing key material, which is an operator action, not a schema change — it's added afterward by an operator running the (now role-parameterized) init action a second time, e.g. `InitSeed('hot_wallet', sealedSeed)` replacing today's single-purpose `InitMasterWallet`. `down` reverses this: recreate `master_wallet`, copy the `user_derivation` row back into it, drop `wallet_seeds` (the `hot_wallet` row, if present, has nowhere to go back to in the old schema and is dropped — acceptable for a `down` script, which is a rollback path, not a data-preservation guarantee). **Included cleanup, same task:** `services/wallet-service/go.mod`'s `go 1.25.0` directive is bumped to `go 1.26.0` to match `services/wallet-service/Dockerfile`'s `FROM golang:1.26-alpine` — not a build break today (a newer toolchain builds an older `go` directive fine) but real drift worth closing before this Dockerfile/go.mod pattern gets copy-pasted into the next few services. **Testing:** integration tests against a real Postgres (`testcontainers-go`, see "Testing strategy" above) covering (a) the `000002` migration itself — seed an ephemeral container with the pre-migration `master_wallet` row, run the migration, assert it lands correctly in `wallet_seeds.user_derivation` — and (b) concurrent `allocateIndex` calls never allocate the same index twice. | — |
+| 0.3 | `wallet-service` | `withdrawal-flow.md` invariants #5, #16; `integration-contracts.md` §2 | `POST /v1/sign/hot-wallet {to_address, asset_id, amount, chain_id, idempotency_key}` → `{signed_raw_tx, nonce}`, over mTLS, Hot-Wallet-only, no caller-chosen key, no caller-supplied gas params (**PROPOSED**, pending sign-off — `integration-contracts.md` Open Questions #11), idempotent per `idempotency_key` (persist `idempotency_key -> nonce, signed_raw_tx`, never sign twice for the same key). **Dependency change, same task:** this is where `wallet-service` starts constructing and signing real transactions, so `github.com/ethereum/go-ethereum` (currently `v1.10.17 // indirect`, pulled in only transitively via `github.com/miguelmota/go-ethereum-hdwallet`) must be promoted to a direct `require` in `go.mod` and bumped — pin to whatever is the current stable release at implementation time, not a version guessed here. **Testing (required, not optional):** the signature-recovery test described in "Testing strategy" above — sign a known payload via this endpoint, recover the address with `crypto.SigToPub`/`crypto.PubkeyToAddress`, assert it equals the configured Hot Wallet address — plus the usual idempotent-replay-returns-identical-response case. | 0.2, 0.6 |
 | 0.4 | `wallet-service` | `withdrawal-flow.md` invariants #6, #7, #16 | Hot Wallet nonce allocation table (atomic `UPDATE...RETURNING`, same pattern as existing `allocateIndex`) + Nonce-Gap freeze flag + the idempotency-key persistence layer task 0.3 depends on | 0.3 |
 | 0.5 | `wallet-service` | `deposit-flow.md` invariants #6, #7, #12; `integration-contracts.md` §2 | `POST /v1/sign/user-address {user_id, to_address, asset_id, amount, chain_id}` → `{signed_raw_tx}`, over mTLS. Server-enforces `to_address == Hot Wallet`, never trusting the caller. Sources the signing user address's own EVM nonce via a live `eth_getTransactionCount(address, "pending")` RPC read (**PROPOSED**, `deposit-flow.md` invariant #12) rather than a DB counter. No idempotency key needed (idempotent by construction — caller always signs the live balance). | 0.2, 0.6 |
 | 0.6 | `infra/pki`, `wallet-service` | `docs/design/service-auth-mtls.md` | One-time CA generation script (`infra/pki/gen-ca.sh`) + per-service leaf-cert script (`infra/pki/gen-leaf.sh`), gitignored output, docker-compose volume-mount wiring for `wallet-service`'s (and later `withdrawal-service`'s/`sweeper`'s) certs; `wallet-service` gains an mTLS listener (`tls.RequireAndVerifyClientCert`) separate from its plain `/healthz` listener, plus the CN-authorization middleware enforcing `service-auth-mtls.md`'s matrix (`hot-wallet` → `{withdrawal-service, sweeper}`, `user-address` → `{sweeper}`) before any handler logic runs | — |
@@ -73,12 +188,12 @@ Estimated 6 PRs.
 
 | Task | Module | Input | Output | Depends on |
 |---|---|---|---|---|
-| 1.1 | `ledger-service` | `ledger.md` schema section | Postgres migrations: `accounts`, `entries`/`ledger_transactions`, `asset_registry` (incl. `hot_floor`, `hot_ceiling`, `min_withdrawal_amount` fields) | — |
+| 1.1 | `ledger-service` | `ledger.md` schema section | Postgres migrations, using **`golang-migrate`** (see "Decisions to make" #3 above — same tool and `services/ledger-service/migrations/{version}_{description}.up/down.sql` convention as `wallet-service`'s task 0.2, this being a fresh schema with no prior data to carry forward): `accounts`, `entries`/`ledger_transactions`, `asset_registry` (incl. `hot_floor`, `hot_ceiling`, `min_withdrawal_amount` fields) | — |
 | 1.2 | `ledger-service` | `ledger.md` Asset Registry | Static config loader (env/YAML), validated at startup | 1.1 |
 | 1.3 | `ledger-service` | `ledger.md` invariants #1, #2; `service-auth-mtls.md` invariant #7 (PROPOSED) | `apply(idempotency_key, entries[])` — atomic, idempotent, sum-to-zero enforced in one DB transaction, served behind an mTLS listener with CN-authorization restricting it to `CN=withdrawal-service` only (built in from the start, using the same CA/leaf-cert tooling from task 0.6) | 1.1, 0.6 |
 | 1.4 | `ledger-service` | `pkg/events` (0.1) | Kafka consumer scaffold for `deposits.confirmed` (interface only — real message comes in M2) | 0.1 |
 | 1.5 | `ledger-service` | `compliance-screening.md` invariant #1 | Screening-List check in the deposit-consumption path; `flagged_deposits` table, never auto-applied | 1.3, 1.4 |
-| 1.6 | `ledger-service` | invariants #1–#2 | Unit + integration tests: overdraft rejection, sum-to-zero, idempotent replay | 1.3 |
+| 1.6 | `ledger-service` | invariants #1–#2 | Unit + integration tests: overdraft rejection, sum-to-zero, idempotent replay. **Integration tests run against a real Postgres via `testcontainers-go`** (see "Testing strategy" above) — these three invariants specifically depend on real transaction/constraint behavior a mock can't reproduce | 1.3 |
 
 **DoD:** `ledger-service` correctly applies/rejects transactions and
 flags blacklisted deposits, fully testable in isolation (no other
@@ -94,7 +209,7 @@ by hand). Estimated 5-6 PRs.
 | 2.3 | `sweeper` | `deposit-flow.md` invariants (Gas Top-Up, Sweep idempotency #8, #10, #12, #13) | Consumes `deposits.confirmed`, independent compliance check, Gas Top-Up (0.001 ETH) via `wallet-service /v1/sign/hot-wallet` with idempotency key `gas-topup:{chain_id}:{tx_hash}:{log_index}` (**PROPOSED**), fresh-balance-read before signing, sweeps to Hot Wallet via `wallet-service /v1/sign/user-address` — calls made with `sweeper`'s own leaf certificate (`CN=sweeper`, from task 0.6's tooling) | 0.3, 0.5, 2.1, 0.6 |
 | 2.4 | `history-service` | `deposits.confirmed`/`deposits.detected` | Minimal MongoDB consumer, denormalized read model | 2.1 |
 | 2.5 | `api-gateway` | — | `GET /deposit-address` (proxies `wallet-service`), `GET /balance` (proxies `ledger-service`) | 1.3 |
-| 2.6 | all of the above | — | e2e test against a local Sepolia fork (Anvil): simulate a deposit, assert balance updates | 2.1–2.5 |
+| 2.6 | all of the above | — | e2e test against a local Sepolia fork (Anvil, now running via `docker compose up anvil` — see `infra/docker-compose.yml` and `docs/DEVELOPMENT.md`): simulate a deposit, assert balance updates | 2.1–2.5 |
 
 **DoD:** a user can request a deposit address, send testnet ETH, and
 see their balance update after 32 blocks — first real demo. Estimated
@@ -111,7 +226,7 @@ see their balance update after 32 blocks — first real demo. Estimated
 | 3.5 | `withdrawal-service` | latest idempotency-gap fix | Compensating Entry using the deterministic `{idempotency_key}:refund` key | 3.3 |
 | 3.6 | `withdrawal-service` | new Withdrawal Whitelist section | Add (pending → active after 24h cooldown) / remove (instant) whitelist entries | 3.1 |
 | 3.7 | `api-gateway` | — | `POST /withdrawals`, `POST /whitelist`, `DELETE /whitelist/:id` | 3.2, 3.6 |
-| 3.8 | all of the above | — | e2e test incl. a forced Nonce Gap (reorg simulation on the local fork) | 3.1–3.5 |
+| 3.8 | all of the above | — | e2e test incl. a forced Nonce Gap (reorg simulation on the local fork, via Anvil's `anvil_snapshot`/`anvil_revert` — `docker compose up anvil`, see `docs/DEVELOPMENT.md`) | 3.1–3.5 |
 
 **DoD:** a user can withdraw to a whitelisted address and see it
 confirm; a simulated reorg correctly freezes and disputes affected

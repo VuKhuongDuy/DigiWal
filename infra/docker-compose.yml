@@ -66,6 +66,26 @@ services:
     volumes:
       - mongo_data:/data/db
 
+  # Local EVM testnet for chain-watcher/sweeper/withdrawal-service dev
+  # and the e2e tests in tasks 2.6/3.8 (docs/IMPLEMENTATION_PLAN.md).
+  # Foundry's own image ships anvil as its CLI entrypoint target — no
+  # separate Anvil image exists. Ephemeral by design: no volume, since
+  # docs/DEVELOPMENT.md's snapshot/revert (anvil_snapshot/anvil_revert)
+  # workflow works against in-memory chain state and a fresh chain on
+  # every `docker compose up anvil` is the whole point (deterministic
+  # starting state, same 10 pre-funded default accounts every time).
+  # `--host 0.0.0.0` is required for the container's port mapping to
+  # reach anvil at all — it binds 127.0.0.1-only by default.
+  anvil:
+    image: ghcr.io/foundry-rs/foundry:stable
+    entrypoint: ["anvil", "--host", "0.0.0.0"]
+    ports: ["8545:8545"]
+    healthcheck:
+      test: ["CMD", "cast", "block-number", "--rpc-url", "http://127.0.0.1:8545"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
   prometheus:
     image: prom/prometheus:v2.55.1
     volumes:
