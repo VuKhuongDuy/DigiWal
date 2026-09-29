@@ -201,18 +201,39 @@ and its README) rather than inventing a new one.
 Both `/v1/sign/*` endpoints: **mTLS**, per `withdrawal-flow.md` Open
 Questions #2 ("Decided (PR #1): mTLS").
 
+**Note (post-`identity-auth.md`):** the `{userID}` in
+`POST/GET /v1/users/{userID}/deposit-address` and the `user_id` fields
+above are unchanged in shape, but the *trust* behind them changed —
+every one of these calls now only ever originates from `api-gateway`,
+which fills in `user_id`/`userID` with the value it resolved from the
+caller's `Authorization: Bearer <api_key>` (`identity-auth.md`
+invariants #3-#5), never a value asserted directly by an external
+client. `wallet-service` itself is not reachable from outside the
+deployment (`identity-auth.md` invariant #5), so this is a change in
+who can be trusted to call it, not in the endpoint's own request/response
+shape.
+
 ### `api-gateway`
+
+**Every endpoint below except `POST /users` requires
+`Authorization: Bearer <api_key>`.** `api-gateway` resolves the real
+`user_id` from that key and injects it into every downstream call;
+client-supplied `user_id` is no longer accepted as a request field on
+any of these endpoints, whether as a path segment or a body/query
+param (`identity-auth.md` invariants #3, #4). Missing/invalid header →
+`401`, per `identity-auth.md`'s diagram.
 
 | Endpoint | Request | Response | Cites |
 |---|---|---|---|
-| `GET /v1/users/{userID}/deposit-address` | — | Proxies `wallet-service`'s response verbatim | `docs/IMPLEMENTATION_PLAN.md` task 2.5 ("`GET /deposit-address` (proxies `wallet-service`)"); underlying responsibility from `docs/ARCHITECTURE.md`'s `api-gateway` row ("get deposit address") |
-| `GET /v1/users/{userID}/balances` | Optional `?asset_id=` query filter | **PROPOSED HERE**: `[{"asset_id","symbol","balance"}]` | `docs/ARCHITECTURE.md` `api-gateway` row ("get balance"); `docs/IMPLEMENTATION_PLAN.md` task 2.5. Implies a new synchronous `api-gateway → ledger-service` call — no endpoint for it exists in `ledger.md` today; see §3. |
-| `GET /v1/users/{userID}/history` | Optional pagination params | **PROPOSED HERE, low confidence** — `history-service`'s own schema isn't designed (`docs/IMPLEMENTATION_PLAN.md`'s module map: "no dedicated design doc") | `docs/ARCHITECTURE.md` `api-gateway` row ("get... history") |
-| `POST /v1/withdrawals` | `{"idempotency_key","user_id","asset_id","amount","to_address"}` | New/first request: `202 {"idempotency_key","status":"reserved"}` (or `"rejected"` with a reason) once Reservation completes — **PROPOSED HERE**, but "returns quickly, doesn't block on confirmation" is decided (`withdrawal-flow.md` Alternatives: "Block the HTTP response until the withdrawal confirms — Rejected"). Duplicate request (same key, row already existed): **PROPOSED HERE** — `200` + "existing request's current status" (`withdrawal-flow.md` diagram says this in prose, doesn't give an HTTP status). Insufficient funds: `422` (`withdrawal-flow.md` diagram, verbatim). | Request shape: `withdrawal-flow.md` diagram, `Gateway->>WD: POST /withdrawals` arrow, verbatim. **Validation order this endpoint must enforce, per the diagram and invariants, in this exact order:** (1) idempotent row creation first, invariant #11; (2) well-formed address / asset registered / amount ≥ `min_withdrawal_amount`, invariant #10; (3) `to_address` is an `active` Whitelist Entry, invariant #12; (4) `to_address` not on the Screening List, invariant #14 / `compliance-screening.md` invariant #3; (5) only then, the ledger Reservation, whose own overdraft check is `ledger.md` invariant #1. |
-| `GET /v1/withdrawals/{idempotency_key}` | — (path param only) | **Decided** (resolves Open Questions #6): `{"idempotency_key","status","tx_hash"}` — `status` is the Withdrawal Request's current state-machine value (`requested`\|`validated`\|`reserved`\|`signed`\|`broadcast`\|`confirmed`\|`rejected`\|`failed`\|`disputed`, per `withdrawal-flow.md`'s state list), `tx_hash` is `null` until known (set from the `broadcast` state onward); `404` if the key doesn't exist | Needed because `POST /v1/withdrawals` returns quickly rather than blocking on confirmation (`withdrawal-flow.md` Alternatives: "Block the HTTP response until the withdrawal confirms — Rejected") — a client needs some way to check status afterward. State list: `withdrawal-flow.md`'s Withdrawal Request states paragraph and invariants #1-#9. |
-| `POST /v1/whitelist` | **PROPOSED HERE**: `{"user_id","address"}` | `{"id","user_id","address","status":"pending","added_at"}` | Fields: `withdrawal-flow.md`'s Whitelist Entry lifecycle diagram (`Gateway->>WD: add whitelist entry (user_id, address)`). Path: `docs/IMPLEMENTATION_PLAN.md` task 3.7. Cooldown behavior it must satisfy: invariant #13 (`pending` until Whitelist Cooldown elapses, computed on read). |
+| `POST /users` | — (empty body, `{}`); **no `Authorization` header** — this is the one exception (`identity-auth.md` invariant #3) | `201 {"user_id","api_key"}` — `api_key` shown once here, never returned by any endpoint afterward | `identity-auth.md`'s User/API Key creation sequence diagram, verbatim; invariant #1 (`user_id` is system-generated, never client-chosen). Included here, alongside the rest of `api-gateway`'s client-facing surface, because that's this doc's whole job (a single wire-contract lookup table) — `identity-auth.md` remains the doc of record for *why* this shape exists and its invariants. |
+| `GET /v1/deposit-address` | — (no `{userID}` path segment; `user_id` comes from `Authorization: Bearer <api_key>`, not the client) | Proxies `wallet-service`'s response verbatim. `api-gateway` calls `wallet-service`'s (unchanged) `GET /v1/users/{userID}/deposit-address` (§2 `wallet-service` table above) with the authenticated `user_id` substituted in server-side. | `docs/IMPLEMENTATION_PLAN.md` task 2.5 ("`GET /deposit-address` (proxies `wallet-service`)"); underlying responsibility from `docs/ARCHITECTURE.md`'s `api-gateway` row ("get deposit address"). `{userID}` dropped from the client-facing path, `user_id` no longer client-supplied: `identity-auth.md` invariants #3, #4. |
+| `GET /v1/balances` | Optional `?asset_id=` query filter; no `user_id`/`{userID}` — resolved from `Authorization: Bearer <api_key>` | **PROPOSED HERE**: `[{"asset_id","symbol","balance"}]` | `docs/ARCHITECTURE.md` `api-gateway` row ("get balance"); `docs/IMPLEMENTATION_PLAN.md` task 2.5. Implies a new synchronous `api-gateway → ledger-service` call — no endpoint for it exists in `ledger.md` today; see §3. `{userID}` path segment and client-supplied `user_id` removed per `identity-auth.md` invariants #3, #4. |
+| `GET /v1/history` | Optional pagination params; no `user_id`/`{userID}` — resolved from `Authorization: Bearer <api_key>` | **PROPOSED HERE, low confidence** — `history-service`'s own schema isn't designed (`docs/IMPLEMENTATION_PLAN.md`'s module map: "no dedicated design doc") | `docs/ARCHITECTURE.md` `api-gateway` row ("get... history"). `{userID}` path segment and client-supplied `user_id` removed per `identity-auth.md` invariants #3, #4. |
+| `POST /v1/withdrawals` | `{"idempotency_key","asset_id","amount","to_address"}` — no `user_id` field; `api-gateway` injects the authenticated `user_id` before forwarding to `withdrawal-service` (§3) | New/first request: `202 {"idempotency_key","status":"reserved"}` (or `"rejected"` with a reason) once Reservation completes — **PROPOSED HERE**, but "returns quickly, doesn't block on confirmation" is decided (`withdrawal-flow.md` Alternatives: "Block the HTTP response until the withdrawal confirms — Rejected"). Duplicate request (same key, row already existed): **PROPOSED HERE** — `200` + "existing request's current status" (`withdrawal-flow.md` diagram says this in prose, doesn't give an HTTP status). Insufficient funds: `422` (`withdrawal-flow.md` diagram, verbatim). | Request shape: `withdrawal-flow.md` diagram, `Gateway->>WD: POST /withdrawals` arrow, minus `user_id` — that diagram predates `identity-auth.md`; `user_id` is dropped from the client-facing body per invariant #4 and instead server-injected before the `api-gateway → withdrawal-service` call (§3, unchanged shape there). **Validation order this endpoint must enforce, per the diagram and invariants, in this exact order:** (1) idempotent row creation first, invariant #11; (2) well-formed address / asset registered / amount ≥ `min_withdrawal_amount`, invariant #10; (3) `to_address` is an `active` Whitelist Entry, invariant #12; (4) `to_address` not on the Screening List, invariant #14 / `compliance-screening.md` invariant #3; (5) only then, the ledger Reservation, whose own overdraft check is `ledger.md` invariant #1. |
+| `GET /v1/withdrawals/{idempotency_key}` | — (path param only — `idempotency_key`, not a user identifier, so it's unaffected by the `{userID}` removal elsewhere) | **Decided** (resolves Open Questions #6): `{"idempotency_key","status","tx_hash"}` — `status` is the Withdrawal Request's current state-machine value (`requested`\|`validated`\|`reserved`\|`signed`\|`broadcast`\|`confirmed`\|`rejected`\|`failed`\|`disputed`, per `withdrawal-flow.md`'s state list), `tx_hash` is `null` until known (set from the `broadcast` state onward); `404` if the key doesn't exist | Needed because `POST /v1/withdrawals` returns quickly rather than blocking on confirmation (`withdrawal-flow.md` Alternatives: "Block the HTTP response until the withdrawal confirms — Rejected") — a client needs some way to check status afterward. State list: `withdrawal-flow.md`'s Withdrawal Request states paragraph and invariants #1-#9. |
+| `POST /v1/whitelist` | `{"address"}` — no `user_id` field; `api-gateway` injects the authenticated `user_id` before forwarding | `{"id","user_id","address","status":"pending","added_at"}` (`user_id` still appears in the *response*, identifying whose entry this is — only the client-supplied request field is dropped) | Fields: `withdrawal-flow.md`'s Whitelist Entry lifecycle diagram (`Gateway->>WD: add whitelist entry (user_id, address)`) — `user_id` removed from the client-facing request per `identity-auth.md` invariant #4. Path: `docs/IMPLEMENTATION_PLAN.md` task 3.7. Cooldown behavior it must satisfy: invariant #13 (`pending` until Whitelist Cooldown elapses, computed on read). |
 | `DELETE /v1/whitelist/{id}` | — | `204`, idempotent (no-op if already gone) | Path: `docs/IMPLEMENTATION_PLAN.md` task 3.7. "Removal is instant... no state needed for that direction": `withdrawal-flow.md`, Ubiquitous language > *Whitelist Entry*, and invariant #13. |
-| Internal Transfer endpoint (e.g. `POST /v1/transfers`) | — | — | **GAP.** Same reason as the `transfers.internal` topic above — `docs/ARCHITECTURE.md` names this as an `api-gateway` responsibility, but no design doc exists for it. Not proposing a shape. |
+| Internal Transfer endpoint (e.g. `POST /v1/transfers`) | — | — | **GAP.** Same reason as the `transfers.internal` topic above — `docs/ARCHITECTURE.md` names this as an `api-gateway` responsibility, but no design doc exists for it. Not proposing a shape. Whatever shape it eventually gets, it's still bound by the same rule as every other row in this table: `Authorization: Bearer <api_key>` required, no client-supplied `user_id` (`identity-auth.md` invariants #3, #4). |
 
 ### `ledger-service` (internal — not user-facing)
 
@@ -239,8 +260,8 @@ direct call in every sequence diagram that uses it).
 | `sweeper` | `wallet-service` | `POST /v1/sign/user-address` — for the **Sweep** itself (user address → Hot Wallet) | mTLS | Signs as the specified user's derived key — this one *does* let the caller pick which key, by design (Sweep's whole job). **Decided (Open Questions #5, resolved): `wallet-service` enforces `to_address == Hot Wallet` server-side, never trusting the caller** — bounds this endpoint's blast radius the same way invariant #5 does for the other one. | `deposit-flow.md` invariants #6, #7; Sweep diagram |
 | `withdrawal-service` (sweep-monitor loop) | `wallet-service` | `POST /v1/sign/hot-wallet` — for **Treasury Sweep** (Hot Wallet → Warm) | mTLS | Same Hot Wallet endpoint; destination is the Warm address instead of an external one | `wallet-tiering.md` diagram, `Monitor->>Wallet: sign(to=Warm address, ...)` |
 | `withdrawal-service` | `ledger-service` | `POST /v1/ledger/transactions` (`apply`) — for the Reservation, and again (with the `{idempotency_key}:refund` key) for a Compensating Entry | **Decided: REST** (Open Questions #7, resolved) | Idempotent — see §4 | `ledger.md` `apply()` diagram; `withdrawal-flow.md` invariants #1, #3 |
-| `api-gateway` | `wallet-service` | Proxies `GET/POST /v1/users/{userID}/deposit-address` | **Not specified** — inherits the general auth gap, Open Questions #8 | Pass-through | `docs/IMPLEMENTATION_PLAN.md` task 2.5 |
-| `api-gateway` | `ledger-service`, `history-service`, `withdrawal-service` | Proxies balance/history/withdrawal/whitelist endpoints in §2 | **Not specified** — Open Questions #8 | Pass-through | `docs/ARCHITECTURE.md` `api-gateway` row: "Talks to: all of the above" |
+| `api-gateway` | `wallet-service` | Proxies `GET/POST /v1/users/{userID}/deposit-address` | Not specified for this internal hop itself (no mTLS documented here, unlike the `/v1/sign/*` endpoints) — but the general "who can be trusted to call this" gap is resolved: the `userID`/`user_id` this call carries is now always the one `api-gateway` resolved from the caller's `Authorization: Bearer <api_key>` (`identity-auth.md` invariants #3-#5), never a value asserted by the external client directly. See Open Questions #8, resolved. | Pass-through | `docs/IMPLEMENTATION_PLAN.md` task 2.5 |
+| `api-gateway` | `ledger-service`, `history-service`, `withdrawal-service` | Proxies balance/history/withdrawal/whitelist endpoints in §2 | Not specified for this internal hop itself (same caveat as above — no mTLS documented for it) — but the `user_id` each of these calls carries is now always the `api-gateway`-authenticated one, never client-supplied (`identity-auth.md` invariants #3-#5). See Open Questions #8, resolved. | Pass-through | `docs/ARCHITECTURE.md` `api-gateway` row: "Talks to: all of the above" |
 
 ---
 
@@ -371,13 +392,29 @@ direct call in every sequence diagram that uses it).
    to default on silently: confirm REST is fine, or say otherwise.~~
    **Decided: REST for everything**, matching `wallet-service`'s
    already-implemented convention.
-8. **Every `api-gateway` endpoint in this doc assumes a `user_id` is
+8. ~~**Every `api-gateway` endpoint in this doc assumes a `user_id` is
    already known/authenticated on the request.** This isn't a new gap —
    `withdrawal-flow.md` Open Questions #7 already flagged that no
    user-auth design exists anywhere in this project — but it's worth
    repeating here since this doc is the first place *every* user-facing
    endpoint is listed in one spot, and every single one of them
-   currently just takes `user_id` as a trusted request field.
+   currently just takes `user_id` as a trusted request field.~~
+   **Decided: resolved by `identity-auth.md`.** `api-gateway` is the
+   sole authentication point in the system: every client request to it
+   except `POST /users` requires `Authorization: Bearer <api_key>`
+   (`identity-auth.md` invariant #3), `api-gateway` resolves the real
+   `user_id` from that key and injects it into every downstream call,
+   and client-supplied `user_id` is dropped entirely as a request field
+   — never read from a client's body/params again (`identity-auth.md`
+   invariant #4). §2's `api-gateway` table and §3's sync-call table
+   above have been updated accordingly: no `{userID}` path segment and
+   no `user_id` body/query field on any client-facing endpoint;
+   `user_id` still appears in the `wallet-service`/`ledger-service`
+   request shapes (§2, §3), but only ever as the server-injected,
+   authenticated value `api-gateway` supplies — never a value an
+   external client could assert directly, since only `api-gateway` is
+   reachable from outside the deployment (`identity-auth.md` invariant
+   #5).
 9. ~~**`amount` as a decimal string on the wire, not a JSON number.**
    `ledger.md`'s schema stores amounts as Postgres `bigint` (fits
    int64), but that's a *storage* choice, not a wire-format one, and it
