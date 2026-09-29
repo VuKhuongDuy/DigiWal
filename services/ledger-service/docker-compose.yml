@@ -1,0 +1,27 @@
+# Pulls in ../../infra/docker-compose.yml via `include:` — don't also pass it with -f.
+include:
+  - path: ../../infra/docker-compose.yml
+
+services:
+  ledger-service:
+    build:
+      context: ../..            # repo root: the image needs pkg/events
+      dockerfile: services/ledger-service/Dockerfile
+    environment:
+      PORT: "8080"
+      POSTGRES_DSN: postgres://custody:custody@postgres:5432/ledger?sslmode=disable
+      # The canonical registry + screening list, mounted identically everywhere.
+      ASSETS_FILE: /config/assets.yaml
+      SCREENING_FILE: /config/screening.yaml
+      TLS_CERT_FILE: /certs/cert.pem
+      TLS_KEY_FILE: /certs/key.pem
+      TLS_CA_FILE: /certs/ca-cert.pem
+      # KAFKA_BROKERS: kafka:9092   # consumer stays off until the UserResolver gap is decided
+    volumes:
+      - ../../infra/assets.yaml:/config/assets.yaml:ro
+      - ../../infra/screening.yaml:/config/screening.yaml:ro
+      - ../../infra/pki/out/ledger-service:/certs:ro
+    ports: ["8081:8080", "8444:8443"]
+    depends_on:
+      postgres:
+        condition: service_healthy

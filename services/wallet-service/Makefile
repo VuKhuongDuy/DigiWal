@@ -18,7 +18,7 @@ gen-key:
 # an existing CA is kept, missing leaf certs are issued (delete infra/pki/out/<svc> to rotate). See docs/design/service-auth-mtls.md.
 certs:
 	@test -f "$${CA_DIR:-$$HOME/.digiwal-ca}/ca-key.pem" || ../../infra/pki/gen-ca.sh
-	@for svc in wallet-service withdrawal-service sweeper; do test -f ../../infra/pki/out/$$svc/cert.pem || ../../infra/pki/gen-leaf.sh $$svc; done
+	@for svc in wallet-service ledger-service withdrawal-service sweeper; do test -f ../../infra/pki/out/$$svc/cert.pem || ../../infra/pki/gen-leaf.sh $$svc; done
 
 up: certs
 	$(COMPOSE) up -d --build postgres redis wallet-service
