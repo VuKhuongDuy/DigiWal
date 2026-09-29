@@ -1,9 +1,13 @@
 # wallet-service
 
-Owns the one HD seed for the whole DigiWal system and derives
-one EVM deposit address per user from it (BIP44 `m/44'/60'/0'/0/{index}`).
-See `../../docs/ARCHITECTURE.md` for how this fits into the rest of the
-system and the security reasoning behind the design.
+Owns the sealed HD seed(s) for the DigiWal system. Today (phase 1):
+one seed, deriving one EVM deposit address per user
+(BIP44 `m/44'/60'/0'/0/{index}`). A second, separate seed for the Hot
+Wallet's signing key is coming in a later phase — see
+`docs/design/wallet-tiering.md` invariant #1 — deliberately never the
+same seed that derives user addresses, so one compromised seed can't
+expose both. See `../../docs/ARCHITECTURE.md` for how this fits into
+the rest of the system and the security reasoning behind the design.
 
 ## Running it
 

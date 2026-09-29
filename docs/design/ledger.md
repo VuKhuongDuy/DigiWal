@@ -82,7 +82,12 @@ implementing `wallet-service`'s side of this.
 - **Idempotency Key** — what makes replaying the same source event a
   no-op. Deposits: `(chain_id, tx_hash, log_index)` — log_index matters
   because one tx can carry several ERC-20 `Transfer` events, each a
-  separate deposit. Withdrawals: a client-supplied UUID, minted by
+  separate deposit. **Decided:** a native-coin transfer has no log at
+  all, so for native deposits `log_index = -1` is used as the sentinel
+  value in this tuple; ERC-20 deposits keep using the real, always ≥0
+  log index (`docs/design/integration-contracts.md` Open Questions #2,
+  resolved; same convention used in `deposit-flow.md`'s Observed
+  Transfer definition). Withdrawals: a client-supplied UUID, minted by
   `api-gateway` at request time and carried through the whole withdrawal
   lifecycle (see `withdrawal-flow.md`).
 - **Available Balance** — an Account's current balance, materialized as
@@ -98,18 +103,21 @@ implementing `wallet-service`'s side of this.
    whole Ledger Transaction rolls back, no Entry is written. The row
    lock this UPDATE naturally takes is what makes two concurrent
    withdrawal requests against the same Account serialize correctly —
-   this is the actual correctness boundary, not an external lock (see
-   Open Questions #1).
+   this is the actual, sole correctness boundary preventing overdraft
+   (see Open Questions #1's resolution — a Redis lock, if implemented
+   anywhere in the withdrawal path, is an optional fast-fail
+   optimization only, never a substitute for this).
 2. **Every Ledger Transaction's entries sum to zero.** Enforced in
    `ledger-service` application code, inside one DB transaction (all
    entries inserted, or none). This needs direct unit-test coverage,
    not just integration tests — Postgres has no simple constraint for
    "these rows I'm about to insert sum to zero."
 3. **A source event is applied at most once.** `UNIQUE(chain_id,
-   tx_hash, log_index)` for deposits / `UNIQUE(idempotency_key)` for
-   withdrawals on the `ledger_transactions` table. Insert uses
-   `ON CONFLICT DO NOTHING`; the caller treats a no-op as "already
-   applied" and acks/moves on, not as an error.
+   tx_hash, log_index)` for deposits (native deposits use `log_index =
+   -1` as their sentinel, per the Idempotency Key definition above) /
+   `UNIQUE(idempotency_key)` for withdrawals on the `ledger_transactions`
+   table. Insert uses `ON CONFLICT DO NOTHING`; the caller treats a
+   no-op as "already applied" and acks/moves on, not as an error.
 4. **Entries are immutable.** No code path issues `UPDATE` or `DELETE`
    against the entries table. A correction is a new, opposite Entry with
    `corrects_entry_id` set — the entries table is the audit log, the
@@ -214,17 +222,38 @@ sequenceDiagram
   clean way to check a batch-insert sums to zero without a deferred
   constraint trigger — more complexity than v1 needs. Worth revisiting
   in the observability/reliability phase (roadmap step 3).
+- **Make a Redis lock the primary mechanism preventing withdrawal
+  overdraft, instead of an optional optimization on top of Postgres.**
+  This is the alternative to Open Questions #1's resolution. Rejected:
+  Redis isn't as durable or consistent as Postgres — a lock can expire
+  under load or be lost outright on a Redis restart — so making it
+  load-bearing for a correctness property (no overdraft) would mean
+  correctness depends on Redis's availability, which this project's own
+  data-model split says it should never be for anything money-related.
 
 ## Open questions
 
-1. `docs/ARCHITECTURE.md` describes a Redis lock on the user as the
+1. ~~`docs/ARCHITECTURE.md` describes a Redis lock on the user as the
    mechanism preventing a withdrawal overdraft. I'm treating invariant
    #1 (the Postgres `UPDATE ... WHERE balance >= amount`) as the actual
    correctness boundary, and would use a Redis lock only as an optional
    fast-fail optimization (reject an obviously-concurrent second request
    before it reaches Postgres at all) — never as the thing correctness
    depends on. Want me to design it that way, or is there a reason you
-   want Redis to be load-bearing here?
+   want Redis to be load-bearing here?~~
+   **Decided: Option A.** The Postgres atomic `UPDATE ... WHERE
+   balance >= amount` (invariant #1) is the sole correctness boundary
+   preventing overdraft. A Redis lock, if implemented anywhere in the
+   withdrawal path, is purely an optional fast-fail optimization — it
+   may reject an obviously-concurrent second request before it reaches
+   Postgres at all, saving a DB round-trip, but nothing about
+   correctness is ever allowed to depend on it holding or even existing.
+   Reasoning: Redis isn't as durable or consistent as Postgres — a lock
+   can expire under load or be lost outright on a Redis restart — so it
+   must never be the mechanism overdraft-prevention actually relies on;
+   only Postgres's atomic UPDATE guarantees no overdraft.
+   `docs/ARCHITECTURE.md`'s `withdrawal-service` row has been updated to
+   say the same thing, so the docs don't contradict each other.
 2. I've scoped the on-chain reconciliation check (comparing
    `-ChainAccount.balance` against the hot wallet's real balance) as
    schema-supported but not built — no reconciliation job/service in
