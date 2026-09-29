@@ -63,7 +63,16 @@ existing key-custody design does.
   than deposits use (`deposit-flow.md`'s Confirmation Depth) before
   marking a Withdrawal Request `confirmed`, since funds leaving custody
   are more sensitive than funds arriving. Reduces how often a Nonce Gap
-  happens; can't eliminate it.
+  happens; can't eliminate it. **Decided: 64 blocks (~12.8 minutes at
+  Sepolia's ~12s average block time)** — exactly double
+  `deposit-flow.md`'s 32-block Confirmation Depth, per this term's own
+  stated invariant. Also grounded in a real Ethereum post-merge concept,
+  same as the deposit-side number: 64 blocks ≈ two epochs, roughly what
+  a full node exposes via the `finalized` block tag (reverting a
+  finalized block requires a large-scale validator-slashing event, not
+  an ordinary short reorg) — a meaningfully stronger guarantee than
+  deposit-flow.md's `safe`-tag-equivalent depth, appropriate since these
+  are funds leaving custody rather than arriving.
 - **Disputed** — the state a `confirmed` Withdrawal Request moves to
   when a Nonce Gap is detected at or above its nonce. Resolved only by
   explicit operator action — back to `confirmed` (original tx safely
@@ -270,7 +279,11 @@ sequenceDiagram
    the trickiest failure mode here — refunding it safely requires
    certainty it's truly dead, not just slow. I don't have a concrete
    timeout/replacement policy yet and would rather work it out with you
-   than guess a number that's wrong in a way that loses money.
+   than guess a number that's wrong in a way that loses money. This is
+   a separate question from Withdrawal Confirmation Depth (now resolved,
+   see below) — Confirmation Depth is about how long to wait once a tx
+   *is* included before calling it final; this is about what to do when
+   a broadcast tx never gets included at all. Still open.
 4. ~~Confirmed-then-reorged withdrawal.~~ **Decided (recommendation
    accepted):** not automated. Full design: a **Nonce Gap** (a Hot
    Wallet tx at nonce N reorged out) invalidates every Hot Wallet tx at
@@ -287,9 +300,11 @@ sequenceDiagram
    recommending **Withdrawal Confirmation Depth be deeper than
    deposit-flow.md's Confirmation Depth**, since funds leaving custody
    are more sensitive than funds arriving — reduces how often this
-   triggers, doesn't eliminate it. Confirm you're good with this shape;
-   the actual depth values still wait on chain choice (#3 above and
-   deposit-flow.md #3/#6).
+   triggers, doesn't eliminate it. **Depth values now resolved:**
+   Sepolia is the chosen testnet — Withdrawal Confirmation Depth = 64
+   blocks (~12.8 minutes), double deposit-flow.md's 32-block
+   Confirmation Depth. See the Withdrawal Confirmation Depth entry in
+   Ubiquitous language above for the full rationale.
 5. ~~Dust/minimum withdrawal amount~~ **Decided:** see Minimum
    Withdrawal Amount above and invariant #10 — 15× gas cost for native
    coin, operator-set for ERC-20, enforced at validation. **Still
