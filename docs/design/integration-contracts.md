@@ -495,7 +495,14 @@ repeating the detail on every line.
     it as separable in case you'd rather keep v1's request minimal and
     defer this to the observability phase. See `withdrawal-flow.md`
     invariant #5 and Open Questions #8 for the same flag from that doc's
-    side.
+    side. **Addendum, from Dev feedback while implementing `sweeper`
+    (`deposit-flow.md` invariant #14, its Open Questions #9):** this
+    same option (a) vs (b) choice also determines how a native-coin
+    Sweep avoids signing away its own gas money — if `wallet-service`
+    owns construction, it's the natural place to compute `balance −
+    actual gas cost` too, using the exact cost it's about to charge
+    rather than an estimate that could go stale by broadcast time. One
+    more real argument for (a), not a separate question to resolve.
     **Decision (Tech Lead, 2026-09-29): option (a), and yes to the optional
     `max_gas_price` ceiling.** The remaining `PROPOSED` markers on
     `/v1/sign/hot-wallet` for gas construction and `max_gas_price` in §2 are

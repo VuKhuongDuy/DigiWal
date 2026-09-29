@@ -397,33 +397,23 @@ technical requirement; see Open Questions #3.
 
 ## Open questions
 
-1. **Hardcoded CN-policy map vs. a config file.** I'm recommending a
-   hardcoded Go map inside `wallet-service` (Alternatives above) over
-   a YAML config, on proportionality and code-review-scrutiny grounds.
-   Confirm, or say if you'd rather it be config-driven from the start
-   (e.g. because you expect the rule count to grow quickly once
-   `ledger-service`/`api-gateway` join in).
-2. **Sequencing of the PROPOSED extensions.** I'm recommending:
-   `wallet-service`'s two `/v1/sign/*` rules ship now, as their own
-   task (0.6 below) — this is what the two flow docs' invariants
-   actually depend on, and it blocks nothing else. `ledger-service`'s
-   `apply()` rule (invariant #7) ships as part of Milestone 1 (task
-   1.3) since `ledger-service` doesn't exist yet — built in, not
-   retrofitted. `api-gateway`'s various proxied-endpoint rules wait
-   until each specific downstream endpoint is actually designed
-   (several are still GAP/PROPOSED HERE per
-   `integration-contracts.md` §2) — I'm deliberately not inventing
-   those paths here just to attach a CN rule to them. Confirm this
-   sequencing, or tell me if you want mTLS+CN-authorization mandatory
-   system-wide starting at Milestone 0 instead.
-3. **Cert lifetimes and manual-only rotation.** Proposed 10y CA / 2y
-   leaf certs, manual regenerate-and-redeploy, no automated pipeline.
-   I think this is proportionate to a testnet project with no other
-   rotation story, but flagging explicitly since a wrong call here is
-   cheap to fix now and more annoying to fix later. Say so if you'd
-   rather have shorter-lived certs with a tested (still manual)
-   rotation runbook from day one, to build the habit before the
-   multi-VM phase makes rotation matter for real.
+1. ~~Hardcoded CN-policy map vs. a config file.~~ **Decided: hardcoded
+   Go map** inside `wallet-service`, as recommended (Alternatives
+   above) — proportionality and code-review-scrutiny grounds. Revisit
+   if the rule count grows past a handful once `ledger-service`/
+   `api-gateway` join in.
+2. ~~Sequencing of the PROPOSED extensions.~~ **Decided, as
+   recommended:** `wallet-service`'s two `/v1/sign/*` rules ship now,
+   as their own task (0.6 below). `ledger-service`'s `apply()` rule
+   (invariant #7) ships as part of Milestone 1 (task 1.3), built in
+   from the start since `ledger-service` doesn't exist yet, not
+   retrofitted later. `api-gateway`'s various proxied-endpoint rules
+   wait until each specific downstream endpoint is actually designed —
+   no CN rule invented ahead of the endpoint it would attach to.
+3. ~~Cert lifetimes and manual-only rotation.~~ **Decided, as proposed:**
+   10y CA / 2y leaf certs, manual regenerate-and-redeploy, no automated
+   pipeline — proportionate to a testnet project with no other
+   rotation story anywhere else.
 4. **Should `wallet-service`'s already-shipped, currently-open
    `/v1/users/{userID}/deposit-address` endpoints move behind the new
    mTLS listener with `CN=api-gateway`, in the same task 0.6, or stay
@@ -437,8 +427,11 @@ technical requirement; see Open Questions #3.
    but flagging rather than assuming — this is also where
    `api-gateway`'s own leaf certificate (matrix row above) actually
    gets used for the first time, so the two decisions are linked.
-5. **ECDSA P-256 vs. RSA-4096 for the CA and leaf keys.** No strong
-   preference for a local testnet CA either way; recommending ECDSA
-   P-256 for faster generation and smaller certificates. Low-stakes
-   pick — flagging only so it's a deliberate choice, not a default
-   `gen-ca.sh` happens to encode without anyone deciding it.
+   **Still open — Tech Lead deferring explicitly (not overlooked):**
+   endpoint stays as-is for now, precisely because it touches
+   already-shipped code; the matrix row above stays **PROPOSED**. Come
+   back to this once there's a concrete reason to touch that endpoint
+   anyway, rather than as a standalone migration.
+5. ~~ECDSA P-256 vs. RSA-4096 for the CA and leaf keys.~~ **Decided:
+   ECDSA P-256**, as recommended — faster generation, smaller
+   certificates, no strong reason to prefer RSA at this trust level.
