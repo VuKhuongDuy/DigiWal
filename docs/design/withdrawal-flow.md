@@ -91,6 +91,21 @@ existing key-custody design does.
   Wallet more in gas than it moves) and to make spamming
   `withdrawal-service` with dust requests — and burning through Hot
   Wallet nonces doing it — less attractive.
+- **Withdrawal Whitelist** — the set of addresses a user has approved
+  as withdrawal destinations. A Withdrawal Request's `to_address` must
+  be an `active` entry in the requester's whitelist, checked at
+  validation alongside Minimum Withdrawal Amount.
+- **Whitelist Entry** — one `(user_id, address)` pair, state `pending`
+  (just added) or `active` (usable for withdrawal). Removal is instant
+  — an entry simply stops existing, no state needed for that direction.
+- **Whitelist Cooldown** — **Decided: 24 hours.** The delay between a
+  Whitelist Entry's `added_at` and the moment it becomes `active`. This
+  is the actual security property, not the whitelist's existence: an
+  attacker who compromises a user's session can add their own address,
+  but can't withdraw to it for 24h — giving the real user a window to
+  notice and remove it. Computed on read (`now() >= added_at +
+  cooldown`), not by a background job flipping status — a missed or
+  delayed job would otherwise silently widen the window.
 
 Withdrawal Request states: a row exists first (invariant #11), then
 moves `requested → validated → reserved → signed → broadcast →
@@ -170,6 +185,22 @@ for the one remaining unresolved failure mode.
     already assumed: they guard against re-signing or re-reserving an
     *existing* request, but not against two requests existing in the
     first place for the same `idempotency_key`.
+12. **A Withdrawal Request's `to_address` must be an `active` Whitelist
+    Entry for that user, checked at validation** — same step as
+    Minimum Withdrawal Amount (invariant #10), before any Reservation.
+    An address that's `pending` (still cooling down) or was never
+    whitelisted at all is rejected the same way as any other validation
+    failure — `rejected`, no Entry ever posted.
+13. **Adding a Whitelist Entry never takes effect immediately.** Created
+    `pending`; only usable once Whitelist Cooldown has elapsed. Removing
+    a Whitelist Entry takes effect immediately, no cooldown — a cooldown
+    protects against *gaining* a new withdrawal destination, not against
+    losing one, so there's no symmetric risk to guard on the remove
+    path.
+14. **A Withdrawal Request's `to_address` is also checked against the
+    Screening List** (`compliance-screening.md`) at the same validation
+    step, alongside the whitelist and minimum-amount checks — a match
+    rejects the request before any Reservation.
 
 ## Diagram
 
@@ -188,7 +219,7 @@ sequenceDiagram
         WD->>WD: read back existing row
         WD-->>Gateway: existing request's current status
     else new row created
-        WD->>WD: validate (well-formed address, asset registered,<br/>amount >= asset.min_withdrawal_amount)
+        WD->>WD: validate (well-formed address, asset registered,<br/>amount >= asset.min_withdrawal_amount,<br/>to_address is an active Whitelist Entry,<br/>to_address not on Screening List)
         WD->>Ledger: apply(idempotency_key, [debit user, credit chain account])
         alt insufficient funds
             Ledger-->>WD: error
@@ -240,6 +271,23 @@ sequenceDiagram
     end
 ```
 
+Whitelist Entry lifecycle (invariants #12–13):
+
+```mermaid
+sequenceDiagram
+    participant Gateway as api-gateway
+    participant WD as withdrawal-service
+
+    Gateway->>WD: add whitelist entry (user_id, address)
+    WD->>WD: INSERT whitelist_entries (status=pending, added_at=now())
+    Note over WD: not usable for withdrawal yet
+
+    loop 24h Whitelist Cooldown elapses
+    end
+
+    Note over WD: on next validate() call for this user,<br/>now() >= added_at + 24h → entry counts as active<br/>(computed on read, no background job)
+```
+
 ## Alternatives considered
 
 - **Pay out from each user's own derived deposit address (no Hot
@@ -277,6 +325,17 @@ sequenceDiagram
   isn't confirmed, so treating them independently would let
   `withdrawal-service`/`sweeper` keep issuing transactions that can
   never actually land.
+- **No cooldown, whitelist entries active immediately.** Rejected —
+  this is the whole point of a whitelist. Without a delay, an attacker
+  who compromises a user's session can add their own address and
+  withdraw to it in the same request; the whitelist would add an extra
+  API call for a real user's convenience while doing nothing for
+  security.
+- **Let users disable the whitelist requirement entirely** (some real
+  exchanges offer this as an opt-out for convenience, at higher risk).
+  Not offering this for v1 — matches the project's existing conservative
+  stance (fully automatic withdrawals, mandatory Minimum Withdrawal
+  Amount) of not giving users a lever to weaken custody controls.
 
 ## Open questions
 
@@ -327,3 +386,18 @@ sequenceDiagram
    open:** whether the Hot Wallet's own gas balance needs low-balance
    alerting — not designing now, flagging for the observability phase
    (roadmap step 3).
+6. **Withdrawal Whitelist Cooldown: Decided (24h).** One honest gap
+   worth flagging: the cooldown's security value depends on the user
+   actually noticing a new `pending` entry before it activates, but
+   this project has no notification/email service (not on the roadmap
+   yet). Without one, the 24h window is real but silent — a user only
+   discovers an unauthorized addition by manually checking their
+   whitelist page. Do you want a minimal notification mechanism in
+   scope now, or accept this as a known gap until `history-service`/
+   notifications exist?
+7. **How is "add a Whitelist Entry" itself authenticated?** This
+   project has no user-auth design yet at all (not even Withdrawal
+   Requests specify how `api-gateway` authenticates the caller) — so
+   this inherits that same, already-existing gap rather than being a
+   new one. Flagging so it's not mistaken for solved just because
+   whitelist entries now exist.

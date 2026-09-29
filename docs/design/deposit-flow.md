@@ -133,6 +133,11 @@ alongside the other two (chain-watcher's Postgres, the seed split).
    already swept the funds, the current balance is at or near zero and
    there's nothing meaningful left to move, rather than the retry
    signing for a stale, possibly-wrong amount.
+10. **A deposit whose `from_address` is on the Screening List is never
+    swept, and never credited by `ledger-service` either** — full
+    design in `compliance-screening.md`. Both `sweeper` and
+    `ledger-service` check independently, since they each consume
+    `deposits.confirmed` directly.
 
 ## Diagram
 
