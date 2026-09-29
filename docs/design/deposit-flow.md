@@ -178,7 +178,7 @@ sequenceDiagram
     Sweeper->>Wallet: sign(from=user address, to=Hot Wallet, asset, amount=full balance)
     Wallet-->>Sweeper: signed raw tx
     Sweeper->>RPC: broadcast (Sweep)
-    Note over Sweeper: retried on failure with a fresh balance check;<br/>never touches the Ledger Transaction already applied
+    Note over Sweeper: retried on failure with a fresh balance check,<br/>never touches the Ledger Transaction already applied
 ```
 
 ## Alternatives considered
