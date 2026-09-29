@@ -42,9 +42,9 @@ services because that's what a real user-visible flow requires.
 
 | Service | Status | Design doc(s) |
 |---|---|---|
-| `wallet-service` | Skeleton exists (HD derive, seal/unseal, Postgres+Redis) — no signing endpoint, no tiering yet | `wallet-tiering.md`, `withdrawal-flow.md` |
+| `wallet-service` | Skeleton exists (HD derive, seal/unseal, Postgres+Redis) — no signing endpoint, no tiering yet | `wallet-tiering.md`, `withdrawal-flow.md`, `service-auth-mtls.md` |
 | `chain-watcher` | Not started | `deposit-flow.md` |
-| `ledger-service` | Not started | `ledger.md`, `compliance-screening.md` |
+| `ledger-service` | Not started | `ledger.md`, `compliance-screening.md`, `service-auth-mtls.md` (apply() auth, PROPOSED) |
 | `sweeper` | Not started | `deposit-flow.md` |
 | `withdrawal-service` | Not started | `withdrawal-flow.md`, `wallet-tiering.md`, `compliance-screening.md` |
 | `history-service` | Not started | `ARCHITECTURE.md` only (read-model, no dedicated design doc — schema-less enough not to need one) |
@@ -57,14 +57,17 @@ services because that's what a real user-visible flow requires.
 |---|---|---|---|---|
 | 0.1 | `pkg/events` | This doc's recommendation above | Shared Go structs for the 4 Kafka event payloads, versioned | — |
 | 0.2 | `wallet-service` | `wallet-tiering.md` invariant #1 | Hot seed split from user-derivation seed — ≥2 sealed seeds, config surface for which key material backs which | — |
-| 0.3 | `wallet-service` | `withdrawal-flow.md` invariants #5, #16; `integration-contracts.md` §2 | `POST /v1/sign/hot-wallet {to_address, asset_id, amount, chain_id, idempotency_key}` → `{signed_raw_tx, nonce}`, over mTLS, Hot-Wallet-only, no caller-chosen key, no caller-supplied gas params (**PROPOSED**, pending sign-off — `integration-contracts.md` Open Questions #11), idempotent per `idempotency_key` (persist `idempotency_key -> nonce, signed_raw_tx`, never sign twice for the same key) | 0.2 |
+| 0.3 | `wallet-service` | `withdrawal-flow.md` invariants #5, #16; `integration-contracts.md` §2 | `POST /v1/sign/hot-wallet {to_address, asset_id, amount, chain_id, idempotency_key}` → `{signed_raw_tx, nonce}`, over mTLS, Hot-Wallet-only, no caller-chosen key, no caller-supplied gas params (**PROPOSED**, pending sign-off — `integration-contracts.md` Open Questions #11), idempotent per `idempotency_key` (persist `idempotency_key -> nonce, signed_raw_tx`, never sign twice for the same key) | 0.2, 0.6 |
 | 0.4 | `wallet-service` | `withdrawal-flow.md` invariants #6, #7, #16 | Hot Wallet nonce allocation table (atomic `UPDATE...RETURNING`, same pattern as existing `allocateIndex`) + Nonce-Gap freeze flag + the idempotency-key persistence layer task 0.3 depends on | 0.3 |
-| 0.5 | `wallet-service` | `deposit-flow.md` invariants #6, #7, #12; `integration-contracts.md` §2 | `POST /v1/sign/user-address {user_id, to_address, asset_id, amount, chain_id}` → `{signed_raw_tx}`, over mTLS. Server-enforces `to_address == Hot Wallet`, never trusting the caller. Sources the signing user address's own EVM nonce via a live `eth_getTransactionCount(address, "pending")` RPC read (**PROPOSED**, `deposit-flow.md` invariant #12) rather than a DB counter. No idempotency key needed (idempotent by construction — caller always signs the live balance). | 0.2 |
+| 0.5 | `wallet-service` | `deposit-flow.md` invariants #6, #7, #12; `integration-contracts.md` §2 | `POST /v1/sign/user-address {user_id, to_address, asset_id, amount, chain_id}` → `{signed_raw_tx}`, over mTLS. Server-enforces `to_address == Hot Wallet`, never trusting the caller. Sources the signing user address's own EVM nonce via a live `eth_getTransactionCount(address, "pending")` RPC read (**PROPOSED**, `deposit-flow.md` invariant #12) rather than a DB counter. No idempotency key needed (idempotent by construction — caller always signs the live balance). | 0.2, 0.6 |
+| 0.6 | `infra/pki`, `wallet-service` | `docs/design/service-auth-mtls.md` | One-time CA generation script (`infra/pki/gen-ca.sh`) + per-service leaf-cert script (`infra/pki/gen-leaf.sh`), gitignored output, docker-compose volume-mount wiring for `wallet-service`'s (and later `withdrawal-service`'s/`sweeper`'s) certs; `wallet-service` gains an mTLS listener (`tls.RequireAndVerifyClientCert`) separate from its plain `/healthz` listener, plus the CN-authorization middleware enforcing `service-auth-mtls.md`'s matrix (`hot-wallet` → `{withdrawal-service, sweeper}`, `user-address` → `{sweeper}`) before any handler logic runs | — |
 
 **DoD:** `wallet-service` can sign a Hot-Wallet transaction over mTLS
 and hand out monotonic nonces, and can sign a Sweep transaction from a
-specified user address to the Hot Wallet only; nothing calls either
-endpoint for real yet. Estimated 5 PRs.
+specified user address to the Hot Wallet only, with both signing
+endpoints rejecting any caller whose certificate CN isn't on that
+endpoint's allow-list; nothing calls either endpoint for real yet.
+Estimated 6 PRs.
 
 ## Milestone 1 — Ledger core (`ledger-service`)
 
@@ -72,7 +75,7 @@ endpoint for real yet. Estimated 5 PRs.
 |---|---|---|---|---|
 | 1.1 | `ledger-service` | `ledger.md` schema section | Postgres migrations: `accounts`, `entries`/`ledger_transactions`, `asset_registry` (incl. `hot_floor`, `hot_ceiling`, `min_withdrawal_amount` fields) | — |
 | 1.2 | `ledger-service` | `ledger.md` Asset Registry | Static config loader (env/YAML), validated at startup | 1.1 |
-| 1.3 | `ledger-service` | `ledger.md` invariants #1, #2 | `apply(idempotency_key, entries[])` — atomic, idempotent, sum-to-zero enforced in one DB transaction | 1.1 |
+| 1.3 | `ledger-service` | `ledger.md` invariants #1, #2; `service-auth-mtls.md` invariant #7 (PROPOSED) | `apply(idempotency_key, entries[])` — atomic, idempotent, sum-to-zero enforced in one DB transaction, served behind an mTLS listener with CN-authorization restricting it to `CN=withdrawal-service` only (built in from the start, using the same CA/leaf-cert tooling from task 0.6) | 1.1, 0.6 |
 | 1.4 | `ledger-service` | `pkg/events` (0.1) | Kafka consumer scaffold for `deposits.confirmed` (interface only — real message comes in M2) | 0.1 |
 | 1.5 | `ledger-service` | `compliance-screening.md` invariant #1 | Screening-List check in the deposit-consumption path; `flagged_deposits` table, never auto-applied | 1.3, 1.4 |
 | 1.6 | `ledger-service` | invariants #1–#2 | Unit + integration tests: overdraft rejection, sum-to-zero, idempotent replay | 1.3 |
@@ -88,7 +91,7 @@ by hand). Estimated 5-6 PRs.
 |---|---|---|---|---|
 | 2.1 | `chain-watcher` | `deposit-flow.md` | Postgres schema (watermark, `observed_transfers`), Sepolia RPC polling, known-address set (Redis), Confirmation Depth = 32 blocks, publishes `deposits.detected`/`deposits.confirmed` with the exact payload the doc's diagram specifies | 0.1 |
 | 2.2 | `ledger-service` | 2.1's real topic | Wire M1.4's consumer scaffold to the live topic | 1.5, 2.1 |
-| 2.3 | `sweeper` | `deposit-flow.md` invariants (Gas Top-Up, Sweep idempotency #8, #10, #12, #13) | Consumes `deposits.confirmed`, independent compliance check, Gas Top-Up (0.001 ETH) via `wallet-service /v1/sign/hot-wallet` with idempotency key `gas-topup:{chain_id}:{tx_hash}:{log_index}` (**PROPOSED**), fresh-balance-read before signing, sweeps to Hot Wallet via `wallet-service /v1/sign/user-address` | 0.3, 0.5, 2.1 |
+| 2.3 | `sweeper` | `deposit-flow.md` invariants (Gas Top-Up, Sweep idempotency #8, #10, #12, #13) | Consumes `deposits.confirmed`, independent compliance check, Gas Top-Up (0.001 ETH) via `wallet-service /v1/sign/hot-wallet` with idempotency key `gas-topup:{chain_id}:{tx_hash}:{log_index}` (**PROPOSED**), fresh-balance-read before signing, sweeps to Hot Wallet via `wallet-service /v1/sign/user-address` — calls made with `sweeper`'s own leaf certificate (`CN=sweeper`, from task 0.6's tooling) | 0.3, 0.5, 2.1, 0.6 |
 | 2.4 | `history-service` | `deposits.confirmed`/`deposits.detected` | Minimal MongoDB consumer, denormalized read model | 2.1 |
 | 2.5 | `api-gateway` | — | `GET /deposit-address` (proxies `wallet-service`), `GET /balance` (proxies `ledger-service`) | 1.3 |
 | 2.6 | all of the above | — | e2e test against a local Sepolia fork (Anvil): simulate a deposit, assert balance updates | 2.1–2.5 |
@@ -103,7 +106,7 @@ see their balance update after 32 blocks — first real demo. Estimated
 |---|---|---|---|---|
 | 3.1 | `withdrawal-service` | `withdrawal-flow.md` invariant #11 | Schema (state machine `requested→validated→reserved→signed→broadcast→confirmed`), `POST /withdrawals` idempotent creation (`INSERT...ON CONFLICT DO NOTHING` first, before anything else) | 0.1 |
 | 3.2 | `withdrawal-service` | invariant #10, whitelist (below), `compliance-screening.md` | Validation: min-withdrawal-amount, whitelist-active check, blacklist check — all before any ledger reservation | 3.1, 3.6 |
-| 3.3 | `withdrawal-service` | invariants #1–#6, #16 | Reserve (via `ledger.apply()`) → sign (via `wallet-service /v1/sign/hot-wallet`, passing the Withdrawal Request's own `idempotency_key`) → broadcast → poll to Withdrawal Confirmation Depth = 64 blocks | 3.2, 0.3, 0.4 |
+| 3.3 | `withdrawal-service` | invariants #1–#6, #16 | Reserve (via `ledger.apply()`) → sign (via `wallet-service /v1/sign/hot-wallet`, passing the Withdrawal Request's own `idempotency_key`, using `withdrawal-service`'s own leaf certificate from task 0.6) → broadcast → poll to Withdrawal Confirmation Depth = 64 blocks | 3.2, 0.3, 0.4, 0.6 |
 | 3.4 | `withdrawal-service` | invariants #7–#9 | Nonce Gap detection, `disputed` state, freeze via `wallet-service`, operator-resolution stub (manual DB action, no UI yet) | 3.3, 0.4 |
 | 3.5 | `withdrawal-service` | latest idempotency-gap fix | Compensating Entry using the deterministic `{idempotency_key}:refund` key | 3.3 |
 | 3.6 | `withdrawal-service` | new Withdrawal Whitelist section | Add (pending → active after 24h cooldown) / remove (instant) whitelist entries | 3.1 |
@@ -140,12 +143,12 @@ on how many PRs you can review per day, not developer headcount:
 
 | Milestone | PRs | Cumulative |
 |---|---|---|
-| 0 — Foundations | 5 | 5 |
-| 1 — Ledger core | 5-6 | 10-11 |
-| 2 — Deposit flow | 6 | 16-17 |
-| 3 — Withdrawal flow | 8 | 24-25 |
-| 4 — Tiering tooling | 3 | 27-28 |
-| 5 — Compliance completion | 2 | 29-30 |
+| 0 — Foundations | 6 | 6 |
+| 1 — Ledger core | 5-6 | 11-12 |
+| 2 — Deposit flow | 6 | 17-18 |
+| 3 — Withdrawal flow | 8 | 25-26 |
+| 4 — Tiering tooling | 3 | 28-29 |
+| 5 — Compliance completion | 2 | 30-31 |
 
 At a sustainable pace of 2-4 reviewed PRs/day, milestones 0-3 (the
 "it actually works end-to-end" core) land in roughly **6-12 working

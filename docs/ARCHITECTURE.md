@@ -78,6 +78,15 @@ system where sloppy key handling is the whole point of the lesson:
 - Each mnemonic is shown exactly once, at generation time, to stdout —
   simulating "write this down and put it in a safe" — and is never
   returned by any API afterward.
+- **Internal service-to-service calls that need mTLS** (`wallet-service`'s
+  `/v1/sign/*` endpoints today; `ledger-service`'s `apply()` and other
+  internal hops as PROPOSED extensions) are backed by a small,
+  project-owned local CA and per-service client certificates whose
+  Common Name is checked against a per-endpoint allow-list before any
+  request is processed — mTLS alone ("some cert the server trusts") was
+  not enough to cap blast radius by *which* service is calling. Full
+  CA/issuance/rotation design and the CN-authorization mechanism:
+  `docs/design/service-auth-mtls.md`.
 - Testnet only. No real funds, ever. If you later want to point this at
   a real chain, that's a much bigger conversation about HSMs, multi-sig,
   withdrawal review queues, and key ceremony — out of scope here.

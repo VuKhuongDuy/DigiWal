@@ -161,6 +161,11 @@ concrete Confirmation Depth and Gas Top-Up numbers below.
    `withdrawal-flow.md` invariant #5 places on the Hot Wallet's own
    signing endpoint, mirrored here for the destination instead of the
    key. **Decided** (`integration-contracts.md` Open Questions #5).
+   **Cross-reference:** this blast-radius argument likewise depends on
+   `wallet-service` enforcing, by client-certificate CN, that only
+   `sweeper` can call this endpoint at all — see
+   `docs/design/service-auth-mtls.md` invariants #2 and #4
+   (CN-based authorization).
 8. **Gas Top-Up happens only when needed, and is idempotent per
    deposit.** Before topping up, `sweeper` checks the address's current
    native balance — a retried Sweep attempt must never blindly re-fund

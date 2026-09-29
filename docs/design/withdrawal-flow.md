@@ -196,6 +196,12 @@ for the one remaining unresolved failure mode.
    caller-supplied `max_gas_price` safety ceiling (never a dictated
    price, just a cap on cost exposure) is also **PROPOSED** — see
    `integration-contracts.md` §2 and this doc's Open Questions.
+   **Cross-reference:** this "blast radius capped" argument depends on
+   `wallet-service` actually enforcing *who* is allowed to call this
+   endpoint by client-certificate identity, not just that the request
+   body has no key-selecting field — see
+   `docs/design/service-auth-mtls.md` invariants #2 and #4
+   (CN-based authorization).
 6. **Hot Wallet nonce allocation is atomic and monotonic** — same
    `UPDATE ... RETURNING` pattern `wallet-service` already uses for
    derivation-index allocation (`internal/storage/postgres.go`'s
@@ -460,7 +466,10 @@ sequenceDiagram
    auth, testnet-only" (matches the project's current low-ceremony local
    setup) to a shared bearer secret or mTLS. This is a security-posture
    call, not something I'll default silently.
-   **Decided (PR #1): mTLS.**
+   **Decided (PR #1): mTLS.** Full CA/certificate-issuance and
+   CN-based authorization design (the "which caller may call which
+   endpoint" piece this decision didn't originally cover):
+   `docs/design/service-auth-mtls.md`.
 3. **Stuck/dropped broadcast handling.** A withdrawal that's broadcast
    but never confirms (underpriced, replaced, dropped from mempool) is
    the trickiest failure mode here — refunding it safely requires
