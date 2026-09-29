@@ -105,8 +105,9 @@ existing key-custody design does.
   be an `active` entry in the requester's whitelist, checked at
   validation alongside Minimum Withdrawal Amount.
 - **Whitelist Entry** — one `(user_id, address)` pair, state `pending`
-  (just added) or `active` (usable for withdrawal). Removal is instant
-  — an entry simply stops existing, no state needed for that direction.
+  (just added) or `active` (usable for withdrawal). `(user_id, address)`
+  is unique — see invariant #15. Removal is instant — an entry simply
+  stops existing, no state needed for that direction.
 - **Whitelist Cooldown** — **Decided: 24 hours.** The delay between a
   Whitelist Entry's `added_at` and the moment it becomes `active`. This
   is the actual security property, not the whitelist's existence: an
@@ -210,6 +211,13 @@ for the one remaining unresolved failure mode.
     Screening List** (`compliance-screening.md`) at the same validation
     step, alongside the whitelist and minimum-amount checks — a match
     rejects the request before any Reservation.
+15. **A Whitelist Entry's `(user_id, address)` pair is unique.**
+    **Decided** (`docs/design/integration-contracts.md` Open Questions
+    #10). `UNIQUE(user_id, address)` on `whitelist_entries` —
+    `INSERT ... ON CONFLICT (user_id, address) DO NOTHING`. Re-adding an
+    address that already has a `pending` or `active` entry for that
+    user is a no-op: it neither errors nor restarts that entry's
+    Whitelist Cooldown clock.
 
 ## Diagram
 
@@ -280,7 +288,7 @@ sequenceDiagram
     end
 ```
 
-Whitelist Entry lifecycle (invariants #12–13):
+Whitelist Entry lifecycle (invariants #12–13, #15):
 
 ```mermaid
 sequenceDiagram
@@ -288,8 +296,8 @@ sequenceDiagram
     participant WD as withdrawal-service
 
     Gateway->>WD: add whitelist entry (user_id, address)
-    WD->>WD: INSERT whitelist_entries (status=pending, added_at=now())
-    Note over WD: not usable for withdrawal yet
+    WD->>WD: INSERT whitelist_entries (status=pending, added_at=now())<br/>ON CONFLICT (user_id, address) DO NOTHING
+    Note over WD: not usable for withdrawal yet<br/>(re-adding an existing pending/active entry no-ops, invariant #15)
 
     loop 24h Whitelist Cooldown elapses
     end

@@ -39,8 +39,7 @@ you instead of letting you fake them:
 | `api-gateway` | User-facing REST API: get deposit address, request withdrawal, request internal transfer, get balance/history. | all of the above |
 
 Event bus (Kafka topics): `deposits.detected`, `deposits.confirmed`,
-`withdrawals.requested`, `withdrawals.broadcast`, `withdrawals.confirmed`,
-`transfers.internal`.
+`withdrawals.broadcast`, `withdrawals.confirmed`, `transfers.internal`.
 
 ## Data model split (the actual point of using 4 different stores)
 

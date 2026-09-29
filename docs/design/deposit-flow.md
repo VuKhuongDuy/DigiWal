@@ -69,8 +69,11 @@ concrete Confirmation Depth and Gas Top-Up numbers below.
 - **Observed Transfer** — a transfer chain-watcher has seen, keyed by
   `(chain_id, tx_hash, log_index)`, in one of two states: `pending`
   (seen, not yet confirmation-deep) or `confirmed` (confirmation-deep,
-  deposit event emitted). This is chain-watcher's own persisted state —
-  see Open Questions #1.
+  deposit event emitted). **Decided:** for a native-coin transfer, which
+  has no log at all, `log_index = -1` is the sentinel value used in this
+  key; an ERC-20 transfer keeps using its real, always ≥0 log index
+  (`ledger.md`'s Idempotency Key definition uses the same convention).
+  This is chain-watcher's own persisted state — see Open Questions #1.
 - **Deposit Detected** — event emitted the first time a matching
   transfer is seen (any depth), informational only, lets
   `history-service` show the user an incoming/pending deposit.
@@ -136,25 +139,40 @@ concrete Confirmation Depth and Gas Top-Up numbers below.
    needs no new key material; custody of "who can move a user's swept
    funds" stays exactly where it already was. `sweeper` asks for the
    signature, it never holds or derives the key itself.
-7. **Gas Top-Up happens only when needed, and is idempotent per
+7. **`wallet-service` enforces server-side that a Sweep signing
+   request's destination is always the Hot Wallet — it never trusts the
+   caller's `to_address`.** `POST /v1/sign/user-address` (the endpoint
+   `sweeper` calls for the Sweep step, `docs/design/integration-contracts.md`
+   §2) lets the caller pick *which user key* signs, by design — that's
+   the whole point of the endpoint — but the destination is not
+   caller-controlled: `wallet-service` validates the request's
+   `to_address` against the Hot Wallet address itself before signing,
+   rather than accepting whatever `sweeper` sends. This caps a
+   compromised `sweeper`'s blast radius at "can move already-deposited,
+   not-yet-swept user funds into the Hot Wallet," never to an arbitrary
+   address — the same spirit as the "no caller-chosen key" constraint
+   `withdrawal-flow.md` invariant #5 places on the Hot Wallet's own
+   signing endpoint, mirrored here for the destination instead of the
+   key. **Decided** (`integration-contracts.md` Open Questions #5).
+8. **Gas Top-Up happens only when needed, and is idempotent per
    deposit.** Before topping up, `sweeper` checks the address's current
    native balance — a retried Sweep attempt must never blindly re-fund
    an address that's already funded, or the Hot Wallet bleeds gas on
    every retry.
-8. **A failed or stuck Sweep never touches the Ledger.** The user's
+9. **A failed or stuck Sweep never touches the Ledger.** The user's
    credited balance (`ledger.md`) is set the moment `deposits.confirmed`
    is applied and is unaffected by whether the Sweep itself succeeds,
    fails, or needs a retry — Sweep is custody housekeeping, not a
    balance-affecting operation.
-9. **`sweeper` always re-reads the address's current on-chain balance
-   immediately before signing the Sweep itself, not just before Gas
-   Top-Up.** Never reuses a balance value read earlier in the same or a
-   prior (possibly crashed or Kafka-redelivered) attempt. This is what
-   makes a retried Sweep naturally idempotent: if an earlier attempt
-   already swept the funds, the current balance is at or near zero and
-   there's nothing meaningful left to move, rather than the retry
-   signing for a stale, possibly-wrong amount.
-10. **A deposit whose `from_address` is on the Screening List is never
+10. **`sweeper` always re-reads the address's current on-chain balance
+    immediately before signing the Sweep itself, not just before Gas
+    Top-Up.** Never reuses a balance value read earlier in the same or a
+    prior (possibly crashed or Kafka-redelivered) attempt. This is what
+    makes a retried Sweep naturally idempotent: if an earlier attempt
+    already swept the funds, the current balance is at or near zero and
+    there's nothing meaningful left to move, rather than the retry
+    signing for a stale, possibly-wrong amount.
+11. **A deposit whose `from_address` is on the Screening List is never
     swept, and never credited by `ledger-service` either** — full
     design in `compliance-screening.md`. Both `sweeper` and
     `ledger-service` check independently, since they each consume
@@ -183,7 +201,7 @@ sequenceDiagram
         CW->>PG: SELECT pending transfers now >= confirmation_depth blocks old
         loop each newly-confirmed transfer
             CW->>PG: UPDATE observed_transfers SET status='confirmed'<br/>WHERE status='pending'
-            CW->>Kafka: publish deposits.confirmed<br/>{chain_id, tx_hash, log_index, asset_id, to_address, amount, block_number}
+            CW->>Kafka: publish deposits.confirmed<br/>{chain_id, tx_hash, log_index, asset_id, from_address, to_address, amount, block_number}
         end
         CW->>PG: advance watermark
     end
@@ -209,8 +227,9 @@ sequenceDiagram
         Sweeper->>RPC: broadcast (Gas Top-Up)
         Sweeper->>RPC: wait for inclusion
     end
-    Sweeper->>RPC: get user address's current asset balance (fresh read, invariant #9)
+    Sweeper->>RPC: get user address's current asset balance (fresh read, invariant #10)
     Sweeper->>Wallet: sign(from=user address, to=Hot Wallet, asset, amount=current balance)
+    Note over Wallet: enforces to_address == Hot Wallet server-side (invariant #7)
     Wallet-->>Sweeper: signed raw tx
     Sweeper->>RPC: broadcast (Sweep)
     Note over Sweeper: retried on failure with a fresh balance check,<br/>never touches the Ledger Transaction already applied
