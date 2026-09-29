@@ -42,6 +42,12 @@ Deposit Detection's scope. `sweeper` is a new addition to
 `docs/ARCHITECTURE.md`'s service table — tracked as a follow-up
 alongside the other two (chain-watcher's Postgres, the seed split).
 
+**Decided: chosen testnet is Sepolia.** ~12s average block time,
+proof-of-stake, post-merge consensus. Its realistic reorg risk is
+shallow, short reorgs — typically 1-2 blocks — rather than the deep
+reorgs a pre-merge PoW chain could suffer. This is the basis for the
+concrete Confirmation Depth and Gas Top-Up numbers below.
+
 ## Ubiquitous language
 
 - **Watched Address** — an address `wallet-service` has issued to a
@@ -51,7 +57,15 @@ alongside the other two (chain-watcher's Postgres, the seed split).
   transfer is treated as final and eligible to credit the ledger. One
   config value for the whole chain in this phase (block-based, not
   asset-based — native and ERC-20 transfers in the same block reach
-  finality together).
+  finality together). **Decided: 32 blocks (~6.4 minutes at Sepolia's
+  ~12s average block time).** Sepolia's realistic reorg risk is shallow
+  — typically 1-2 blocks — so 32 blocks is already 16-32x that observed
+  depth, a comfortable safety margin without waiting for full protocol
+  finality. It also isn't an arbitrary constant: 32 blocks ≈ one epoch
+  under Ethereum's post-merge consensus, roughly what a full node
+  exposes via the `safe` block tag — a block very unlikely to be
+  reorged under normal network conditions, short of a large-scale
+  consensus fault.
 - **Observed Transfer** — a transfer chain-watcher has seen, keyed by
   `(chain_id, tx_hash, log_index)`, in one of two states: `pending`
   (seen, not yet confirmation-deep) or `confirmed` (confirmation-deep,
@@ -76,7 +90,14 @@ alongside the other two (chain-watcher's Postgres, the seed split).
   received any native coin. Not a Ledger Transaction and not a Treasury
   Movement (`wallet-tiering.md`) — it's an operating cost paid out of
   the Hot Wallet's balance, same category as any other gas the Hot
-  Wallet spends.
+  Wallet spends. **Decided: 0.001 ETH per Gas Top-Up.** Math: 65,000 gas
+  (typical cost of an ERC-20 `transfer()` call) × 10 gwei (a
+  conservative estimate for Sepolia's typical gas price — usually well
+  under that in normal conditions, but Sepolia is prone to price spikes
+  during faucet drains and load-testing/spam bursts, so this builds in
+  margin) ≈ 0.00065 ETH, rounded up to 0.001 ETH so the Sweep
+  transaction the top-up is funding always clears with room to spare
+  instead of being sized to the exact minimum.
 
 ## Aggregates & invariants
 
@@ -224,10 +245,15 @@ sequenceDiagram
    maintained config (env/YAML list of `{symbol, contract_address,
    decimals}`) loaded at chain-watcher and ledger-service startup — no
    admin API/UI this phase. Confirm that's enough for v1.
-3. **Confirmation depth**: needs an actual block count once you pick the
-   specific testnet (e.g. Sepolia). No strong opinion yet beyond
+3. ~~**Confirmation depth**: needs an actual block count once you pick
+   the specific testnet (e.g. Sepolia). No strong opinion yet beyond
    "shallow depths risk crediting a deposit that later reorgs out" —
-   I'll propose a number once the chain is chosen.
+   I'll propose a number once the chain is chosen.~~
+   **Decided:** Sepolia chosen as the testnet. Confirmation Depth = 32
+   blocks (~6.4 minutes at Sepolia's ~12s average block time) — see the
+   Confirmation Depth entry in Ubiquitous language above for the full
+   rationale (margin over Sepolia's observed 1-2 block reorgs, aligned
+   with the `safe` block tag).
 4. **Reorg handling beyond confirmation depth** (a *confirmed* deposit's
    block gets reorged out anyway) is out of scope here — flagging
    rather than silently assuming it can't happen. Worth its own note
@@ -237,7 +263,10 @@ sequenceDiagram
    chain-watcher a pure observer and gives Sweep (a distinct trust
    boundary — it signs and broadcasts) its own home instead of quietly
    widening an existing service's scope.
-6. **Gas Top-Up amount** — needs a concrete number (enough for one
+6. ~~**Gas Top-Up amount** — needs a concrete number (enough for one
    ERC-20 `transfer()` call at the chosen testnet's typical gas price,
    plus margin) once the testnet is chosen alongside Confirmation Depth
-   (#3). Same "waiting on chain choice" reason, not guessing now.
+   (#3). Same "waiting on chain choice" reason, not guessing now.~~
+   **Decided:** 0.001 ETH per Gas Top-Up — see the Gas Top-Up entry in
+   Ubiquitous language above for the gas-cost math (65,000 gas × 10
+   gwei, rounded up for margin).
