@@ -11,7 +11,9 @@ why this domain was chosen, the security model for the one thing that
 actually matters here (the master key), and the phased roadmap this
 repo is being built in. `docs/TEAM_OPERATING_MODEL.md` and `CLAUDE.md`
 cover how this repo is worked on (roles, process gates) — read those
-before running any AI agent against this codebase.
+before running any AI agent against this codebase. `docs/DEVELOPMENT.md`
+covers day-to-day local dev (running a local Anvil EVM node instead of
+real Sepolia, unlimited test funds, simulating reorgs).
 
 ## Status
 
@@ -31,6 +33,7 @@ DigiWal/
   docs/
     ARCHITECTURE.md                system design, security model, roadmap
     TEAM_OPERATING_MODEL.md        roles, workflow, process gates
+    DEVELOPMENT.md                 local dev setup (Anvil, test funds, reorg simulation)
     design/                        per-feature design docs (produced before non-trivial implementation)
   infra/                          shared docker-compose services (Postgres, Redis, Kafka, MongoDB, Prometheus, Grafana)
   services/
