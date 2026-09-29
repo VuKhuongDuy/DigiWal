@@ -23,6 +23,9 @@ func (s simChain) ChainID(ctx context.Context) (*big.Int, error) { return s.c.Ch
 func (s simChain) PendingNonceAt(ctx context.Context, a common.Address) (uint64, error) {
 	return s.c.PendingNonceAt(ctx, a)
 }
+func (s simChain) BalanceAt(ctx context.Context, a common.Address) (*big.Int, error) {
+	return s.c.BalanceAt(ctx, a, nil)
+}
 func (s simChain) FeeQuote(ctx context.Context) (*big.Int, *big.Int, error) {
 	tip, err := s.c.SuggestGasTipCap(ctx)
 	if err != nil {

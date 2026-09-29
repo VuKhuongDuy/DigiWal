@@ -90,6 +90,8 @@ func (s *Server) handleSignUserAddress(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusForbidden, err.Error())
 	case errors.Is(err, signing.ErrUnknownUser):
 		writeErr(w, http.StatusNotFound, err.Error())
+	case errors.Is(err, signing.ErrBalanceBelowGas):
+		writeErr(w, http.StatusUnprocessableEntity, err.Error())
 	case errors.Is(err, signing.ErrInvalidRequest), errors.Is(err, signing.ErrUnknownAsset), errors.Is(err, signing.ErrUnsupportedChain):
 		writeErr(w, http.StatusBadRequest, err.Error())
 	default:

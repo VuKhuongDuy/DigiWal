@@ -149,3 +149,61 @@ func TestSweep_Validation(t *testing.T) {
 		}
 	}
 }
+
+// "max": sweep everything except the tx's own gas. The EVM only accepts a tx whose
+// value + gas*maxFee fits the balance, so mining it proves the reservation is right.
+func TestSweep_MaxReservesGasAndIsMinedByARealEVM(t *testing.T) {
+	e := newSweepEnv(t)
+	ctx := context.Background()
+	r := e.req()
+	r.Amount = AmountMax
+	resp, err := e.sweep.Sign(ctx, r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tx := decode(t, Response{SignedRawTx: resp.SignedRawTx})
+	before, _ := e.chain.BalanceAt(ctx, e.userAdr)
+	maxFee := new(big.Int).Mul(new(big.Int).SetUint64(tx.Gas()), tx.GasFeeCap())
+	if new(big.Int).Add(tx.Value(), maxFee).Cmp(before) != 0 {
+		t.Fatalf("value %s + max fee %s must equal balance %s exactly", tx.Value(), maxFee, before)
+	}
+	if err := e.backend.Client().SendTransaction(ctx, tx); err != nil {
+		t.Fatalf("EVM rejected the max sweep: %v", err)
+	}
+	e.backend.Commit()
+	if bal, _ := e.chain.BalanceAt(ctx, e.hot); bal.Cmp(tx.Value()) != 0 {
+		t.Fatalf("hot wallet got %s, want %s", bal, tx.Value())
+	}
+	left, _ := e.chain.BalanceAt(ctx, e.userAdr)
+	if left.Sign() < 0 || left.Cmp(maxFee) >= 0 {
+		t.Fatalf("leftover dust %s should be below the reserved fee %s", left, maxFee)
+	}
+}
+
+func TestSweep_MaxRules(t *testing.T) {
+	e := newSweepEnv(t)
+	ctx := context.Background()
+	// "max" is a native-only concept
+	erc := e.req()
+	erc.Amount, erc.AssetID = AmountMax, tokenID
+	e.sweep.assets[tokenID] = Asset{Type: AssetERC20, Contract: common.HexToAddress(token)}
+	if _, err := e.sweep.Sign(ctx, erc); !errors.Is(err, ErrInvalidRequest) {
+		t.Errorf("max on erc20: got %v, want ErrInvalidRequest", err)
+	}
+	// nothing left after gas: refuse instead of signing a tx the chain would reject
+	poor := simChain{poorBackend(t, e)}
+	e.sweep.chain = poor
+	r := e.req()
+	r.Amount = AmountMax
+	if _, err := e.sweep.Sign(ctx, r); !errors.Is(err, ErrBalanceBelowGas) {
+		t.Errorf("dust balance: got %v, want ErrBalanceBelowGas", err)
+	}
+}
+
+// poorBackend is a chain where alice's address holds less than one transfer's gas.
+func poorBackend(t *testing.T, e sweepEnv) simulated.Client {
+	t.Helper()
+	b := simulated.NewBackend(types.GenesisAlloc{e.userAdr: {Balance: big.NewInt(1000)}})
+	t.Cleanup(func() { _ = b.Close() })
+	return b.Client()
+}

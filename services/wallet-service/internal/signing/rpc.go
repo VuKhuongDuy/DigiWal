@@ -27,6 +27,10 @@ func (r *RPCChain) PendingNonceAt(ctx context.Context, a common.Address) (uint64
 	return r.c.PendingNonceAt(ctx, a)
 }
 
+func (r *RPCChain) BalanceAt(ctx context.Context, a common.Address) (*big.Int, error) {
+	return r.c.BalanceAt(ctx, a, nil)
+}
+
 func (r *RPCChain) FeeQuote(ctx context.Context) (*big.Int, *big.Int, error) {
 	tip, err := r.c.SuggestGasTipCap(ctx)
 	if err != nil {

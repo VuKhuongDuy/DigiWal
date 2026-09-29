@@ -21,6 +21,9 @@ import (
 	"digiwal/services/wallet-service/internal/storage"
 )
 
+// AmountMax is the amount literal meaning "everything but gas" (native Sweeps only).
+const AmountMax = "max"
+
 // Errors the HTTP layer maps to status codes.
 var (
 	ErrInvalidRequest     = errors.New("invalid request")
@@ -50,6 +53,7 @@ type Response struct {
 type Chain interface {
 	ChainID(ctx context.Context) (*big.Int, error)
 	PendingNonceAt(ctx context.Context, addr common.Address) (uint64, error)
+	BalanceAt(ctx context.Context, addr common.Address) (*big.Int, error)
 	// FeeQuote returns the current EIP-1559 tip and base fee.
 	FeeQuote(ctx context.Context) (tip, baseFee *big.Int, err error)
 	EstimateGas(ctx context.Context, from common.Address, to common.Address, value *big.Int, data []byte) (uint64, error)

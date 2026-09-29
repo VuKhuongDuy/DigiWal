@@ -39,11 +39,12 @@ builds the EIP-1559 tx itself from its own RPC (`RPC_URL`; `max_gas_price` is on
 ceiling — `422` if current fees exceed it), claims the next Hot Wallet nonce atomically,
 and is idempotent per `idempotency_key` (a retry returns the stored result and never
 claims a second nonce; same key with a different request is `409`). `503` while a Nonce
-Gap is open. `asset_id` resolves through `ASSETS_FILE` (`assets.example.json`) — a stopgap
-copy of the Asset Registry, see the note in `internal/signing/assets.go`.
+Gap is open. `asset_id` resolves through the one canonical Asset Registry, `infra/assets.yaml`
+(`ASSETS_FILE`), mounted identically into every service that reads it.
 `POST /v1/sign/user-address` `{user_id, to_address, asset_id, amount, chain_id}` → `{signed_raw_tx}`.
 The caller picks whose key signs but never the destination: `to_address` must equal the Hot
-Wallet or it is `403`. Nonce is the user address's live pending nonce (RPC), no DB counter.
+Wallet or it is `403`. For a native-coin Sweep `amount` may be `"max"`: sweep everything
+except the tx's own max fee (`422` if the balance doesn't cover it); ERC-20 uses a concrete amount. Nonce is the user address's live pending nonce (RPC), no DB counter.
 Run `make certs` first (creates the CA + leaf certs; the CA key lives in `~/.digiwal-ca`).
 
 ```bash

@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"math/big"
 
 	"github.com/ethereum/go-ethereum/common"
 
@@ -16,9 +17,15 @@ var (
 	// ErrDestinationNotHotWallet: the Sweep's destination must be the Hot Wallet.
 	ErrDestinationNotHotWallet = errors.New("destination must be the hot wallet")
 	ErrUnknownUser             = errors.New("unknown user")
+	// ErrBalanceBelowGas: a native "max" Sweep has nothing left after reserving gas.
+	ErrBalanceBelowGas = errors.New("balance does not cover the sweep's gas")
 )
 
 // UserRequest is POST /v1/sign/user-address's body (the Sweep step).
+//
+// Amount is a decimal string in minor units, or — for a native-coin Sweep only —
+// the literal "max": sweep everything except what the transaction's own gas needs
+// (deposit-flow.md invariant #14, "Sweepable Amount").
 type UserRequest struct {
 	UserID    string `json:"user_id"`
 	ToAddress string `json:"to_address"`
@@ -69,9 +76,13 @@ func (s *UserSigner) Sign(ctx context.Context, req UserRequest) (UserResponse, e
 	if !common.IsHexAddress(req.ToAddress) {
 		return UserResponse{}, bad("to_address must be a 20-byte hex address")
 	}
-	amount, ok := parseUint(req.Amount)
-	if !ok || amount.Sign() == 0 {
-		return UserResponse{}, bad("amount must be a positive decimal string")
+	sweepMax := req.Amount == AmountMax
+	var amount *big.Int
+	if !sweepMax {
+		var ok bool
+		if amount, ok = parseUint(req.Amount); !ok || amount.Sign() == 0 {
+			return UserResponse{}, bad(`amount must be a positive decimal string, or "max" for a native-coin sweep`)
+		}
 	}
 	if req.ChainID != s.chainID {
 		return UserResponse{}, ErrUnsupportedChain
@@ -97,9 +108,31 @@ func (s *UserSigner) Sign(ctx context.Context, req UserRequest) (UserResponse, e
 	}
 	from := common.HexToAddress(addrHex)
 
+	if sweepMax {
+		if asset.Type != AssetNative {
+			// ERC-20 gas is paid separately (Gas Top-Up), so its amount is the full
+			// token balance, which only the caller knows.
+			return UserResponse{}, bad(`"max" is only valid for a native-coin sweep`)
+		}
+		bal, err := s.chain.BalanceAt(ctx, from)
+		if err != nil {
+			return UserResponse{}, fmt.Errorf("reading balance: %w", err)
+		}
+		amount = bal
+	}
 	body, err := buildBody(ctx, s.chain, from, s.hot, amount, asset, nil)
 	if err != nil {
 		return UserResponse{}, err
+	}
+	if sweepMax {
+		// A node only accepts a tx if balance >= value + gas*maxFeePerGas, so reserve
+		// the fee *cap*, not the (lower) expected cost; the difference stays as dust.
+		fee := new(big.Int).Mul(new(big.Int).SetUint64(body.gas), body.cap_)
+		sweepable := new(big.Int).Sub(amount, fee)
+		if sweepable.Sign() <= 0 {
+			return UserResponse{}, ErrBalanceBelowGas
+		}
+		body.value = sweepable
 	}
 	nonce, err := s.chain.PendingNonceAt(ctx, from)
 	if err != nil {

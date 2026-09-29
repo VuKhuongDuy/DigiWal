@@ -49,6 +49,9 @@ func (f *fakeChain) PendingNonceAt(context.Context, common.Address) (uint64, err
 	f.pendingCalls.Add(1)
 	return f.pending, nil
 }
+func (f *fakeChain) BalanceAt(context.Context, common.Address) (*big.Int, error) {
+	return big.NewInt(0), nil
+}
 func (f *fakeChain) FeeQuote(context.Context) (*big.Int, *big.Int, error) {
 	f.feeCalls.Add(1)
 	return f.tip, f.base, nil

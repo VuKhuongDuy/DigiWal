@@ -1,0 +1,21 @@
+# The one canonical Asset Registry (docs/design/ledger.md, "Decided: one canonical
+# Asset Registry file"). Mounted identically — same host path, same bytes — into
+# every container that reads it (wallet-service today; chain-watcher and
+# ledger-service when they exist). Never copy it per service.
+#
+# Fields follow ledger.md's Asset: id, asset_type (native | erc20), contract_address
+# (erc20 only), symbol, decimals. Each reader takes what it needs and ignores the
+# rest — wallet-service only uses id, asset_type and contract_address. ledger-service
+# will add hot_floor / hot_ceiling / min_withdrawal_amount here when it lands (task 1.2).
+assets:
+  - id: 11111111-1111-1111-1111-111111111111
+    asset_type: native
+    symbol: ETH
+    decimals: 18
+
+  # Example ERC-20 (uncomment and use your own token's address and a fresh uuid):
+  # - id: 22222222-2222-2222-2222-222222222222
+  #   asset_type: erc20
+  #   contract_address: "0x5FbDB2315678afecb367f032d93F642f64180aa3"
+  #   symbol: TT
+  #   decimals: 18
