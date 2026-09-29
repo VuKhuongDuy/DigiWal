@@ -57,7 +57,11 @@ Warm/Cold. The shape:
   risk-tolerance call, yours to tune.
 - **Treasury Sweep** — automatic, threshold-triggered movement of funds
   *out* of Hot, up to Warm. Hot-signed — same trust boundary as an
-  automatic withdrawal, just a different destination.
+  automatic withdrawal, just a different destination. Signed via `POST
+  /v1/sign/hot-wallet` (`integration-contracts.md` §2), same endpoint and
+  same idempotency-per-key requirement (`withdrawal-flow.md` invariant
+  #16) as every other caller of it — see the **Treasury Sweep Attempt**
+  term and invariant #6 below for how its idempotency key is minted.
 - **Replenishment** — manual, operator-triggered movement of funds
   *down* into Hot (from Warm) or into Warm (from Cold), via the local
   signing CLI.
@@ -66,6 +70,15 @@ Warm/Cold. The shape:
   between the system's own wallets doesn't change any user's balance,
   so it never touches the Account/Entry model. Tracked separately, for
   ops/audit purposes.
+- **Treasury Sweep Attempt** — **PROPOSED**, new term. A small
+  `withdrawal-service`-owned record `(asset_id, idempotency_key, status,
+  detected_at)` created the first time the sweep-monitor loop observes
+  Hot's balance crossing above Hot Ceiling for a given asset, and closed
+  once that Treasury Sweep is broadcast (or the balance drops back under
+  Ceiling on its own, e.g. a concurrent withdrawal draining it before the
+  sweep fires). Exists solely to give the Treasury Sweep's
+  `POST /v1/sign/hot-wallet` call a stable idempotency key across
+  retries — see invariant #6.
 
 ## Aggregates & invariants
 
@@ -94,6 +107,26 @@ Warm/Cold. The shape:
    recorded in its own, much simpler table (which wallet address, which
    asset, how much, which direction, when) — it must stay clearly
    separate from anything that touches a user's Account.
+6. **A Treasury Sweep's `POST /v1/sign/hot-wallet` call is idempotent per
+   idempotency key, same as every other caller of that endpoint**
+   (`withdrawal-flow.md` invariant #16). **PROPOSED**, not previously
+   decided anywhere: unlike a Withdrawal Request or a Gas Top-Up, a
+   Treasury Sweep has no pre-existing client request or deterministic
+   triggering event to derive a key from — the sweep-monitor loop just
+   polls Hot's balance periodically. A time-bucketed key (e.g.
+   `treasury-sweep:{asset_id}:{hour}`) was considered and rejected (see
+   Alternatives) because it can silently dedupe two *real*, back-to-back
+   sweeps that happen to land in the same bucket. Instead: the
+   sweep-monitor loop persists a **Treasury Sweep Attempt** row the first
+   time it observes the balance crossing above Ceiling for that asset
+   (analogous to how a Withdrawal Request row is created once, before
+   any signing happens — `withdrawal-flow.md` invariant #11), minting a
+   fresh UUID as that row's `idempotency_key` at creation. Every retry of
+   the sign call for this same crossing reuses that same row's key until
+   the sweep is broadcast, at which point the row closes. A later,
+   separate crossing of Ceiling (after the row closes) mints a new row
+   and a new key — so two genuinely distinct sweeps are never conflated,
+   unlike the time-bucket alternative.
 
 ## Diagram
 
@@ -127,9 +160,14 @@ sequenceDiagram
     loop periodic check
         Monitor->>RPC: get Hot Wallet balance for asset X
         alt balance > Hot Ceiling
-            Monitor->>Wallet: sign(to=Warm address, asset=X, amount=balance-Ceiling)
+            alt no open Treasury Sweep Attempt for asset X
+                Monitor->>Monitor: INSERT treasury_sweep_attempts<br/>(asset_id=X, idempotency_key=new uuid, status=pending) (PROPOSED, invariant #6)
+            end
+            Monitor->>Wallet: sign(to=Warm address, asset=X, amount=balance-Ceiling,<br/>idempotency_key=<this attempt's key>)
+            Note over Wallet: idempotent per key — a retry after a lost<br/>response returns the same signed tx/nonce (withdrawal-flow.md invariant #16)
             Wallet-->>Monitor: signed raw tx
             Monitor->>RPC: broadcast
+            Monitor->>Monitor: close Treasury Sweep Attempt row
             Note over Monitor: recorded as a Treasury Movement,<br/>not a Ledger Transaction
         else balance < Hot Floor
             Monitor->>Monitor: emit low-hot-balance alert
@@ -159,6 +197,15 @@ sequenceDiagram
   small enough not to justify its own service/container/deploy story
   yet. Worth splitting out if it grows (e.g. once multiple chains each
   need independent monitoring).
+- **Time-bucketed Treasury Sweep idempotency key** (e.g.
+  `treasury-sweep:{asset_id}:{hour}`), considered for invariant #6.
+  Rejected: it's simpler (no new table) but it dedupes on wall-clock
+  time rather than on "is this actually a retry of the same sweep,"
+  which can silently swallow a second, legitimate sweep if Hot's balance
+  crosses Ceiling twice within the same bucket (e.g. a large deposit
+  swept in right after the first sweep already fired). A per-crossing
+  attempt row, minted once and reused only until that specific sweep
+  closes, doesn't have that failure mode.
 
 ## Open questions
 
@@ -200,3 +247,10 @@ sequenceDiagram
 5. Sweep-monitor loop living inside `withdrawal-service` (recommended)
    vs. its own service — your call if you disagree with the
    recommendation in Alternatives.
+6. **PROPOSED, not decided: Treasury Sweep Attempt row + minted-UUID
+   idempotency key (invariant #6), instead of some other scheme.** This
+   is a new piece of state (a small `treasury_sweep_attempts` table) not
+   previously part of this doc's design — flagging per the "never
+   silently decide a new key-minting scheme" instruction. Confirm this
+   is acceptable, or propose a simpler alternative if one exists that
+   doesn't reintroduce the time-bucket dedupe risk.
