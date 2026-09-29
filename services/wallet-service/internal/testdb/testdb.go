@@ -1,4 +1,7 @@
-package storage
+// Package testdb hands tests a fresh database on a real Postgres: TEST_POSTGRES_DSN
+// if set, otherwise an ephemeral testcontainers-go container, otherwise the test
+// is skipped. Call Terminate from TestMain.
+package testdb
 
 import (
 	"context"
@@ -22,22 +25,20 @@ var (
 	dbMu      sync.Mutex
 )
 
-// TestMain terminates the shared container (if we started one).
 var container testcontainers.Container
 
-func TestMain(m *testing.M) {
-	code := m.Run()
+// Terminate stops the shared container, if this process started one.
+func Terminate() {
 	if container != nil {
 		_ = container.Terminate(context.Background())
 	}
-	os.Exit(code)
 }
 
-// newTestDB returns the DSN of a fresh, empty database on a real
+// New returns the DSN of a fresh, empty database on a real
 // Postgres. It uses TEST_POSTGRES_DSN (a server we may CREATE DATABASE
 // on) if set, otherwise starts an ephemeral container via
 // testcontainers-go, otherwise skips.
-func newTestDB(t *testing.T) string {
+func New(t *testing.T) string {
 	t.Helper()
 	adminOnce.Do(func() {
 		if dsn := os.Getenv("TEST_POSTGRES_DSN"); dsn != "" {

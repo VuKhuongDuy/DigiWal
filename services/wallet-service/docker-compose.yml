@@ -14,8 +14,13 @@ services:
       TLS_CERT_FILE: /certs/cert.pem
       TLS_KEY_FILE: /certs/key.pem
       TLS_CA_FILE: /certs/ca-cert.pem
+      # Hot Wallet signing builds the tx itself, so it needs an EVM RPC and the asset
+      # list (see assets.example.json). Unset = /v1/sign/hot-wallet answers 503.
+      RPC_URL: ${RPC_URL:-}
+      ASSETS_FILE: ${ASSETS_FILE:+/config/assets.json}
     volumes:
       - ../../infra/pki/out/wallet-service:/certs:ro
+      - ${ASSETS_FILE:-/dev/null}:/config/assets.json:ro
     ports: ["8080:8080", "8443:8443"]
     depends_on:
       postgres:

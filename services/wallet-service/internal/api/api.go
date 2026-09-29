@@ -4,12 +4,15 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"log"
 	"net/http"
 	"strings"
 
+	"digiwal/services/wallet-service/internal/authz"
+	"digiwal/services/wallet-service/internal/signing"
 	"digiwal/services/wallet-service/internal/storage"
 )
 
@@ -20,14 +23,20 @@ type Signer interface {
 	AddressAt(index uint32) (string, error)
 }
 
-type Server struct {
-	store  *storage.Store
-	cache  *storage.Cache
-	signer Signer // nil until the master wallet is initialized and loaded
+// HotSigner signs Hot Wallet transactions (POST /v1/sign/hot-wallet).
+type HotSigner interface {
+	Sign(ctx context.Context, req signing.Request) (signing.Response, error)
 }
 
-func NewServer(store *storage.Store, cache *storage.Cache, signer Signer) *Server {
-	return &Server{store: store, cache: cache, signer: signer}
+type Server struct {
+	store     *storage.Store
+	cache     *storage.Cache
+	signer    Signer    // nil until the user_derivation seed is initialized and loaded
+	hotSigner HotSigner // nil until the hot_wallet seed, RPC and assets are configured
+}
+
+func NewServer(store *storage.Store, cache *storage.Cache, signer Signer, hotSigner HotSigner) *Server {
+	return &Server{store: store, cache: cache, signer: signer, hotSigner: hotSigner}
 }
 
 // Routes is the plain-HTTP listener: /healthz (exempt from client certs,
@@ -48,7 +57,41 @@ func (s *Server) Routes() http.Handler {
 // The signing endpoints register here (tasks 0.3 and 0.5).
 func (s *Server) MTLSRoutes() http.Handler {
 	mux := http.NewServeMux()
+	mux.Handle("POST /v1/sign/hot-wallet", authz.Require(authz.HotWalletSigners, http.HandlerFunc(s.handleSignHotWallet)))
 	return mux
+}
+
+// handleSignHotWallet: the request has no field that could select a key —
+// it only ever signs with the Hot Wallet (withdrawal-flow.md invariant #5).
+func (s *Server) handleSignHotWallet(w http.ResponseWriter, r *http.Request) {
+	if s.hotSigner == nil {
+		writeErr(w, http.StatusServiceUnavailable, "hot wallet signing not configured")
+		return
+	}
+	var req signing.Request
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, "malformed JSON body")
+		return
+	}
+	resp, err := s.hotSigner.Sign(r.Context(), req)
+	switch {
+	case err == nil:
+		writeJSON(w, http.StatusOK, resp)
+	case errors.Is(err, signing.ErrInvalidRequest), errors.Is(err, signing.ErrUnknownAsset), errors.Is(err, signing.ErrUnsupportedChain):
+		writeErr(w, http.StatusBadRequest, err.Error())
+	case errors.Is(err, storage.ErrIdempotencyKeyReused):
+		writeErr(w, http.StatusConflict, err.Error())
+	case errors.Is(err, signing.ErrGasCeilingExceeded):
+		writeErr(w, http.StatusUnprocessableEntity, err.Error())
+	case errors.Is(err, storage.ErrNonceGapOpen):
+		// Refuse rather than allocate while a Nonce Gap is open (invariant #7).
+		writeErr(w, http.StatusServiceUnavailable, "nonce gap open: hot wallet signing frozen")
+	default:
+		log.Printf("signing hot wallet tx: %v", err)
+		writeErr(w, http.StatusInternalServerError, "internal error")
+	}
 }
 
 func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {

@@ -8,7 +8,9 @@ package hdwallet
 
 import (
 	"fmt"
+	"math/big"
 
+	"github.com/ethereum/go-ethereum/core/types"
 	hdw "github.com/miguelmota/go-ethereum-hdwallet"
 )
 
@@ -53,4 +55,22 @@ func (hw *Wallet) AddressAt(index uint32) (string, error) {
 		return "", fmt.Errorf("deriving index %d: %w", index, err)
 	}
 	return account.Address.Hex(), nil
+}
+
+// HotWalletIndex is the BIP44 index of the Hot Wallet's single address inside
+// the hot_wallet seed (wallet-tiering.md invariant #1). It is one address, not
+// one per user.
+const HotWalletIndex = 0
+
+// SignTxAt signs an EIP-1559 transaction with the key at the given BIP44 index.
+// The private key never leaves this package.
+func (hw *Wallet) SignTxAt(index uint32, tx *types.Transaction, chainID *big.Int) (*types.Transaction, error) {
+	path := hdw.MustParseDerivationPath(fmt.Sprintf(pathTemplate, index))
+	// The library only signs for accounts pinned to the wallet; pinning is
+	// idempotent per address and holds no key material beyond the seed.
+	account, err := hw.w.Derive(path, true)
+	if err != nil {
+		return nil, fmt.Errorf("deriving index %d: %w", index, err)
+	}
+	return hw.w.SignTxEIP1559(account, tx, chainID)
 }

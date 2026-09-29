@@ -4,14 +4,23 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"os"
 	"sync"
 	"testing"
 
 	"github.com/jackc/pgx/v5"
+
+	"digiwal/services/wallet-service/internal/testdb"
 )
 
+func TestMain(m *testing.M) {
+	code := m.Run()
+	testdb.Terminate()
+	os.Exit(code)
+}
+
 func TestMigration000002_CarriesExistingSeedIntoUserDerivation(t *testing.T) {
-	dsn := newTestDB(t)
+	dsn := testdb.New(t)
 	ctx := context.Background()
 
 	m, err := NewMigrator(dsn)
@@ -34,8 +43,8 @@ func TestMigration000002_CarriesExistingSeedIntoUserDerivation(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := m.Up(); err != nil {
-		t.Fatalf("migrate up: %v", err)
+	if err := m.Migrate(2); err != nil {
+		t.Fatalf("migrate to 000002: %v", err)
 	}
 
 	var got []byte
@@ -55,8 +64,8 @@ func TestMigration000002_CarriesExistingSeedIntoUserDerivation(t *testing.T) {
 	}
 
 	// down restores the old shape and data.
-	if err := m.Steps(-1); err != nil {
-		t.Fatalf("migrate down: %v", err)
+	if err := m.Migrate(1); err != nil {
+		t.Fatalf("migrate down to baseline: %v", err)
 	}
 	if err := conn.QueryRow(ctx, `SELECT sealed_seed, next_index FROM master_wallet WHERE id = 1`).Scan(&got, &next); err != nil {
 		t.Fatalf("master_wallet row missing after down: %v", err)
@@ -67,7 +76,7 @@ func TestMigration000002_CarriesExistingSeedIntoUserDerivation(t *testing.T) {
 }
 
 func TestMigration000002_NoopWhenNeverInitialized(t *testing.T) {
-	dsn := newTestDB(t)
+	dsn := testdb.New(t)
 	if err := MigrateUp(dsn); err != nil {
 		t.Fatal(err)
 	}
@@ -86,7 +95,7 @@ func TestMigration000002_NoopWhenNeverInitialized(t *testing.T) {
 
 func TestInitSeed_OncePerRole(t *testing.T) {
 	ctx := context.Background()
-	s, err := Connect(ctx, newTestDB(t))
+	s, err := Connect(ctx, testdb.New(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -113,7 +122,7 @@ func TestInitSeed_OncePerRole(t *testing.T) {
 
 func TestAllocateIndex_ConcurrentNeverDuplicates(t *testing.T) {
 	ctx := context.Background()
-	s, err := Connect(ctx, newTestDB(t))
+	s, err := Connect(ctx, testdb.New(t))
 	if err != nil {
 		t.Fatal(err)
 	}

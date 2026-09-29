@@ -23,6 +23,7 @@ import (
 	"digiwal/services/wallet-service/internal/authz"
 	"digiwal/services/wallet-service/internal/crypto"
 	"digiwal/services/wallet-service/internal/hdwallet"
+	"digiwal/services/wallet-service/internal/signing"
 	"digiwal/services/wallet-service/internal/storage"
 )
 
@@ -98,24 +99,22 @@ func runServer(ctx context.Context, store *storage.Store, sealer *crypto.Sealer)
 		log.Fatalf("loading user_derivation wallet: %v", err)
 	}
 
-	// The Hot Wallet is a separate seed (wallet-tiering.md invariant #1),
-	// one address at BIP44 index 0. Nothing signs with it yet (task 0.3);
-	// loading it here surfaces a wrong MASTER_KEY_HEX or corrupt seed at boot.
+	// The Hot Wallet is a separate seed (wallet-tiering.md invariant #1), one
+	// address at BIP44 index 0. Signing needs the seed, an EVM RPC (wallet-service
+	// builds the tx itself) and the asset list; without all three the endpoint
+	// answers 503 instead of guessing.
+	var hotSigner api.HotSigner
 	hotWallet, err := loadWallet(ctx, store, sealer, storage.RoleHotWallet)
 	switch {
 	case err == nil:
-		addr, err := hotWallet.AddressAt(0)
-		if err != nil {
-			log.Fatalf("deriving hot wallet address: %v", err)
-		}
-		log.Printf("hot_wallet wallet loaded, address %s", addr)
+		hotSigner = buildHotSigner(ctx, store, hotWallet)
 	case errors.Is(err, storage.ErrNotFound):
 		log.Println("WARNING: no hot_wallet seed found — run with -init-seed hot_wallet before Hot Wallet signing is used")
 	default:
 		log.Fatalf("loading hot_wallet wallet: %v", err)
 	}
 
-	server := api.NewServer(store, cache, signer)
+	server := api.NewServer(store, cache, signer, hotSigner)
 
 	// mTLS listener for /v1/sign/* (service-auth-mtls.md). Fail closed: without
 	// certs it simply isn't started, so nothing can be signed.
@@ -137,6 +136,30 @@ func runServer(ctx context.Context, store *storage.Store, sealer *crypto.Sealer)
 	port := envOr("PORT", "8080")
 	log.Printf("wallet-service listening on :%s", port)
 	log.Fatal(http.ListenAndServe(":"+port, server.Routes()))
+}
+
+// buildHotSigner wires the Hot Wallet signer, or returns nil (endpoint answers
+// 503) when RPC_URL / ASSETS_FILE aren't configured.
+func buildHotSigner(ctx context.Context, store *storage.Store, hot *hdwallet.Wallet) api.HotSigner {
+	rpcURL, assetsFile := os.Getenv("RPC_URL"), os.Getenv("ASSETS_FILE")
+	if rpcURL == "" || assetsFile == "" {
+		log.Println("WARNING: RPC_URL / ASSETS_FILE not set — Hot Wallet signing disabled")
+		return nil
+	}
+	assets, err := signing.LoadAssets(assetsFile)
+	if err != nil {
+		log.Fatalf("loading assets: %v", err)
+	}
+	chain, err := signing.DialRPC(ctx, rpcURL)
+	if err != nil {
+		log.Fatal(err)
+	}
+	signer, err := signing.New(ctx, store, hot, chain, assets)
+	if err != nil {
+		log.Fatalf("hot wallet signer: %v", err)
+	}
+	log.Printf("hot_wallet signing enabled, address %s", signer.HotWalletAddress())
+	return signer
 }
 
 // loadWallet decrypts the sealed seed for a role and builds an in-memory

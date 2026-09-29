@@ -6,7 +6,7 @@ address per user (BIP44 `m/44'/60'/0'/0/{index}`); `hot_wallet` is the
 Hot Wallet's signing key (single address at index 0) — deliberately
 never the same seed (`docs/design/wallet-tiering.md` invariant #1).
 Schema is versioned under `migrations/` (golang-migrate) and applied on
-startup. Signing endpoints are not implemented yet (tasks 0.3+). See `../../docs/ARCHITECTURE.md` for how this fits into
+startup.  See `../../docs/ARCHITECTURE.md` for how this fits into
 the rest of the system and the security reasoning behind the design.
 
 ## Running it
@@ -23,10 +23,24 @@ make down
 ## API
 
 ```
+# plain listener :8080
 GET  /healthz
 POST /v1/users/{userID}/deposit-address   # create if missing, return existing otherwise (idempotent)
 GET  /v1/users/{userID}/deposit-address   # 404 if the user has no address yet
+
+# mTLS listener :8443 (client cert CN checked per endpoint — docs/design/service-auth-mtls.md)
+POST /v1/sign/hot-wallet                  # CN: withdrawal-service, sweeper
 ```
+
+`POST /v1/sign/hot-wallet` `{to_address, asset_id, amount, chain_id, idempotency_key, max_gas_price?}`
+→ `{signed_raw_tx, nonce}`. Signs with the Hot Wallet only (no field can pick a key),
+builds the EIP-1559 tx itself from its own RPC (`RPC_URL`; `max_gas_price` is only a
+ceiling — `422` if current fees exceed it), claims the next Hot Wallet nonce atomically,
+and is idempotent per `idempotency_key` (a retry returns the stored result and never
+claims a second nonce; same key with a different request is `409`). `503` while a Nonce
+Gap is open. `asset_id` resolves through `ASSETS_FILE` (`assets.example.json`) — a stopgap
+copy of the Asset Registry, see the note in `internal/signing/assets.go`.
+Run `make certs` first (creates the CA + leaf certs; the CA key lives in `~/.digiwal-ca`).
 
 ```bash
 curl -X POST localhost:8080/v1/users/alice/deposit-address
@@ -39,7 +53,7 @@ nothing chain-specific to derive separately.
 
 ## What's deliberately not here yet
 
-No signing endpoint, no chain connection, no Kafka. Those belong to
+No user-address signing yet (task 0.5), no Kafka. Those belong to
 `withdrawal-service` and `chain-watcher` respectively (see the phased
 roadmap in `docs/ARCHITECTURE.md`) — this service's whole job in phase 1
 is "derive addresses correctly and never leak the seed," and it's
