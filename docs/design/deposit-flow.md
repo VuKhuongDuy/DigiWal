@@ -443,7 +443,7 @@ concrete Confirmation Depth and Gas Top-Up numbers below.
     `observed_transfers` row for it, even when the destination is a
     Watched Address.** **Decided (Tech Lead; bug found by the M2 e2e test) —
     implemented in commits 07fcb1d and 68e7dac, `make e2e` green; Open
-    Questions #12-#14 resolved, #15 still open.**
+    Questions #12-#15 are all resolved (#16 is a note).**
     Without this, the sweeper's own Gas Top-Up (invariant #13: Hot Wallet
     -> user address, 0.001 ETH) is a native transfer to a Watched Address;
     `chain-watcher` records it as a native deposit, `ledger-service`
@@ -679,7 +679,7 @@ sequenceDiagram
   has none today), and it puts a domain rule ("what is a deposit") in
   three places instead of the one context that owns it. An extra
   belt-and-braces check in `sweeper` (which already knows the address) is
-  possible — Open Questions #15.
+  possible, and decided against — Open Questions #15.
 - **(Gas Top-Up fix) Take the Hot Wallet address from an env var
   (`HOT_WALLET_ADDRESS`) on `chain-watcher`.** Rejected — invariant #15's
   drift argument, made worse because a stale value here fails open
@@ -872,12 +872,16 @@ sequenceDiagram
     designed reversal for a confirmed deposit credit, so a partial reset
     would replay or orphan credits). Local/e2e stacks already drop their
     volumes on every run, so nothing further is needed there.
-15. **Open, optional: defence in depth in `sweeper`.** `sweeper` already
+15. ~~**Open, optional: defence in depth in `sweeper`.** `sweeper` already
     holds the Hot Wallet address (invariant #15) and could also skip (no
     top-up, no Sweep) a `deposits.confirmed` whose `from_address` equals
     it, protecting against a `chain-watcher` regression. I did *not*
     include it (a second copy of one rule, no failure it prevents today);
-    say if you want it — it would be one guard in `sweeper` plus a test.
+    say if you want it — it would be one guard in `sweeper` plus a test.~~
+    **Decided (Tech Lead): not adding.** `sweeper` gets no second Hot
+    Wallet Outflow guard. The e2e regression test for invariant #17 (the
+    un-skipped "gas top-up is not credited as a deposit" subtest) is the
+    safety net, and one rule stays in one service (`chain-watcher`).
 16. **Note, not a question: the cached Hot Wallet address is fixed for the
     process lifetime**, exactly like `sweeper`'s. A Hot Wallet seed
     re-initialisation is already a destructive, operator-driven event
