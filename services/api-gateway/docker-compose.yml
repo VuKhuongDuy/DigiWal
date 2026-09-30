@@ -1,0 +1,19 @@
+# Pulls in ../../infra/docker-compose.yml via `include:` — don't also pass it with -f.
+include:
+  - path: ../../infra/docker-compose.yml
+
+services:
+  api-gateway:
+    build: .
+    environment:
+      PORT: "8080"
+      POSTGRES_DSN: postgres://custody:custody@postgres:5432/api_gateway?sslmode=disable
+      # wallet-service's deposit-address endpoints are still on its plain listener
+      # (service-auth-mtls.md Open Question #4). Each service's compose is its own project, so
+      # override this if wallet-service runs from its own compose file.
+      WALLET_SERVICE_URL: ${WALLET_SERVICE_URL:-http://wallet-service:8080}
+    # The only service meant to be reachable from outside (identity-auth.md invariant #5).
+    ports: ["8084:8080"]
+    depends_on:
+      postgres:
+        condition: service_healthy
