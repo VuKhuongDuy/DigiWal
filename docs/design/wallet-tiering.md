@@ -148,6 +148,15 @@ Warm/Cold. The shape:
    address, for the lifetime of that tier's key material. If a tier
    ever needs a second address (not designed for here), that's a new
    seed and a new tier label, not a second index under an existing one.
+8. **The sweep-monitor loop learns the Hot Wallet's own address from
+   `wallet-service` (`GET /v1/wallet/hot-address`), once at startup —
+   never a locally-configured constant.** New, Tech Lead review. Same
+   fix and same reason as `deposit-flow.md`'s Hot Wallet Address
+   Discovery: `wallet-service` derives the address itself from the
+   `hot_wallet` seed, so a second copy of that address configured
+   independently on `withdrawal-service` can silently drift from the
+   real one — this endpoint removes the second copy entirely rather than
+   trusting it to stay in sync.
 
 ## Diagram
 
@@ -178,8 +187,12 @@ sequenceDiagram
     participant RPC as EVM testnet RPC
     participant Op as Operator (local signing CLI)
 
+    Monitor->>Wallet: GET /v1/wallet/hot-address (once, at startup)
+    Wallet-->>Monitor: {address}
+    Note over Monitor: cached in memory — never a locally-configured<br/>constant (deposit-flow.md's Hot Wallet Address Discovery,<br/>same fix `sweeper` uses)
+
     loop periodic check
-        Monitor->>RPC: get Hot Wallet balance for asset X
+        Monitor->>RPC: get Hot Wallet balance for asset X<br/>(using the cached address above)
         alt balance > Hot Ceiling
             alt no open Treasury Sweep Attempt for asset X
                 Monitor->>Monitor: INSERT treasury_sweep_attempts<br/>(asset_id=X, idempotency_key=new uuid, status=pending) (PROPOSED, invariant #6)

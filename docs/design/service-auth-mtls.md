@@ -238,9 +238,10 @@ callers invented here.
 | `wallet-service` | `POST /v1/sign/user-address` | `sweeper` only | **Decided here** — same |
 | `wallet-service` | `GET`/`POST /v1/users/{userID}/deposit-address` | `api-gateway` | **PROPOSED** — see Open Questions #4 |
 | `wallet-service` | `GET /v1/addresses/{address}` | `chain-watcher` only | **PROPOSED**, new — fixes a real gap (Tech Lead review, `deposit-flow.md`'s Address Resolution): `chain-watcher` cannot resolve a deposit's `user_id` without this endpoint, so unlike the row above it isn't deferred — needed from `chain-watcher`'s first working version, not a later consistency pass |
+| `wallet-service` | `GET /v1/wallet/hot-address` | `sweeper`, `withdrawal-service` | **PROPOSED**, new — fixes a real gap (Tech Lead review, `deposit-flow.md`'s Hot Wallet Address Discovery): closes a config-drift risk where a locally-configured Hot Wallet address could diverge from what `wallet-service` actually derived |
 | `wallet-service` | `GET /healthz` | (no client cert required — plain listener, invariant #8) | Decided here |
 | `ledger-service` | `POST /v1/ledger/transactions` (`apply`), `POST /v1/ledger/locks`, `.../{key}/settle`, `.../{key}/release` | `withdrawal-service` only, on all four | **PROPOSED**, invariant #7 — build in at Milestone 1 |
-| `ledger-service` | any future `api-gateway`-facing read endpoint (balances, etc.) | `api-gateway` | **PROPOSED, not yet applicable** — no such endpoint is designed yet (`integration-contracts.md` §2 marks it **PROPOSED HERE, low confidence**); apply this row once it exists, don't invent its path now |
+| `ledger-service` | `GET /v1/ledger/balances/{user_id}` | `api-gateway` | **PROPOSED**, new — fixes a real gap (Tech Lead review): `integration-contracts.md`'s `GET /v1/balances` had a decided response shape but no `ledger-service` endpoint behind it until now; this row replaces the old "not yet applicable" placeholder |
 | `withdrawal-service` | `POST /withdrawals`, `GET /withdrawals/{idempotency_key}`, `POST /whitelist`, `DELETE /whitelist/{id}` | `api-gateway` | **PROPOSED, deferred** — see Open Questions #4 |
 | `history-service` | (its API is a GAP per `integration-contracts.md` §2) | `api-gateway`, once designed | **PROPOSED, not yet applicable** |
 
