@@ -436,7 +436,11 @@ concrete Confirmation Depth and Gas Top-Up numbers below.
     ledger credit failing to apply *is* a correctness-critical loss if
     given up on, so that consumer must keep retrying rather than ever
     skip-and-ALERT a message — see `integration-contracts.md` §5 for the
-    consolidated policy across every consumer.
+    consolidated policy across every consumer. **While a Nonce Gap freeze
+    is open** (`withdrawal-flow.md` invariant #19, PROPOSED), every Gas
+    Top-Up gets `503` and ends in this skip path; native Sweeps are
+    unaffected. Re-drive the skipped records after the operator lifts
+    the freeze.
 
 17. **A Hot Wallet Outflow is never a deposit: `chain-watcher` emits no
     `deposits.detected`/`deposits.confirmed` and records no
@@ -852,10 +856,9 @@ sequenceDiagram
     addresses, resolved via `wallet-service`'s `GET
     /v1/addresses/{address}` (200 = ours -> reject; 404 = not ours ->
     continue; any other failure = fail closed, never "not ours"). Design
-    in `withdrawal-flow.md` invariant #18; the new `withdrawal-service`
-    grant on that endpoint is **PROPOSED**, awaiting Tech Lead approval
-    (`service-auth-mtls.md`, `integration-contracts.md`); plan task 3.10.
-    Follow-on open points are `withdrawal-flow.md` Open Questions #9.
+    in `withdrawal-flow.md` invariant #18; the `withdrawal-service`
+    grant on that endpoint is **Decided** (Tech Lead, `withdrawal-flow.md`
+    Open Questions #9a, resolved); plan task 3.10.
 14. ~~**Open: remediation of deposits already mis-credited by Gas Top-Ups
     before the fix ships.** `chain-watcher` will not rescan history, and
     `ledger.md` has no designed reversal for a confirmed deposit

@@ -42,6 +42,22 @@ Question #7).
   invariant #11). **This same `idempotency_key` is also reused, unchanged,
   as the idempotency key on the `POST /v1/sign/hot-wallet` call this
   request eventually makes** — see invariant #16.
+  **PROPOSED revision (invariant #20, Open Questions #11) — pending Tech
+  Lead approval:** the key is client-supplied (the client sends it in the
+  `POST /v1/withdrawals` body; `api-gateway` forwards it, it does not mint
+  it — the "minted by `api-gateway`" wording above contradicts
+  `integration-contracts.md` §2/§4 and is superseded). It is unique **per
+  user**, `UNIQUE(user_id, idempotency_key)`, and it is **never** used
+  outside `withdrawal-service`: every downstream key is the Withdrawal
+  Key below.
+- **Withdrawal Key** — **PROPOSED, new (invariant #20).**
+  `withdrawal:{withdrawal_id}`, where `withdrawal_id` is a UUID
+  `withdrawal-service` mints when it inserts the Withdrawal Request row.
+  Globally unique by construction, never chosen by a client. It is the
+  key used for the ledger Lock/Settle/Release, for `POST
+  /v1/sign/hot-wallet`, and (with a `:refund` suffix) for a
+  Compensating Entry; `withdrawal_id` is carried on
+  `withdrawals.broadcast`/`withdrawals.confirmed`.
 - **Hot Wallet** — the single on-chain address (per this doc's
   recommendation — see Open Questions #1) that every withdrawal is
   actually paid out from, regardless of which address the user
@@ -91,7 +107,9 @@ Question #7).
   **`{idempotency_key}:refund`** — never the original key itself
   (that's already taken by the Settle-time debit, and
   `ledger_transactions.idempotency_key` is unique). A retried
-  compensation attempt hits the same `{idempotency_key}:refund` key and
+  compensation attempt hits the same `{idempotency_key}:refund` key
+  (**PROPOSED, invariant #20: `{Withdrawal Key}:refund`, i.e.
+  `withdrawal:{withdrawal_id}:refund`**) and
   no-ops via `ledger.md`'s own idempotent-apply mechanism, so a crash
   between posting the refund and marking the Withdrawal Request
   `failed` can never double-refund.
@@ -275,7 +293,19 @@ Questions #3 for the one remaining unresolved failure mode.
     returns *its* current status. This closes the gap invariants #1–2
     already assumed: they guard against re-signing or re-reserving an
     *existing* request, but not against two requests existing in the
-    first place for the same `idempotency_key`.
+    first place for the same `idempotency_key`. **Decided (Tech Lead,
+    Open Questions #9b, option B): a duplicate `POST` never re-validates,
+    whatever the row's status — including `requested`.** Only the
+    original `POST` handler, in-line, ever advances a row out of
+    `requested`; no background worker re-drives it. A row left in
+    `requested` (a fail-closed `503` during validation, or a crash
+    mid-validation) is therefore inert, and the Reaper later marks it
+    `failed` (invariant #17); the client retries with a **new**
+    `idempotency_key`, which cannot double-spend because the old row can
+    never move again. Every state transition is a guarded `UPDATE ...
+    WHERE status = <expected>`, so a Reaper write and a late in-line
+    transition can never both succeed. (Uniqueness scope: see invariant
+    #20, PROPOSED.)
 12. **A Withdrawal Request's `to_address` must be an `active` Whitelist
     Entry for that user, checked at validation** — same step as
     Minimum Withdrawal Amount (invariant #10), before any Reservation.
@@ -321,6 +351,8 @@ Questions #3 for the one remaining unresolved failure mode.
     `{nonce, signed_raw_tx}` instead of allocating anything new or
     signing again. The `idempotency_key` used here is the *same* key the
     Withdrawal Request already carries throughout its lifecycle
+    (**PROPOSED, invariant #20: the Withdrawal Key
+    `withdrawal:{withdrawal_id}`, not the client's key**)
     (Ubiquitous language > *Withdrawal Request*) — reused as-is on this
     call, never minted fresh per signing attempt. The identical
     requirement applies to this endpoint's other two callers — the
@@ -337,15 +369,28 @@ Questions #3 for the one remaining unresolved failure mode.
     funds would be frozen with no path back. A periodic **Reaper** loop
     in `withdrawal-service` reclaims stuck requests, but only ones it can
     *prove* are safe to reclaim — resolves Open Questions #3:
+    - `requested` for longer than the **Stuck Request Timeout**
+      (**Decided (Tech Lead, Open Questions #9b) as to the rule; value
+      PROPOSED: 5 minutes**, reusing the Stuck Reservation Timeout): no
+      Lock was ever created, so the Reaper only marks the row `failed`
+      (terminal, guarded `WHERE status='requested'`), no ledger call. The
+      client must use a new `idempotency_key` (invariant #11).
+    - `validated` for longer than the Stuck Reservation Timeout
+      (**PROPOSED addition, Open Questions #14**): a crash between
+      `lock()` succeeding and the `validated -> reserved` transition
+      leaves an active Lock behind a `validated` row that no rule above
+      covered. Treated like `reserved`: Release (idempotent; a `404`
+      "never locked" is fine) then `failed`.
     - `reserved` or `signed` for longer than the **Stuck Reservation
-      Timeout** (**PROPOSED**, exact value Tech Lead's call — see Open
+      Timeout** (**Decided (Tech Lead): 5 minutes** — Open
       Questions #3): no `tx_hash` exists yet in either state, so nothing
       was ever broadcast — always safe to Release. The Reaper Releases
       the Lock (`ledger.md`) and marks the request `failed` terminally,
       so a `signed`-but-never-broadcast raw tx can never be broadcast by
       any later code path after its Lock is gone.
     - `broadcast` for longer than the **Stuck Broadcast Timeout**
-      (**PROPOSED**, Tech Lead's call) **and** a live
+      (**Decided (Tech Lead): 128 blocks**, ~25.6 min on Sepolia —
+      Open Questions #3) **and** a live
       `eth_getTransactionCount(hot_wallet, "pending")` read shows the Hot
       Wallet's on-chain nonce has already advanced past this tx's nonce
       — positive proof some *other* transaction consumed that nonce, so
@@ -363,54 +408,146 @@ Questions #3 for the one remaining unresolved failure mode.
       mechanism as Nonce Gap recovery) to force it dead, after which the
       Reaper's second case above fires and Releases it.
 18. **A Withdrawal Request's `to_address` must not be one of our own
-    deposit addresses.** **Decided (Tech Lead) as to the rule** (option
-    (b), `deposit-flow.md` Open Questions #13); the details below
-    (placement, error, whitelist interaction, fail-closed handling) and
-    the `withdrawal-service` authz grant are **PROPOSED** — Open
-    Questions #9. Why: `chain-watcher` never treats a Hot Wallet
-    Outflow as a deposit (`deposit-flow.md` invariant #17), so a
-    withdrawal into a deposit address would debit the requester, credit
-    nobody, trigger no Sweep, and strand the funds. Rules:
-    - **Check:** `withdrawal-service` calls `wallet-service`'s `GET
-      /v1/addresses/{address}` (mTLS, `CN=withdrawal-service`).
+    addresses: a user deposit address, the Hot Wallet, or the Warm
+    Wallet.** **Decided (Tech Lead):** the deposit-address rule (option
+    (b), `deposit-flow.md` Open Questions #13), the `CN=withdrawal-service`
+    grant on the existing `GET /v1/addresses/{address}` (Open Questions
+    #9a), the `422 destination_is_deposit_address` code (#9c), and the
+    Hot/Warm rule (#9d). The Hot/Warm error code and the Warm address
+    source are **PROPOSED** / open (below, Open Questions #10). Why: a
+    Hot Wallet Outflow is never a deposit (`deposit-flow.md` invariant
+    #17), so a withdrawal into a deposit address would debit the
+    requester, credit nobody and strand the funds; a withdrawal to the
+    Hot Wallet is a self-send that debits the user for nothing; one to
+    the Warm Wallet silently moves the user's money into treasury.
+    Rules:
+    - **Deposit addresses:** `withdrawal-service` calls `wallet-service`'s
+      `GET /v1/addresses/{address}` (mTLS, `CN=withdrawal-service`).
       `200` = one of ours -> reject. `404` = not ours -> continue. **Any
       other outcome (timeout, connection error, 5xx, 403) fails closed:**
-      the request does not proceed to Reservation and is never treated
-      as "not ours" — the same contract as `chain-watcher`'s
-      `deposit-flow.md` invariant #1, and for the same reason (a wrong
-      "no" here loses money silently; a wrong "retry" only costs time).
-    - **Where it runs:** last of the validation checks — after
-      well-formed address, asset registered, Minimum Withdrawal Amount
-      (#10), active Whitelist Entry (#12) and Screening List (#14),
-      before the ledger Reservation. Reason: it is the only check with a
-      network dependency, so it only runs for requests that would
-      otherwise pass, and it still precedes any Reservation or Hot
+      never treated as "not ours" — the same contract as `chain-watcher`'s
+      `deposit-flow.md` invariant #1 (a wrong "no" loses money silently;
+      a wrong "retry" only costs time). Live call on every check, **no
+      negative cache** (unlike `chain-watcher`'s, which only delays a
+      deposit). TOCTOU: a deposit address is issued before anyone can
+      send to it and is not guessable, so an address that is `404` now
+      cannot realistically become `200` before broadcast, and a `200`
+      never stops being ours; the only real hazard is a cached "no",
+      which this forbids.
+    - **Hot Wallet:** address from `GET /v1/wallet/hot-address` (already
+      allowed for `CN=withdrawal-service`), fetched once at startup and
+      cached — same rule as `wallet-tiering.md` invariant #8 and
+      `deposit-flow.md` invariant #15, never an env var.
+      `withdrawal-service` does not accept `POST /v1/withdrawals` or
+      `POST /v1/whitelist` until it has it (fail closed, like
+      `chain-watcher`'s invariant #17 startup rule).
+    - **Warm Wallet:** **no designed source exists** — `wallet-service`
+      cannot derive it (Warm's seed is never in an always-on service,
+      `wallet-tiering.md` invariant #2) and no doc says where the
+      Treasury Sweep monitor gets it either. Open Questions #10; until
+      it is decided this part of the check cannot be built.
+    - **Comparison:** byte-wise address equality (never string/checksum
+      casing). Hot and Warm are local, in-memory comparisons.
+    - **Where it runs:** after well-formed address, asset registered,
+      Minimum Withdrawal Amount (#10), active Whitelist Entry (#12) and
+      Screening List (#14); then the Hot/Warm comparison (local, cheap);
+      then the deposit-address lookup last (the only network call);
+      then the ledger Reservation. Every check precedes any Lock or Hot
       Wallet nonce claim (same off-ramp guarantee as #10).
     - **What the client sees:** the request goes to `rejected` (terminal,
-      no Lock ever created) and `POST /v1/withdrawals` returns `422`
-      with a reason code, `destination_is_deposit_address` (same
-      family as the existing `422` insufficient-funds response). While
-      the dependency is unavailable, the response is `503` (retryable),
-      *not* `rejected`: there is no verdict yet, and rejecting would be
-      terminal for an idempotency key the client may legitimately retry.
+      no Lock) and `POST /v1/withdrawals` returns `422` with reason
+      `destination_is_deposit_address` (Decided) or, for Hot/Warm,
+      **`destination_is_system_wallet`** (**PROPOSED** — one code for both
+      tiers, so it does not reveal which treasury address was hit).
+      While the lookup dependency is unavailable the response is `503`
+      and the row stays `requested`; per invariant #11 (Decided, option B)
+      that `idempotency_key` is spent — a retry with it only reads back
+      `requested` until the Reaper marks it `failed` (invariant #17) — so
+      the `503` body tells the client to retry with a **new**
+      `idempotency_key`.
     - **Whitelist interaction — enforced at both points, request time
-      authoritative.** Whitelist Entry creation (`POST /v1/whitelist`)
-      makes the same call and refuses such an address up front, so a user
-      does not wait out the 24h Whitelist Cooldown for an entry that can
-      never be used; the same fail-closed rule applies (`503`, not
-      "create it anyway"). This creation-time check is UX only — the
-      request-time check is the one that counts, because entries that
-      predate this rule, or that slip past a creation-time failure, must
-      still be caught.
-    - **No stale negative answer, ever.** `withdrawal-service` makes the
-      live call on every check and keeps no negative cache (unlike
-      `chain-watcher`'s short-TTL negative cache, which only delays a
-      deposit and is safe there). TOCTOU: a deposit address is issued
-      before anyone can send to it, and derived addresses are not
-      guessable, so an address that is `404` today cannot realistically
-      become `200` between validation and broadcast; an address that is
-      `200` never stops being ours. The only real hazard is therefore
-      a cached "no", which this rule forbids.
+      authoritative.** `POST /v1/whitelist` applies the same three
+      checks and refuses such an address up front with the same `422`
+      codes (fail closed: `503`, never "create it anyway"), so a user
+      does not wait out the 24h Whitelist Cooldown for an unusable entry.
+      The request-time check is the one that counts, because entries
+      that predate this rule must still be caught.
+19. **`withdrawal-service` tells `wallet-service` about a Nonce Gap
+    through one endpoint, and only an operator can lift the freeze.**
+    **PROPOSED (Solution Architect, M3 task 3.4) — pending Tech Lead
+    approval, Open Questions #12.** Closes a real gap: invariants #7-#8
+    require the freeze to be central in `wallet-service`, and
+    `wallet-service` already stores it (`hot_wallet_nonces.frozen_from_nonce`,
+    `LEAST` semantics, `storage.FreezeNonceGap`; `POST
+    /v1/sign/hot-wallet` returns `503` while it is set), but no
+    interface existed for the detector to set it.
+    - **Endpoint:** `POST /v1/wallet/nonce-gap` on `wallet-service`'s mTLS
+      listener, body `{"chain_id", "from_nonce"}` → `200 {"chain_id",
+      "frozen_from_nonce", "frozen_at"}` returning the **effective**
+      freeze (the lower of any existing value and `from_nonce`). `400`
+      malformed; `404` no Hot Wallet nonce row for that chain (nothing
+      was ever signed, so no gap can exist); `422` if `from_nonce >=
+      next_nonce` (a nonce never allocated cannot be a gap — rejects a
+      buggy or hostile caller instead of freezing on nonsense).
+    - **Allow-list:** `CN=withdrawal-service` only — it is the only
+      component that tracks Hot Wallet transactions to Withdrawal
+      Confirmation Depth and so the only Nonce Gap detector. `sweeper`
+      does not detect gaps and is not on the list.
+    - **Idempotency:** naturally idempotent, no key — `LEAST` and
+      `COALESCE(frozen_at, now())` make a repeat with the same
+      `from_nonce` a no-op, and a lower one only ever widens the freeze
+      (invariant #8). Safe to retry until `200`; `withdrawal-service`
+      marks the affected requests `disputed` first (its own DB), then
+      calls this, retrying on failure.
+    - **While frozen:** every *new* Hot Wallet signature is refused
+      (`503`) for every caller; an idempotent replay of an
+      already-signed key still returns its stored result (the stored
+      signature is looked up before the freeze check). `sweeper`: Gas
+      Top-Ups fail with `503` (transient), so after `MAX_ATTEMPTS` the
+      deposit is `ALERT`-logged and skipped (`deposit-flow.md` invariant
+      #16) — safe, the credit is already in the ledger; native Sweeps are
+      unaffected (they sign with the user's key and nonce, not the Hot
+      Wallet's). Treasury Sweeps stall the same way. New withdrawals
+      reach `reserved`, cannot be signed, and the Reaper Releases them
+      after the Stuck Reservation Timeout — safe, but see Open
+      Questions #13.
+    - **Unfreeze:** **no endpoint.** An operator clears it by a manual DB
+      action on `wallet-service`'s Postgres (`UPDATE hot_wallet_nonces
+      SET frozen_from_nonce = NULL, frozen_at = NULL WHERE chain_id = ?`,
+      the same statement `storage.ResolveNonceGap` runs), after resolving
+      each `disputed` request per invariant #9 — matching the plan's
+      "operator resolution is a manual DB action, no UI yet". Keeping it
+      off the mTLS listener means no service certificate, including a
+      compromised `withdrawal-service`, can ever lift a freeze.
+20. **A client's `idempotency_key` is scoped to that user and never
+    leaves `withdrawal-service`; every downstream key is the
+    server-minted Withdrawal Key.** **PROPOSED (Solution Architect) —
+    pending Tech Lead approval, Open Questions #11.** Fixes a design bug:
+    `UNIQUE(idempotency_key)` was global over a client-supplied value, so
+    (a) user B posting a key user A already used read back A's row,
+    status and `tx_hash`; (b) `GET /v1/withdrawals/{idempotency_key}`
+    let any authenticated user read any user's withdrawal by key; (c)
+    the same client string was reused verbatim as the ledger Lock key and
+    the `wallet-service` signing key, a namespace shared with `sweeper`'s
+    `gas-topup:...` keys — a user choosing a key equal to a future Gas
+    Top-Up key would make that top-up `409` forever. Rules:
+    - `withdrawal_requests` gets `withdrawal_id UUID PRIMARY KEY`
+      (server-minted) and `UNIQUE(user_id, idempotency_key)`; the
+      invariant #11 insert becomes `ON CONFLICT (user_id,
+      idempotency_key) DO NOTHING`. The same key from two users is two
+      requests.
+    - `GET /v1/withdrawals/{idempotency_key}` looks up `(authenticated
+      user_id, idempotency_key)`; another user's key is `404`,
+      indistinguishable from a key that does not exist.
+    - Withdrawal Key `withdrawal:{withdrawal_id}` is used for `lock` /
+      `settle` / `release`, for `POST /v1/sign/hot-wallet`, and as
+      `withdrawal:{withdrawal_id}:refund` for a Compensating Entry. It is
+      recomputable from the row, so retries after a crash use the same
+      key, exactly as before.
+    - `withdrawals.broadcast`/`withdrawals.confirmed` add `withdrawal_id`
+      and use it as the Kafka message key and the consumer dedup key
+      (`history-service` currently keys its document on
+      `withdrawal:<idempotency_key>` — a code change, plan task 3.11).
 
 ## Diagram
 
@@ -430,7 +567,7 @@ sequenceDiagram
         WD->>WD: read back existing row
         WD-->>Gateway: existing request's current status
     else new row created
-        WD->>WD: validate (well-formed address, asset registered,<br/>amount >= asset.min_withdrawal_amount,<br/>to_address is an active Whitelist Entry,<br/>to_address not on Screening List,<br/>to_address not one of our deposit addresses — invariant #18)
+        WD->>WD: validate (well-formed address, asset registered,<br/>amount >= asset.min_withdrawal_amount,<br/>to_address is an active Whitelist Entry,<br/>to_address not on Screening List,<br/>to_address not a deposit address / Hot / Warm — invariant #18)
         WD->>Ledger: lock(idempotency_key, user_id, asset_id, amount)<br/>Reservation — reserves capacity only, no Entry posted (ledger.md)
         alt insufficient available funds
             Ledger-->>WD: error
@@ -489,7 +626,28 @@ sequenceDiagram
     end
 ```
 
-Whitelist Entry lifecycle (invariants #12–13, #15; creation also refuses one of our own deposit addresses, #18):
+Nonce Gap freeze and operator unfreeze (invariant #19, **PROPOSED**):
+
+```mermaid
+sequenceDiagram
+    participant WD as withdrawal-service
+    participant WPG as withdrawal-service Postgres
+    participant Wallet as wallet-service
+    participant Op as Operator
+    participant Sweeper as sweeper
+
+    WD->>WD: detect Nonce Gap at N (tx at nonce N no longer canonical)
+    WD->>WPG: mark requests with nonce >= N disputed (invariant #8)
+    WD->>Wallet: POST /v1/wallet/nonce-gap {chain_id, from_nonce: N} — mTLS, CN=withdrawal-service
+    Wallet->>Wallet: frozen_from_nonce = LEAST(existing, N)
+    Wallet-->>WD: 200 {frozen_from_nonce, frozen_at} (retried until 200; idempotent)
+    Sweeper->>Wallet: POST /v1/sign/hot-wallet (Gas Top-Up, new key)
+    Wallet-->>Sweeper: 503 frozen — transient; ALERT + skip after MAX_ATTEMPTS
+    Op->>Op: resolve each disputed request (rebroadcast or nonce-filler, invariant #9)
+    Op->>Wallet: manual SQL on wallet-service Postgres:<br/>SET frozen_from_nonce = NULL (no endpoint)
+```
+
+Whitelist Entry lifecycle (invariants #12–13, #15; creation also refuses a deposit / Hot / Warm address, #18):
 
 ```mermaid
 sequenceDiagram
@@ -631,6 +789,8 @@ sequenceDiagram
    wait once a tx *is* included before calling it final; this was about
    what to do when a broadcast tx never gets included at all, or a
    request never gets that far.
+   **Decided (Tech Lead): Stuck Reservation Timeout = 5 minutes, Stuck
+   Broadcast Timeout = 128 blocks.** Invariant #17 updated.
 4. ~~Confirmed-then-reorged withdrawal.~~ **Decided (recommendation
    accepted):** not automated. Full design: a **Nonce Gap** (a Hot
    Wallet tx at nonce N reorged out) invalidates every Hot Wallet tx at
@@ -694,7 +854,14 @@ sequenceDiagram
    dictated price) — recommending yes, but flagging it as a separate
    yes/no since it could reasonably be deferred to the observability
    phase instead.
-9. **New (Tech Lead resolved `deposit-flow.md` Open Questions #13 as
+9. **Resolved (Tech Lead) — all four sub-questions decided; invariant
+   #18 updated.** (a) reuse `GET /v1/addresses/{address}` and grant
+   `CN=withdrawal-service`; (b) option B: invariant #11 unchanged, the
+   Reaper fails stale `requested` rows (timeout value PROPOSED, 5 min),
+   client uses a new key; (c) keep `422 destination_is_deposit_address`;
+   (d) also reject the Hot and Warm Wallet addresses (Warm source still
+   open, #10). Original text:
+   ~~**New (Tech Lead resolved `deposit-flow.md` Open Questions #13 as
    option (b); invariant #18 is the design).** The rule is decided; these
    details are **PROPOSED** for confirmation:
    (a) **New authz grant:** `CN=withdrawal-service` on `wallet-service`'s
@@ -720,4 +887,47 @@ sequenceDiagram
    probe the same way); flagging in case you prefer a generic
    "destination not allowed".
    (d) **Not covered:** the Hot Wallet's own address and the Warm Wallet
-   address as withdrawal destinations are not addressed here.
+   address as withdrawal destinations are not addressed here.~~
+10. **Open: where does the Warm Wallet address come from?** Needed by
+    invariant #18 (reject withdrawals/whitelist entries to it) and —
+    an existing, previously unnoticed gap — by the Treasury Sweep itself
+    (`wallet-tiering.md`'s diagram signs `to=Warm address` with no
+    designed source). `wallet-service` cannot derive it (Warm's seed is
+    never in an always-on service). It is public, not secret, but it is
+    operator-chosen, so it must come from config somewhere. My
+    recommendation: one canonical operator config file (same pattern as
+    `infra/assets.yaml`, e.g. `infra/treasury.yaml` with the Warm (and
+    Cold) address per chain), loaded by `wallet-service` only and served
+    by extending `GET /v1/wallet/hot-address` into e.g. `GET
+    /v1/wallet/system-addresses` → `{hot, warm}`; `wallet-service` could
+    then also enforce server-side that a Treasury Sweep's destination is
+    Warm. Alternatives: the same file mounted into `withdrawal-service`
+    directly, or an env var (rejected by default — drift, per
+    `deposit-flow.md` invariant #15). Also: should Cold be rejected as a
+    withdrawal destination too? (Not asked; same answer would apply.)
+11. **PROPOSED: per-user idempotency keys and a server-minted Withdrawal
+    Key (invariant #20).** Changes `withdrawal-flow.md`,
+    `integration-contracts.md` §1/§2/§3/§4 and `ledger.md` (key source
+    only — `ledger-service`'s code is unaffected, it takes any string
+    up to 256 chars). Touches built code in two places: `pkg/events`
+    (add `withdrawal_id` to both withdrawal events) and
+    `history-service` (key on it). Needs approval before M3 starts,
+    since task 3.1's schema depends on it.
+12. **PROPOSED: Nonce Gap freeze endpoint `POST /v1/wallet/nonce-gap`
+    (invariant #19), `CN=withdrawal-service` only, no unfreeze
+    endpoint.** Also open underneath it: after an operator resolves a
+    gap, does `wallet-service`'s `next_nonce` need resetting (e.g. to the
+    chain's pending nonce)? `storage.ResolveNonceGap` deliberately leaves
+    it alone because no doc says; if the operator used nonce-fillers
+    signed outside `wallet-service`, `next_nonce` can be behind the
+    chain. And how nonce-fillers are signed at all (the Hot key is only
+    in `wallet-service`) is not designed. Both belong to invariant #9's
+    operator procedure.
+13. **Open, minor: should `withdrawal-service` refuse new withdrawals
+    while a Nonce Gap is open,** instead of reserving funds that the
+    Reaper then Releases 5 minutes later (`failed`)? Safe either way;
+    refusing up front (`503`) is kinder but needs `withdrawal-service`
+    to track its own "frozen" flag. Not designed.
+14. **PROPOSED addition: the Reaper also covers `validated`** (invariant
+    #17) — a crash after `lock()` succeeded but before `reserved` left
+    an active Lock no rule covered. Confirm.

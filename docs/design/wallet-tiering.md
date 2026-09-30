@@ -288,3 +288,10 @@ sequenceDiagram
    silently decide a new key-minting scheme" instruction. Confirm this
    is acceptable, or propose a simpler alternative if one exists that
    doesn't reintroduce the time-bucket dedupe risk.
+7. **New, open (found while designing `withdrawal-flow.md` invariant
+   #18): no designed source for the Warm Wallet address.** The Treasury
+   Sweep diagram signs `to=Warm address`, but nothing says where the
+   sweep-monitor loop gets it, and `wallet-service` cannot derive it
+   (invariant #2). `withdrawal-service` now needs it too, to reject
+   withdrawals to it. Recommendation and alternatives:
+   `withdrawal-flow.md` Open Questions #10.

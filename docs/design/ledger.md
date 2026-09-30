@@ -139,7 +139,11 @@ implementing `wallet-service`'s side of this.
 - **Lock** — a hold placed against an Account's Available Balance,
   created idempotently keyed on the same `idempotency_key` the
   Withdrawal Request already carries (`withdrawal-flow.md`'s
-  Reservation is exactly this). **Callers never pass an `account_id`**
+  Reservation is exactly this). (**PROPOSED, `withdrawal-flow.md`
+  invariant #20:** that key becomes the server-minted Withdrawal Key
+  `withdrawal:{withdrawal_id}`, never the client's string, which is only
+  unique per user. No `ledger-service` change: it accepts any key up to
+  256 characters.) **Callers never pass an `account_id`**
   — `account_id` is `ledger-service`'s own internal primary key, never
   known outside it. `lock()`'s actual signature is
   `lock(idempotency_key, user_id, asset_id, amount)`; `ledger-service`
