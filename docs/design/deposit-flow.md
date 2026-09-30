@@ -491,11 +491,14 @@ concrete Confirmation Depth and Gas Top-Up numbers below.
       same decision — there is no state that could disagree with itself.
       Each skip is logged at INFO with `{tx_hash, log_index, to}` for
       operators (a log line is the whole audit trail; see Alternatives).
-    - **What this deliberately does not cover:** a withdrawal whose
-      `to_address` is one of our own deposit addresses is now credited to
-      no one (the withdrawing user was debited, the funds sit at the
-      deposit address, no Sweep is triggered) — Open Questions #13.
-      Also: transfers already mis-recorded before the fix ships are not
+    - **A withdrawal to one of our own deposit addresses cannot occur:**
+      `withdrawal-service` rejects such a Withdrawal Request at
+      validation (`withdrawal-flow.md` invariant #18, **Decided (b)** —
+      Open Questions #13), so there is no case in which the Hot Wallet
+      sends funds that this rule would then leave uncredited and
+      stranded at a deposit address. (This rule stays correct on its own
+      if that check were ever bypassed: the outflow is still not a
+      deposit; the funds would simply be an operator matter.) Also: transfers already mis-recorded before the fix ships are not
       retroactively corrected — Open Questions #14.
 
 ## Diagram
@@ -831,7 +834,7 @@ sequenceDiagram
     Hot Wallet address is known, and `CN=chain-watcher` on `GET
     /v1/wallet/hot-address`. Invariant #17's `PROPOSED` marker removed.
     Implemented (commits 07fcb1d, 68e7dac; `make e2e` green).
-13. **Open: a withdrawal to an address that is one of our own deposit
+13. ~~**Open: a withdrawal to an address that is one of our own deposit
     addresses.** With invariant #17 the funds arrive and are credited to
     nobody, and no Sweep runs (the user was already debited, so the money
     is neither lost from the books nor double-credited — but it is
@@ -842,7 +845,16 @@ sequenceDiagram
     Internal Transfer (`integration-contracts.md`'s `transfers.internal`
     GAP). I recommend (a) for this phase — it is an edge case, not the
     e2e bug — but it is your call and touches `withdrawal-flow.md`, which
-    I have not changed.
+    I have not changed.~~
+    **Decided (Tech Lead): option (b).** `withdrawal-service` rejects a
+    Withdrawal Request whose `to_address` is one of our own deposit
+    addresses, resolved via `wallet-service`'s `GET
+    /v1/addresses/{address}` (200 = ours -> reject; 404 = not ours ->
+    continue; any other failure = fail closed, never "not ours"). Design
+    in `withdrawal-flow.md` invariant #18; the new `withdrawal-service`
+    grant on that endpoint is **PROPOSED**, awaiting Tech Lead approval
+    (`service-auth-mtls.md`, `integration-contracts.md`); plan task 3.10.
+    Follow-on open points are `withdrawal-flow.md` Open Questions #9.
 14. **Open: remediation of deposits already mis-credited by Gas Top-Ups
     before the fix ships.** `chain-watcher` will not rescan history, and
     `ledger.md` has no designed reversal for a confirmed deposit
