@@ -29,9 +29,8 @@ resolved from a valid API key, and that `user_id` is never read from the client.
 - No rate limiting or brute-force protection on `POST /users` or on bad keys (`identity-auth.md`
   Open Question #3, deliberately deferred): anyone can mint users today.
 - TLS termination for external clients is out of scope here (plain `:8080`).
-- Not run under Docker (none in the sandbox); tests use real Postgres and fake wallet-service / ledger-service. The mTLS client to
-  ledger-service is the same code as `chain-watcher`'s and `sweeper`'s (which were run against a real wallet-service), but this
-  gateway -> ledger-service call itself was not run against the real `ledger-service` binary.
+- Runs under Docker in `e2e/` (task 2.6) against the real wallet-service and ledger-service, including the
+  gateway -> ledger-service mTLS balances call. Its own tests use real Postgres and fake wallet-service / ledger-service.
 
 ## Running it
 

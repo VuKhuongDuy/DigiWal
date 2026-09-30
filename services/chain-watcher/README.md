@@ -59,8 +59,7 @@ make test    # Postgres via testcontainers/TEST_POSTGRES_DSN; Redis via TEST_RED
 
 ## Decisions and gaps to know about
 
-- **At-least-once, not exactly-once, on the wire.** The design says a transfer produces at most one
-  `deposits.confirmed`. The state transition still happens once (invariant #3), but publishing is
+- **At-least-once, not exactly-once, on the wire.** The state transition happens once (invariant #3), but publishing is
   driven from the database, so a crash between Kafka's ack and marking the row republishes the same
   event with the same key. The alternative, publishing straight after the `UPDATE`, loses a deposit
   on a crash. `ledger-service` (idempotent on the natural key) and `sweeper` (fresh balance read)
@@ -74,8 +73,8 @@ make test    # Postgres via testcontainers/TEST_POSTGRES_DSN; Redis via TEST_RED
 - **Only top-level transfers.** A transfer made by a contract call (internal transaction, e.g. from
   a smart-contract wallet) is invisible without tracing. The design does not cover it.
 - Addresses issued before the Redis hash existed are not in it; they resolve through the endpoint.
-- Each service's `docker-compose.yml` is its own Compose project, so `wallet-service` is not on this one's network by that name; override `WALLET_SERVICE_URL` (e.g. `https://host.docker.internal:8443`) until the e2e task (2.6) provides one shared compose.
-- Not run against Docker/Kafka/Sepolia/Anvil here (no Docker in the sandbox). What was run: a real
+- Each service's `docker-compose.yml` is its own Compose project, so `wallet-service` is not on this one's network by that name. For the whole stack on one network use `e2e/` (`make -C e2e up`); on its own, override `WALLET_SERVICE_URL` (e.g. `https://host.docker.internal:8443`).
+- Runs against Docker, Kafka and Anvil in `e2e/` (task 2.6: native and ERC-20 deposits end to end, and the Hot Wallet Outflow regression). Not run against Sepolia. Unit-level, it was run against: a real
   EVM (go-ethereum's simulated backend: native transfer, a real ERC-20 `Transfer` log, sender
   recovery, receipts), a scriptable chain for reorgs and failures, and real Postgres and Redis. The resolver was also run once (throwaway
   check, not committed) against the real `wallet-service` binary over mTLS: Redis hit, endpoint fallback, unknown address `404` = not ours,

@@ -47,7 +47,7 @@ event for that address sweeps its whole balance.
 - Processing is serial: each event waits for its transactions to be mined (seconds on Anvil, ~12 s per block on Sepolia).
 - A native sweep leaves a little dust: wallet-service reserves the fee *cap*, not the expected fee.
 - The Kafka consumer loop is the third copy of the same code (`ledger-service`, `history-service`); a shared package is deferred.
-- Not run under Docker/Kafka/Anvil (none in the sandbox). Run: the sweep logic against a fake chain and wallet-service
+- Runs under Docker, Kafka and Anvil in `e2e/` (task 2.6: native and ERC-20 deposits are swept into the Hot Wallet; make -C e2e e2e). Not run against Sepolia. Unit-level, it was run against: the sweep logic against a fake chain and wallet-service
   (mutation-checked), the chain adapter against go-ethereum's in-process EVM (real transfers, receipts, mempool nonces, `balanceOf`),
   and the wallet client against an HTTP stub. The wallet client was also run once (throwaway check, not committed) against the real
   `wallet-service` binary over mTLS with a mock RPC: top-up signed by the Hot Wallet and identical on replay, token and native-`max` sweeps signed by

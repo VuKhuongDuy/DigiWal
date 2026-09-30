@@ -32,6 +32,7 @@ GET  /v1/users/{userID}/deposit-address   # 404 if the user has no address yet
 POST /v1/sign/hot-wallet                  # CN: withdrawal-service, sweeper
 POST /v1/sign/user-address                # CN: sweeper only (Sweep: user key -> Hot Wallet)
 GET  /v1/addresses/{address}              # CN: chain-watcher only -> {user_id, chain} or 404
+GET  /v1/wallet/hot-address               # CN: withdrawal-service, sweeper, chain-watcher -> {address}; 503 without a hot_wallet seed
 ```
 
 `POST /v1/sign/hot-wallet` `{to_address, asset_id, amount, chain_id, idempotency_key, max_gas_price?}`
@@ -50,6 +51,11 @@ LOWER-CASED, value = user_id), written when an address is issued. It replaces th
 `wallet:deposit_addresses` set, which couldn't carry the owner; addresses issued before this change
 are simply not in the hash and resolve through the endpoint.
 
+`GET /v1/wallet/hot-address` returns the address wallet-service itself derived for the Hot Wallet
+(`deposit-flow.md`, Hot Wallet Address Discovery, invariants #15 and #17). Callers ask once at startup and
+cache it rather than configure it. chain-watcher uses it only to skip Hot Wallet Outflow and still cannot
+reach either `/v1/sign/*` endpoint.
+
 `POST /v1/sign/user-address` `{user_id, to_address, asset_id, amount, chain_id}` → `{signed_raw_tx}`.
 The caller picks whose key signs but never the destination: `to_address` must equal the Hot
 Wallet or it is `403`. For a native-coin Sweep `amount` may be `"max"`: sweep everything
@@ -67,11 +73,10 @@ nothing chain-specific to derive separately.
 
 ## What's deliberately not here yet
 
-No Kafka. Those belong to
-`withdrawal-service` and `chain-watcher` respectively (see the phased
-roadmap in `docs/ARCHITECTURE.md`) — this service's whole job in phase 1
-is "derive addresses correctly and never leak the seed," and it's
-easiest to verify that in isolation before wiring in the rest.
+No Kafka: this service never publishes or consumes events. Withdrawal orchestration belongs to
+`withdrawal-service`, which is not built yet (see the phased roadmap in `docs/ARCHITECTURE.md`).
+The deposit-address endpoints are still on the plain `:8080` listener; moving them behind mTLS
+(`CN=api-gateway`) is deferred (`service-auth-mtls.md` Open Question #4).
 
 ## Tests
 

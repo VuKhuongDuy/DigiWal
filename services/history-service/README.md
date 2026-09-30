@@ -26,7 +26,7 @@ replaying the topics (a new consumer group starts from the beginning).
   is an index on `(user_id, updated_at desc)` for the eventual feed.
 - `deposits.confirmed` carries no timestamp, so a confirmed deposit's time is when this service
   processed it. A reorg-driven re-detection of a still-pending deposit does not update its block number.
-- **The MongoDB code was not run against a MongoDB** (none in the sandbox, no Docker): the consumer
-  logic is tested against a fake store, and `mongo_test.go` (pending -> confirmed, out-of-order,
+- **The MongoDB code is not asserted against a MongoDB by any test.** `e2e/` starts this service and Mongo,
+  but the e2e test checks nothing about history. The consumer logic is tested against a fake store, and `mongo_test.go` (pending -> confirmed, out-of-order,
   redelivery) is written but skipped without `TEST_MONGO_URI`. Please run it once
   (`make test` with the env var set) before relying on the upsert semantics.
