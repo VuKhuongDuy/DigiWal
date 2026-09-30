@@ -441,8 +441,9 @@ concrete Confirmation Depth and Gas Top-Up numbers below.
 17. **A Hot Wallet Outflow is never a deposit: `chain-watcher` emits no
     `deposits.detected`/`deposits.confirmed` and records no
     `observed_transfers` row for it, even when the destination is a
-    Watched Address.** **PROPOSED (Solution Architect, bug found by the M2
-    e2e test) — pending Tech Lead approval, see Open Questions #12-#15.**
+    Watched Address.** **Decided (Tech Lead; bug found by the M2 e2e test) —
+    implemented in commits 07fcb1d and 68e7dac, `make e2e` green; Open
+    Questions #12 resolved, #13-#15 still open.**
     Without this, the sweeper's own Gas Top-Up (invariant #13: Hot Wallet
     -> user address, 0.001 ETH) is a native transfer to a Watched Address;
     `chain-watcher` records it as a native deposit, `ledger-service`
@@ -814,7 +815,7 @@ sequenceDiagram
     §5 for the same policy applied to `history-service`, and why
     `ledger-service` deliberately gets a different (retry-forever)
     policy instead.
-12. **New, PROPOSED (Solution Architect, Gas Top-Up bug found by the M2 e2e
+12. ~~**New, PROPOSED (Solution Architect, Gas Top-Up bug found by the M2 e2e
     test): invariant #17 — a Hot Wallet Outflow is skipped entirely by
     `chain-watcher`, never recorded and never published.** Tech Lead to
     confirm (a) skip-and-log rather than an `internal` row (Alternatives),
@@ -824,7 +825,12 @@ sequenceDiagram
     (`service-auth-mtls.md`, `integration-contracts.md`). This is
     non-trivial under `CLAUDE.md` (two services, a new authorisation grant,
     a new invariant), hence the design note; the code itself is small —
-    `IMPLEMENTATION_PLAN.md` task 2.7.
+    `IMPLEMENTATION_PLAN.md` task 2.7.~~
+    **Decided (Tech Lead): all four approved as proposed** — skip-and-log
+    (no `internal` row), sender-only comparison, refuse to scan until the
+    Hot Wallet address is known, and `CN=chain-watcher` on `GET
+    /v1/wallet/hot-address`. Invariant #17's `PROPOSED` marker removed.
+    Implemented (commits 07fcb1d, 68e7dac; `make e2e` green).
 13. **Open: a withdrawal to an address that is one of our own deposit
     addresses.** With invariant #17 the funds arrive and are credited to
     nobody, and no Sweep runs (the user was already debited, so the money
