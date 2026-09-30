@@ -53,6 +53,30 @@ concrete Confirmation Depth and Gas Top-Up numbers below.
 - **Watched Address** — an address `wallet-service` has issued to a
   user. Same address is watched for native transfers and every
   registered ERC-20 contract's `Transfer` events.
+- **Address Resolution** — turning a Watched Address into the `user_id`
+  it belongs to. **Fixed here — a real gap, not previously designed:**
+  `chain-watcher`'s known-address check (invariant #1) used to answer
+  only "is this address ours?" (Redis `SISMEMBER` against a plain set),
+  which is not enough — `ledger.md`'s Account is keyed by `(user_id,
+  asset)`, never by address, so crediting a deposit needs the `user_id`,
+  not just a yes/no. Without this, `ledger-service` would receive a
+  `deposits.confirmed` event with a `to_address` and nothing telling it
+  *whose* Account to credit — the deposit flow as originally drafted
+  could not actually credit anyone. Resolved by upgrading that same
+  lookup to return `user_id` directly: `wallet-service`'s Redis cache is
+  a hash (`address → user_id`), populated the moment `CreateAddress`
+  issues a new address, not a set; a cache miss falls back to a new
+  `wallet-service` endpoint, `GET /v1/addresses/{address}` (mTLS,
+  `integration-contracts.md` §2), never a direct cross-service Postgres
+  read (this project's convention is each service owns its own
+  Postgres — the deposit-flow doc's earlier phrasing, "falling back to
+  `wallet-service`'s Postgres," was imprecise about this and is
+  corrected here). `chain-watcher` resolves `user_id` once, at the same
+  point it already checks "is this address ours," and carries it on
+  both `deposits.detected` and `deposits.confirmed` from then on — every
+  downstream consumer (`ledger-service`, `history-service`) reads it
+  straight off the event, so neither gains a new synchronous dependency
+  on `wallet-service` the way `chain-watcher` now does.
 - **Confirmation Depth** — number of blocks after inclusion before a
   transfer is treated as final and eligible to credit the ledger. One
   config value for the whole chain in this phase (block-based, not
@@ -76,11 +100,21 @@ concrete Confirmation Depth and Gas Top-Up numbers below.
   This is chain-watcher's own persisted state — see Open Questions #1.
 - **Deposit Detected** — event emitted the first time a matching
   transfer is seen (any depth), informational only, lets
-  `history-service` show the user an incoming/pending deposit.
+  `history-service` show the user an incoming/pending deposit. Carries
+  `{chain_id, tx_hash, log_index, asset_id, from_address, to_address,
+  user_id, amount, block_number, detected_at}` — **`user_id` added
+  here** (Address Resolution above): without it `history-service` has
+  no way to know which user's feed a pending deposit belongs to either,
+  the identical gap as `deposits.confirmed`, just for a different
+  consumer.
 - **Deposit Confirmed** — event emitted once an Observed Transfer
   crosses Confirmation Depth. The only thing `ledger-service` consumes;
   carries `{chain_id, tx_hash, log_index, asset_id, from_address,
-  to_address, amount, block_number}`.
+  to_address, user_id, amount, block_number}` — **`user_id` added
+  here** (Address Resolution above): `ledger-service`'s `apply()` call
+  needs a `user_id` to credit (`integration-contracts.md` §2's
+  `POST /v1/ledger/transactions` request shape), and nothing upstream
+  of this event previously supplied one.
 - **Sweep** — the transaction moving a confirmed deposit from the
   user's attribution address to the Hot Wallet (`wallet-tiering.md`).
   Triggered once a deposit reaches `deposits.confirmed`; closes the gap
@@ -129,10 +163,23 @@ concrete Confirmation Depth and Gas Top-Up numbers below.
 
 ## Aggregates & invariants
 
-1. **Only Watched Addresses produce events.** chain-watcher checks a
-   transfer's destination against the Redis known-address set (falling
-   back to `wallet-service`'s Postgres on a cache miss, as the existing
-   code already does) before emitting anything for it.
+1. **Only Watched Addresses produce events, and every event they produce
+   carries the resolved `user_id` — never just a yes/no.** chain-watcher
+   resolves a transfer's destination via Redis first (`HGET` on the
+   `address → user_id` hash, `wallet-service`'s Address Resolution
+   above) — O(1), no round trip to another service on the common path.
+   On a cache miss, it falls back to `wallet-service`'s `GET
+   /v1/addresses/{address}` (mTLS, a new synchronous dependency —
+   `service-auth-mtls.md`'s Authorization matrix), never a direct
+   cross-service Postgres read. A `404` (genuinely not one of our
+   addresses — the Redis miss was real, not just stale) means no event
+   of either kind is emitted for that transfer, same as before this
+   invariant was tightened. A resolution failure that isn't a clean
+   `404` (timeout, connection error — `wallet-service` transiently down)
+   is **not** treated as "not ours": chain-watcher retries rather than
+   dropping the transfer, which composes for free with invariant #4 —
+   an unresolved transfer isn't "fully processed," so the watermark
+   simply doesn't advance past its block until resolution succeeds.
 2. **Only registered assets produce events.** Native coin is implicitly
    always registered. An ERC-20 `Transfer` log from a contract address
    not in the Asset Registry is ignored entirely — not even a
@@ -282,6 +329,7 @@ sequenceDiagram
     participant RPC as EVM testnet RPC
     participant CW as chain-watcher
     participant Redis
+    participant Wallet as wallet-service
     participant PG as chain-watcher Postgres<br/>(observed_transfers, watermark)
     participant Kafka
     participant Ledger as ledger-service
@@ -289,22 +337,31 @@ sequenceDiagram
     loop every poll interval
         CW->>RPC: get blocks since watermark
         RPC-->>CW: block(s): txs + logs
-        CW->>Redis: is destination a watched address?
-        Redis-->>CW: yes / no (fallback: wallet-service Postgres)
-        alt native transfer or registered ERC-20 Transfer log, to a watched address
-            CW->>PG: INSERT observed_transfers (status=pending)<br/>ON CONFLICT (chain_id,tx_hash,log_index) DO NOTHING
-            CW->>Kafka: publish deposits.detected
+        CW->>Redis: HGET address -> user_id (Address Resolution)
+        alt cache hit
+            Redis-->>CW: user_id
+        else cache miss
+            CW->>Wallet: GET /v1/addresses/{address} — mTLS
+            alt resolved
+                Wallet-->>CW: {user_id, chain}
+            else 404 — not one of our addresses
+                Wallet-->>CW: 404
+            end
+        end
+        alt native transfer or registered ERC-20 Transfer log, to a resolved (user_id, address)
+            CW->>PG: INSERT observed_transfers (status=pending, user_id, ...)<br/>ON CONFLICT (chain_id,tx_hash,log_index) DO NOTHING
+            CW->>Kafka: publish deposits.detected<br/>{..., user_id}
         end
         CW->>PG: SELECT pending transfers now >= confirmation_depth blocks old
         loop each newly-confirmed transfer
             CW->>PG: UPDATE observed_transfers SET status='confirmed'<br/>WHERE status='pending'
-            CW->>Kafka: publish deposits.confirmed<br/>{chain_id, tx_hash, log_index, asset_id, from_address, to_address, amount, block_number}
+            CW->>Kafka: publish deposits.confirmed<br/>{chain_id, tx_hash, log_index, asset_id, from_address, to_address, user_id, amount, block_number}
         end
-        CW->>PG: advance watermark
+        CW->>PG: advance watermark<br/>(only past blocks where every transfer resolved — invariant #1/#4)
     end
 
     Kafka->>Ledger: deliver deposits.confirmed
-    Note over Ledger: applied as a Ledger Transaction<br/>{credit user account, debit chain account}<br/>— see ledger.md's apply() sequence
+    Note over Ledger: applied as a Ledger Transaction<br/>{credit user account (user_id from the event), debit chain account}<br/>— see ledger.md's apply() sequence
 ```
 
 Sweep, owned by `sweeper`, triggered by consuming `deposits.confirmed`:
@@ -375,6 +432,30 @@ sequenceDiagram
   that doesn't occur for this key. A live `eth_getTransactionCount`
   read is simpler and, in this specific single-writer situation, no
   less correct.
+- **Let `ledger-service` (and `history-service`) resolve `to_address →
+  user_id` themselves, each with their own synchronous call to
+  `wallet-service`, instead of `chain-watcher` resolving it once and
+  carrying `user_id` on the event.** Rejected: every consumer needing
+  its own copy of the address→user mapping (or its own sync dependency
+  on `wallet-service`) duplicates the same lookup two or three times per
+  deposit instead of once, and quietly breaks the Kafka-only boundary
+  `docs/ARCHITECTURE.md` draws between `chain-watcher`'s producers and
+  everything downstream — `ledger-service` in particular has never had
+  a synchronous dependency on `wallet-service` anywhere else in this
+  design, and adding one just for this would be a bigger architectural
+  change than extending a lookup `chain-watcher` already performs
+  (invariant #1, pre-existing "is this address ours" check).
+- **Have `chain-watcher` read `wallet-service`'s Postgres tables
+  directly on a cache miss**, matching this doc's own earlier, looser
+  phrasing ("falling back to `wallet-service`'s Postgres"). Rejected on
+  this pass: cross-service direct DB reads violate the "each service
+  owns its own Postgres" boundary the rest of this project holds to
+  (`ledger.md`, `withdrawal-service`'s schema, etc. — none of them read
+  another service's tables), and skip `service-auth-mtls.md`'s CN
+  authorization entirely, since a raw DB connection has no per-endpoint
+  allow-list. A real `wallet-service` REST endpoint (mTLS, CN-checked)
+  costs one small handler and keeps the same protection every other
+  cross-service call in this project already has.
 
 ## Open questions
 
@@ -450,3 +531,20 @@ sequenceDiagram
    needs no further design work — it already matches today's request
    shape. Either way, please resolve #11 before Milestone 2's `sweeper`
    work reaches the native-coin Sweep path.
+10. **New, from Tech Lead review: neither Kafka deposit event carried a
+    `user_id` at all** — a correctness gap, fixed directly rather than
+    left open (same footing as `ledger.md`'s balance-model fixes). As
+    drafted, `deposits.confirmed`'s payload had `to_address` but no
+    `user_id`, and `ledger-service`'s Account is keyed by `(user_id,
+    asset)`, never by address — there was no way for `ledger-service` to
+    know whose Account to credit. `deposits.detected` had the identical
+    gap for `history-service`. **Fixed:** new Address Resolution term
+    above — `chain-watcher` resolves `to_address → user_id` (Redis hash,
+    `wallet-service`'s cache-miss fallback endpoint
+    `GET /v1/addresses/{address}`, mTLS) once, at the point it already
+    checks "is this address ours" (invariant #1, rewritten), and both
+    events now carry `user_id`. See `integration-contracts.md` and
+    `service-auth-mtls.md` for the updated wire contract and CN
+    authorization — `chain-watcher` is a synchronous `wallet-service`
+    caller for the first time, which needed its own leaf certificate
+    added.

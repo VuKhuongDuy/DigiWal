@@ -180,6 +180,7 @@ flowchart TB
         ws["wallet-service/{cert.pem,key.pem}"]
         wd["withdrawal-service/{cert.pem,key.pem}"]
         sw["sweeper/{cert.pem,key.pem}"]
+        cw["chain-watcher/{cert.pem,key.pem}"]
         lg["ledger-service/{cert.pem,key.pem} — PROPOSED"]
         ag["api-gateway/{cert.pem,key.pem} — PROPOSED"]
     end
@@ -187,6 +188,7 @@ flowchart TB
     script2 --> ws
     script2 --> wd
     script2 --> sw
+    script2 --> cw
     script2 -.-> lg
     script2 -.-> ag
     cacert -.->|copied alongside every leaf,<br/>needed by every peer to verify others| Out
@@ -194,6 +196,7 @@ flowchart TB
     ws -->|volume mount, read-only| WSc["wallet-service container<br/>mTLS listener :8443 + plain :8080 (/healthz only)"]
     wd -->|volume mount, read-only| WDc["withdrawal-service container"]
     sw -->|volume mount, read-only| SWc["sweeper container"]
+    cw -->|volume mount, read-only| CWc["chain-watcher container"]
 ```
 
 Enforcement at request time — the invariant this doc exists to add
@@ -234,16 +237,16 @@ callers invented here.
 | `wallet-service` | `POST /v1/sign/hot-wallet` | `withdrawal-service`, `sweeper` | **Decided here** — required, blocks nothing else, closes the gap the Tech Lead flagged |
 | `wallet-service` | `POST /v1/sign/user-address` | `sweeper` only | **Decided here** — same |
 | `wallet-service` | `GET`/`POST /v1/users/{userID}/deposit-address` | `api-gateway` | **PROPOSED** — see Open Questions #4 |
+| `wallet-service` | `GET /v1/addresses/{address}` | `chain-watcher` only | **PROPOSED**, new — fixes a real gap (Tech Lead review, `deposit-flow.md`'s Address Resolution): `chain-watcher` cannot resolve a deposit's `user_id` without this endpoint, so unlike the row above it isn't deferred — needed from `chain-watcher`'s first working version, not a later consistency pass |
 | `wallet-service` | `GET /healthz` | (no client cert required — plain listener, invariant #8) | Decided here |
 | `ledger-service` | `POST /v1/ledger/transactions` (`apply`), `POST /v1/ledger/locks`, `.../{key}/settle`, `.../{key}/release` | `withdrawal-service` only, on all four | **PROPOSED**, invariant #7 — build in at Milestone 1 |
 | `ledger-service` | any future `api-gateway`-facing read endpoint (balances, etc.) | `api-gateway` | **PROPOSED, not yet applicable** — no such endpoint is designed yet (`integration-contracts.md` §2 marks it **PROPOSED HERE, low confidence**); apply this row once it exists, don't invent its path now |
 | `withdrawal-service` | `POST /withdrawals`, `GET /withdrawals/{idempotency_key}`, `POST /whitelist`, `DELETE /whitelist/{id}` | `api-gateway` | **PROPOSED, deferred** — see Open Questions #4 |
 | `history-service` | (its API is a GAP per `integration-contracts.md` §2) | `api-gateway`, once designed | **PROPOSED, not yet applicable** |
 
-Explicitly **not** in this matrix because no design doc names them as a
-synchronous caller: `chain-watcher` never calls `wallet-service` (it
-only reads Redis/Postgres/RPC and produces to Kafka — `deposit-flow.md`
-Bounded context(s)), so it needs no leaf certificate for this purpose.
+`chain-watcher` now needs its own leaf certificate (previously it was
+the one always-on service with none) — the CA/leaf-cert diagram below
+has been updated to include it.
 
 ## CA and certificate design
 
@@ -288,11 +291,13 @@ service that needs one:
   later `ledger-service`), as its TLS server credential too — no
   separate "server cert" vs. "client cert" ceremony; at this scale
   that distinction adds a second cert-per-service for no real benefit.
-- `withdrawal-service`, `sweeper`, and `wallet-service` get one now
-  (mandatory scope). `ledger-service` and `api-gateway` get one
-  whenever their own PROPOSED rows above are actually built — the
-  script and CA are already reusable, so this is a five-minute step
-  each time, not new design work.
+- `withdrawal-service`, `sweeper`, `wallet-service`, and `chain-watcher`
+  (new — see the Authorization matrix's `GET /v1/addresses/{address}`
+  row, fixing the `user_id` gap `deposit-flow.md`'s Address Resolution
+  closes) get one now (mandatory scope). `ledger-service` and
+  `api-gateway` get one whenever their own PROPOSED rows above are
+  actually built — the script and CA are already reusable, so this is a
+  five-minute step each time, not new design work.
 
 Everything under `infra/pki/out/` is gitignored, the same way `.env`
 already is (`services/wallet-service`'s existing pattern) — this needs

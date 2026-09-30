@@ -64,6 +64,7 @@ Payload (proposed):
 | `asset_id` | uuid | FK into the Asset Registry (`ledger.md`) — invariant #2 says only registered assets ever reach this point, so it's always resolvable here |
 | `from_address` | string (hex) | Needed downstream for compliance screening even at the detected stage if any future consumer wants it; matches `deposits.confirmed`'s field set for consistency |
 | `to_address` | string (hex) | The Watched Address (`deposit-flow.md`) |
+| `user_id` | string | **New, fixes a real gap (Tech Lead review):** the user this Watched Address belongs to, resolved by `chain-watcher` (`deposit-flow.md`'s new Address Resolution term) before this event is ever published. Without it `history-service` has no way to attribute a pending deposit to the right user's feed. |
 | `amount` | decimal string, minor units | See "How to read the tables" above |
 | `block_number` | integer | Block the transfer was included in (pre-confirmation-depth) |
 | `detected_at` | timestamptz (ISO 8601) | |
@@ -87,6 +88,7 @@ Payload (now matches both `deposit-flow.md`'s prose and its diagram — see Open
 | `asset_id` | uuid | |
 | `from_address` | string (hex) | **Decided:** present in both `deposit-flow.md`'s prose and its diagram now (Open Questions #1, resolved — the diagram was the one that was wrong). Required downstream regardless: `compliance-screening.md` invariants #1 and #2 both check `from_address` in the `deposits.confirmed` consumers (`ledger-service`, `sweeper`) — the field must exist on the wire or those checks are impossible. |
 | `to_address` | string (hex) | |
+| `user_id` | string | **New, fixes a real gap (Tech Lead review):** without this, `ledger-service` has `to_address` and nothing else — `ledger.md`'s Account is keyed by `(user_id, asset)`, never by address, so there was no way to know whose Account to credit. Resolved by `chain-watcher` (`deposit-flow.md`'s Address Resolution) the same way as `deposits.detected` above, same field. |
 | `amount` | decimal string, minor units | |
 | `block_number` | integer | |
 
@@ -195,6 +197,7 @@ and its README) rather than inventing a new one.
 | Endpoint | Status | Request | Response | Cites |
 |---|---|---|---|---|
 | `POST /v1/users/{userID}/deposit-address`<br/>`GET /v1/users/{userID}/deposit-address` | **Already implemented** (`services/wallet-service/internal/api/api.go`) | — (path param only) | `{"user_id","chain","address"}`, 200/201/404 | Existing code, not a design doc |
+| `GET /v1/addresses/{address}` (**PROPOSED HERE** — new, fixes a real gap: Tech Lead review of `deposit-flow.md` found neither Kafka deposit event carried a `user_id`, and this is the reverse-lookup that closes it) | — (path param only — the on-chain address, reverse direction from the endpoint above) | `200 {"user_id","chain"}` or `404` (not a Watched Address at all) | `deposit-flow.md`'s new Address Resolution term and rewritten invariant #1: `chain-watcher`'s cache-miss fallback when its Redis `address → user_id` hash (populated at `CreateAddress` time) doesn't have an entry. Read-only, naturally idempotent — no idempotency key needed (§4). Backed by `wallet_addresses.address`, already `UNIQUE`-indexed (`services/wallet-service/migrations/000001_baseline_schema.up.sql`), so no schema change — only a new query and handler. |
 | `POST /v1/sign/hot-wallet` | **PROPOSED HERE** — path is invented; the *contract* (fields + no-caller-chosen-key constraint) is decided; the gas-construction approach below is **Decided (Tech Lead, 2026-09-29)** — option (a): `wallet-service` owns construction (Open Questions #11) | `{"to_address","asset_id","amount","chain_id","idempotency_key","max_gas_price"?}`. **Decided** (Tech Lead review): `idempotency_key` is required — the same key the Withdrawal Request already carries throughout its lifecycle for that caller (`withdrawal-flow.md`, Ubiquitous language > *Withdrawal Request*), or the caller-specific PROPOSED key for the other two callers (see §3, §4). **Decided (Tech Lead, 2026-09-29):** no gas-parameter field for price/limit — `wallet-service` constructs the transaction itself (fetches gas price, estimates gas limit) via its own EVM RPC client, rather than accepting a caller-supplied gas price/limit. `max_gas_price` **is** accepted as an optional caller-supplied safety ceiling (never a dictated price) — same decision, both halves resolved together. | `{"signed_raw_tx","nonce"}` (hex tx, integer nonce). **Decided:** `nonce` is now part of the response — the caller needs it for its own state (e.g. `withdrawals.broadcast`'s payload already carries `nonce`, §1 above). On a **repeated call with an already-seen `idempotency_key`**, returns the *identical* stored `{signed_raw_tx, nonce}` instead of allocating/signing anything new — **Decided** (Tech Lead review, `withdrawal-flow.md` invariant #16): closes a lost-response gap where a retried call would otherwise claim a second nonce and strand the first, since EVM's strict per-account nonce ordering means the stranded nonce can never confirm. | Request shape + "no parameter that lets a caller pick a derivation index": `withdrawal-flow.md` invariant #5. Nonce allocation happens inside this call, atomically: invariant #6. Idempotency-per-key requirement: invariant #16 (new). Gas-construction decision and the `max_gas_price` option: this doc's Open Questions #11 (Decided), `withdrawal-flow.md` Open Questions #8 (Decided). Task table's shorthand path `POST /sign`: `docs/IMPLEMENTATION_PLAN.md` task 0.3 — not itself a design doc, cited for continuity only. |
 | `POST /v1/sign/user-address` | **Decided: approved as proposed** (Open Questions #5, resolved) | `{"user_id","to_address","asset_id","amount","chain_id"}` | `{"signed_raw_tx"}` | Needed for the Sweep step: `deposit-flow.md` invariant #6 ("signed by the user's own derived key... `sweeper` asks for the signature, it never holds or derives the key itself") and its Sweep diagram (`Sweeper->>Wallet: sign(from=user address, to=Hot Wallet, ...)`). This is a **second, distinct signing capability** from the Hot Wallet one above, deliberately: the caller picks *which user key* signs (Sweep's whole job) but **never picks the destination** — `wallet-service` must enforce server-side that the destination is always the Hot Wallet, never trusting the caller's `to_address` for this endpoint. Now a standing invariant: `deposit-flow.md` invariant #7. **No idempotency key on this endpoint** — unchanged by this round of fixes; it stays idempotent-by-construction via `deposit-flow.md` invariants #8/#10 (`sweeper` always re-reads the live balance before signing), not by key, since a retried call naturally signs whatever's actually left rather than a stale amount. **The user address's own EVM nonce for this call is sourced by `wallet-service` via a live `eth_getTransactionCount(address, "pending")` RPC read at signing time — PROPOSED, `deposit-flow.md` invariant #12** — a different, simpler mechanism than the Hot Wallet's DB-allocated counter (invariant #6 above), justified there by the fact a user address never has two concurrent outbound signers the way the Hot Wallet does. |
 
@@ -211,7 +214,17 @@ certs with `CN=withdrawal-service` or `CN=sweeper`; `POST
 allow-list. `wallet-service`'s deposit-address endpoints below are also
 **PROPOSED** (`service-auth-mtls.md` Open Questions #4) to move behind
 the same mTLS listener with `CN=api-gateway` required, for consistency —
-not yet decided, since it touches already-shipped code.
+not yet decided, since it touches already-shipped code. **`GET
+/v1/addresses/{address}` (new, above): PROPOSED mTLS, `CN=chain-watcher`
+only** — unlike the deposit-address endpoints, this one isn't deferred:
+`chain-watcher` cannot resolve `user_id` at all without it (`deposit-
+flow.md`'s Address Resolution), so it needs the CN check from the start,
+same posture as `ledger-service`'s Lock/Settle/Release endpoints did
+when *they* were introduced. This is also the first synchronous call
+`chain-watcher` makes to any other service — `service-auth-mtls.md`'s
+Authorization matrix and its "not in this matrix" note have both been
+updated; `chain-watcher` now needs its own leaf certificate from task
+0.6's tooling.
 
 **Note (post-`identity-auth.md`):** the `{userID}` in
 `POST/GET /v1/users/{userID}/deposit-address` and the `user_id` fields
@@ -267,13 +280,14 @@ mirroring `ledger.md`'s Lock/Settle/Release split one-to-one.
 
 ## 3. Synchronous service-to-service calls
 
-Per `docs/ARCHITECTURE.md`: "nothing talks to another service directly
-except `api-gateway` → `wallet-service`/`withdrawal-service` synchronous
-calls; everything else is event-driven" — the calls below are the
-concrete instances of that carve-out, plus the ones the design docs add
-on top of it (`ledger-service`'s `apply()`, which none of the docs call
-out as an exception to the Kafka-only rule but which is drawn as a
-direct call in every sequence diagram that uses it).
+Per `docs/ARCHITECTURE.md` (now updated to match — see below): nearly
+everything is event-driven, and the calls below are the full list of
+exceptions. Most were already implied by a design doc before this
+table existed (`ledger-service`'s `apply()`/Lock/Settle/Release, drawn
+as direct calls in every sequence diagram that uses them); one is new
+here — `chain-watcher`'s cache-miss fallback to `wallet-service`
+(`deposit-flow.md`'s Address Resolution fix) — the first time
+`chain-watcher` talks synchronously to anything.
 
 **Auth column note:** "mTLS" below means "decided, per
 `withdrawal-flow.md` Open Questions #2." Which CN is authorized for
@@ -288,6 +302,7 @@ repeating the detail on every line.
 | `sweeper` | `wallet-service` | `POST /v1/sign/hot-wallet` `{to_address, asset_id, amount, chain_id, idempotency_key}` → `{signed_raw_tx, nonce}` — for **Gas Top-Up** (Hot Wallet → user address) | mTLS — client cert `CN=sweeper`, also on this endpoint's allow-list | Same Hot Wallet endpoint/constraint as above; only the destination varies. **`idempotency_key` = `gas-topup:{chain_id}:{tx_hash}:{log_index}` — PROPOSED** (`deposit-flow.md` invariant #13), deterministically derived from the triggering deposit's own natural key (namespaced with a `gas-topup:` prefix so it can never collide with that deposit's ledger-side idempotency key). | `deposit-flow.md` Sweep diagram, invariant #13 (new); `withdrawal-flow.md` invariant #16; `service-auth-mtls.md` Authorization matrix |
 | `sweeper` | `wallet-service` | `POST /v1/sign/user-address` — for the **Sweep** itself (user address → Hot Wallet) | mTLS — client cert `CN=sweeper` **only**; `withdrawal-service`'s certificate is explicitly **not** on this endpoint's allow-list (`service-auth-mtls.md` invariant #4) — this is what makes invariant #7's "no caller-chosen key" argument for this endpoint actually enforced, not just a request-shape convention | Signs as the specified user's derived key — this one *does* let the caller pick which key, by design (Sweep's whole job). **Decided (Open Questions #5, resolved): `wallet-service` enforces `to_address == Hot Wallet` server-side, never trusting the caller.** No idempotency key on this call — stays idempotent-by-construction (fresh balance read before signing, `deposit-flow.md` invariants #8/#10), unaffected by this round of fixes. **The user address's nonce for this call is sourced by `wallet-service` via a live `eth_getTransactionCount(address, "pending")` RPC read — PROPOSED** (`deposit-flow.md` invariant #12), not a DB-tracked counter. | `deposit-flow.md` invariants #6, #7, #12 (new); Sweep diagram; `service-auth-mtls.md` invariants #2, #4 |
 | `withdrawal-service` (sweep-monitor loop) | `wallet-service` | `POST /v1/sign/hot-wallet` `{to_address, asset_id, amount, chain_id, idempotency_key}` → `{signed_raw_tx, nonce}` — for **Treasury Sweep** (Hot Wallet → Warm) | mTLS — same `CN=withdrawal-service` certificate as `withdrawal-service`'s other calls to this endpoint (it's the same service/process, not a separate identity) | Same Hot Wallet endpoint; destination is the Warm address instead of an external one. **`idempotency_key` = a fresh UUID minted once per Treasury Sweep Attempt row, reused across retries until that sweep broadcasts — PROPOSED** (`wallet-tiering.md` invariant #6), since a Treasury Sweep has no pre-existing client request to derive a key from the way a withdrawal or a gas top-up does. | `wallet-tiering.md` invariant #6 (new), diagram; `service-auth-mtls.md` Authorization matrix |
+| `chain-watcher` | `wallet-service` | `GET /v1/addresses/{address}` → `{user_id, chain}` or `404` — **cache-miss fallback only**, the common path resolves via `chain-watcher`'s own Redis hash | **PROPOSED** — mTLS, client cert `CN=chain-watcher`, new leaf certificate (`chain-watcher` had none before this — `service-auth-mtls.md`'s Authorization matrix) | Read-only, no idempotency key needed. A `404` means the address genuinely isn't ours (no event emitted); a transport failure is retried, never treated as `404` — `deposit-flow.md`'s rewritten invariant #1, composes with invariant #4's watermark rule | `deposit-flow.md`'s new Address Resolution term and rewritten invariant #1; `service-auth-mtls.md` Authorization matrix (new row) |
 | `withdrawal-service` | `ledger-service` | `POST /v1/ledger/locks` (`lock`) — for the Reservation at `reserved`, `.../settle` at `confirmed`, `.../release` on any pre-Settle failure or Reaper reclaim (`withdrawal-flow.md` invariant #17) | **Decided: REST** (Open Questions #7, resolved). **Auth: PROPOSED** — mTLS, client cert `CN=withdrawal-service` only, same mechanism as `wallet-service`'s endpoints, extended here for consistency (`service-auth-mtls.md` invariant #7) — not yet built, since `ledger-service` doesn't exist yet | Idempotent — see §4 | `ledger.md` Lock/Settle/Release diagram and invariants #1, #6–#10; `withdrawal-flow.md` invariants #1, #3, #17; `service-auth-mtls.md` invariant #7 |
 | `withdrawal-service` | `ledger-service` | `POST /v1/ledger/transactions` (`apply`, `source_type="correction"`) — for a Compensating Entry (the `{idempotency_key}:refund` key), only ever reached from `disputed` → abandoned (post-Settle case, `withdrawal-flow.md` invariant #9) | Same as the row above — **PROPOSED**, `CN=withdrawal-service` only | Idempotent — see §4. Correction integrity (must reference and exactly negate a real prior Entry): `ledger.md` invariant #11 | `ledger.md` `apply()` diagram and invariant #11; `withdrawal-flow.md`'s revised invariant #3 and Compensating Entry definition; `service-auth-mtls.md` invariant #7 |
 | `api-gateway` | `wallet-service` | Proxies `GET/POST /v1/users/{userID}/deposit-address` | **PROPOSED** — mTLS, client cert `CN=api-gateway`, deferred (`service-auth-mtls.md` Open Questions #4): the general "who can be trusted to call this" question is already resolved at the *user-identity* level (the `userID`/`user_id` this call carries is always the one `api-gateway` resolved from the caller's `Authorization: Bearer <api_key>`, `identity-auth.md` invariants #3-#5), but at the *service-identity* level this hop still has no client-cert check today, unlike the `/v1/sign/*` endpoints | Pass-through | `docs/IMPLEMENTATION_PLAN.md` task 2.5; `service-auth-mtls.md` Authorization matrix and Open Questions #4 |
@@ -312,6 +327,7 @@ repeating the detail on every line.
 | `POST /v1/ledger/transactions` (`apply`) | `idempotency_key` (deposit: `(chain_id, tx_hash, log_index)`; correction/refund: `{idempotency_key}:refund`, derived from the original Withdrawal Request's key — **the only `source_type` `withdrawal-service` may post here now**, since Reservation moved to `POST /v1/ledger/locks` above) | `ledger_transactions.idempotency_key` unique, `ON CONFLICT DO NOTHING`, `ledger.md` invariant #3; refund key derivation: `withdrawal-flow.md`, Ubiquitous language > *Compensating Entry*; correction-integrity check (not just idempotency): `ledger.md` invariant #11 |
 | `POST /v1/whitelist` | **Decided:** `UNIQUE(user_id, address)` — re-adding an already-`pending`/`active` entry no-ops rather than erroring or restarting its cooldown (Open Questions #10, resolved) | `whitelist_entries` unique constraint; now also `withdrawal-flow.md` invariant #15 |
 | `DELETE /v1/whitelist/{id}` | Naturally idempotent — deleting a non-existent id is a no-op, not an error | — |
+| `GET /v1/addresses/{address}` | **None needed — read-only.** A repeated call with the same address always returns the same answer (the mapping is immutable once an address is issued, per `wallet-service`'s existing `CreateAddress`), so there's no mutation to guard against replaying | `deposit-flow.md`'s Address Resolution term |
 
 ---
 
@@ -575,3 +591,19 @@ repeating the detail on every line.
     correctness/contract gaps, not judgment calls, so fixed directly
     rather than left open — see `ledger.md` and `withdrawal-flow.md` for
     the invariant-level detail cited throughout.
+14. **New, from Tech Lead review: neither `deposits.detected` nor
+    `deposits.confirmed` carried a `user_id`, and only `wallet-service`
+    knows the address→user mapping.** `ledger-service`'s Account is
+    keyed by `(user_id, asset)`, never by address, so as drafted there
+    was no way for `ledger-service` to know whose Account to credit —
+    the deposit flow could not actually credit anyone. **Fixed:** both
+    §1 payloads above gain a `user_id` field, resolved by `chain-watcher`
+    (`deposit-flow.md`'s new Address Resolution term) via a Redis hash
+    it now maintains plus a new `wallet-service` endpoint,
+    `GET /v1/addresses/{address}` (§2), for the cache-miss path — never
+    a direct cross-service Postgres read, which `deposit-flow.md`'s
+    earlier phrasing had loosely implied. This makes `chain-watcher` a
+    synchronous `wallet-service` caller for the first time (§3, new
+    row) — `service-auth-mtls.md`'s Authorization matrix and its "not in
+    this matrix" note (which previously said `chain-watcher` needs no
+    leaf certificate at all) are both updated to match.
