@@ -17,11 +17,18 @@ import (
 )
 
 // Service names double as certificate CNs (service-auth-mtls.md invariant #6).
-const CNWithdrawalService = "withdrawal-service"
+const (
+	CNWithdrawalService = "withdrawal-service"
+	CNAPIGateway        = "api-gateway"
+)
 
 // ApplyCallers may call POST /v1/ledger/transactions: withdrawal-service only
 // (service-auth-mtls.md invariant #7). Hardcoded on purpose (Open Question #1).
 var ApplyCallers = []string{CNWithdrawalService}
+
+// BalanceReaders may call GET /v1/ledger/balances/{user_id}: api-gateway only
+// (integration-contracts.md §2/§3, service-auth-mtls.md matrix). Read-only.
+var BalanceReaders = []string{CNAPIGateway}
 
 // Require wraps next so only clients whose verified certificate CN is in
 // allowed reach it. Anything else gets an opaque 403 — no hint whether the

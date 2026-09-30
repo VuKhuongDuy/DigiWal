@@ -833,3 +833,41 @@ func TestMigrationDownUp(t *testing.T) {
 		t.Fatalf("up again: %v", err)
 	}
 }
+
+func TestBalanceSheet(t *testing.T) {
+	s, ctx := newStore(t), context.Background()
+	mustApply(t, s, deposit("d1", "alice", "100"))
+	mustLock(t, s, "w1", "alice", "30")
+
+	sheet, err := s.BalanceSheet(ctx, "alice", "")
+	if err != nil || len(sheet) != 2 {
+		t.Fatalf("sheet = %+v %v: want one row per registered asset", sheet, err)
+	}
+	byID := map[string]AssetBalance{}
+	for _, b := range sheet {
+		byID[b.AssetID] = b
+	}
+	if b := byID[eth]; b.Total.String() != "100" || b.Locked.String() != "30" || b.Available.String() != "70" || b.Symbol != "ETH" {
+		t.Fatalf("eth row = %+v", b)
+	}
+	// An asset alice never touched is present and zero — not missing, not an error.
+	if b, ok := byID[tok]; !ok || b.Total.Sign() != 0 || b.Locked.Sign() != 0 || b.Available.Sign() != 0 {
+		t.Fatalf("token row = %+v (present %v)", b, ok)
+	}
+	// A user with no account at all still gets the full sheet, zeros.
+	if sheet, err := s.BalanceSheet(ctx, "nobody", ""); err != nil || len(sheet) != 2 || sheet[0].Total.Sign() != 0 {
+		t.Fatalf("unknown user sheet = %+v %v", sheet, err)
+	}
+	// Filter, and never another user's balance.
+	if sheet, _ := s.BalanceSheet(ctx, "alice", tok); len(sheet) != 1 || sheet[0].AssetID != tok {
+		t.Fatalf("filtered = %+v", sheet)
+	}
+	if sheet, _ := s.BalanceSheet(ctx, "bob", eth); len(sheet) != 1 || sheet[0].Total.Sign() != 0 {
+		t.Fatalf("bob sees %+v", sheet)
+	}
+	// Amounts beyond int64 stay exact.
+	mustApply(t, s, deposit("d2", "carol", "100000000000000000000000"))
+	if sheet, _ := s.BalanceSheet(ctx, "carol", eth); sheet[0].Total.String() != "100000000000000000000000" {
+		t.Fatalf("big = %s", sheet[0].Total)
+	}
+}

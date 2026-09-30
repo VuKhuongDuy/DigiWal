@@ -281,7 +281,9 @@ Questions #3 for the one remaining unresolved failure mode.
     Minimum Withdrawal Amount (invariant #10), before any Reservation.
     An address that's `pending` (still cooling down) or was never
     whitelisted at all is rejected the same way as any other validation
-    failure — `rejected`, no Entry ever posted.
+    failure — `rejected`, no Entry ever posted. (See also invariant
+    #18: the entry's address must additionally not be one of our own
+    deposit addresses.)
 13. **Adding a Whitelist Entry never takes effect immediately.** Created
     `pending`; only usable once Whitelist Cooldown has elapsed. Removing
     a Whitelist Entry takes effect immediately, no cooldown — a cooldown
@@ -360,6 +362,55 @@ Questions #3 for the one remaining unresolved failure mode.
       can't be proven). An operator can then submit a nonce-filler (same
       mechanism as Nonce Gap recovery) to force it dead, after which the
       Reaper's second case above fires and Releases it.
+18. **A Withdrawal Request's `to_address` must not be one of our own
+    deposit addresses.** **Decided (Tech Lead) as to the rule** (option
+    (b), `deposit-flow.md` Open Questions #13); the details below
+    (placement, error, whitelist interaction, fail-closed handling) and
+    the `withdrawal-service` authz grant are **PROPOSED** — Open
+    Questions #9. Why: `chain-watcher` never treats a Hot Wallet
+    Outflow as a deposit (`deposit-flow.md` invariant #17), so a
+    withdrawal into a deposit address would debit the requester, credit
+    nobody, trigger no Sweep, and strand the funds. Rules:
+    - **Check:** `withdrawal-service` calls `wallet-service`'s `GET
+      /v1/addresses/{address}` (mTLS, `CN=withdrawal-service`).
+      `200` = one of ours -> reject. `404` = not ours -> continue. **Any
+      other outcome (timeout, connection error, 5xx, 403) fails closed:**
+      the request does not proceed to Reservation and is never treated
+      as "not ours" — the same contract as `chain-watcher`'s
+      `deposit-flow.md` invariant #1, and for the same reason (a wrong
+      "no" here loses money silently; a wrong "retry" only costs time).
+    - **Where it runs:** last of the validation checks — after
+      well-formed address, asset registered, Minimum Withdrawal Amount
+      (#10), active Whitelist Entry (#12) and Screening List (#14),
+      before the ledger Reservation. Reason: it is the only check with a
+      network dependency, so it only runs for requests that would
+      otherwise pass, and it still precedes any Reservation or Hot
+      Wallet nonce claim (same off-ramp guarantee as #10).
+    - **What the client sees:** the request goes to `rejected` (terminal,
+      no Lock ever created) and `POST /v1/withdrawals` returns `422`
+      with a reason code, `destination_is_deposit_address` (same
+      family as the existing `422` insufficient-funds response). While
+      the dependency is unavailable, the response is `503` (retryable),
+      *not* `rejected`: there is no verdict yet, and rejecting would be
+      terminal for an idempotency key the client may legitimately retry.
+    - **Whitelist interaction — enforced at both points, request time
+      authoritative.** Whitelist Entry creation (`POST /v1/whitelist`)
+      makes the same call and refuses such an address up front, so a user
+      does not wait out the 24h Whitelist Cooldown for an entry that can
+      never be used; the same fail-closed rule applies (`503`, not
+      "create it anyway"). This creation-time check is UX only — the
+      request-time check is the one that counts, because entries that
+      predate this rule, or that slip past a creation-time failure, must
+      still be caught.
+    - **No stale negative answer, ever.** `withdrawal-service` makes the
+      live call on every check and keeps no negative cache (unlike
+      `chain-watcher`'s short-TTL negative cache, which only delays a
+      deposit and is safe there). TOCTOU: a deposit address is issued
+      before anyone can send to it, and derived addresses are not
+      guessable, so an address that is `404` today cannot realistically
+      become `200` between validation and broadcast; an address that is
+      `200` never stops being ours. The only real hazard is therefore
+      a cached "no", which this rule forbids.
 
 ## Diagram
 
@@ -379,7 +430,7 @@ sequenceDiagram
         WD->>WD: read back existing row
         WD-->>Gateway: existing request's current status
     else new row created
-        WD->>WD: validate (well-formed address, asset registered,<br/>amount >= asset.min_withdrawal_amount,<br/>to_address is an active Whitelist Entry,<br/>to_address not on Screening List)
+        WD->>WD: validate (well-formed address, asset registered,<br/>amount >= asset.min_withdrawal_amount,<br/>to_address is an active Whitelist Entry,<br/>to_address not on Screening List,<br/>to_address not one of our deposit addresses — invariant #18)
         WD->>Ledger: lock(idempotency_key, user_id, asset_id, amount)<br/>Reservation — reserves capacity only, no Entry posted (ledger.md)
         alt insufficient available funds
             Ledger-->>WD: error
@@ -438,7 +489,7 @@ sequenceDiagram
     end
 ```
 
-Whitelist Entry lifecycle (invariants #12–13, #15):
+Whitelist Entry lifecycle (invariants #12–13, #15; creation also refuses one of our own deposit addresses, #18):
 
 ```mermaid
 sequenceDiagram
@@ -643,3 +694,30 @@ sequenceDiagram
    dictated price) — recommending yes, but flagging it as a separate
    yes/no since it could reasonably be deferred to the observability
    phase instead.
+9. **New (Tech Lead resolved `deposit-flow.md` Open Questions #13 as
+   option (b); invariant #18 is the design).** The rule is decided; these
+   details are **PROPOSED** for confirmation:
+   (a) **New authz grant:** `CN=withdrawal-service` on `wallet-service`'s
+   `GET /v1/addresses/{address}` (today `chain-watcher` only). Note the
+   endpoint returns `user_id`, which `withdrawal-service` does not need;
+   a compromised `withdrawal-service` could use it to map addresses to
+   users. Alternative for least privilege: a separate existence-only
+   endpoint (e.g. `HEAD /v1/addresses/{address}`, `204`/`404`, own
+   allow-list). I kept the existing endpoint to avoid a second one for
+   a testnet system — your call.
+   (b) **Where a transient failure leaves the request:** invariant #18
+   returns `503` and does not mark the request `rejected`, leaving the
+   row in `requested`. But invariant #11 says a duplicate `POST` reads
+   back the existing row without re-validating, so as written a request
+   stuck in `requested` would never be retried and the Reaper (#17)
+   covers only `reserved`/`signed`/`broadcast`. Proposal: a duplicate
+   `POST` for a row still in `requested` re-runs validation (side-effect
+   free, so safe), refining #11. Needs a decision.
+   (c) **Error disclosure:** the distinct `destination_is_deposit_address`
+   reason tells a user that an address they typed belongs to this
+   system. Low sensitivity (validation only reaches it for addresses
+   the user already whitelisted, and creation-time refusal lets them
+   probe the same way); flagging in case you prefer a generic
+   "destination not allowed".
+   (d) **Not covered:** the Hot Wallet's own address and the Warm Wallet
+   address as withdrawal destinations are not addressed here.

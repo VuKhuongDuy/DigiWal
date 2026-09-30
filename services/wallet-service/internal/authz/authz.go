@@ -31,6 +31,10 @@ var (
 	// UserAddressSigners may call POST /v1/sign/user-address — sweeper only
 	// (invariant #4): withdrawal-service's cert can never pick a user key.
 	UserAddressSigners = []string{CNSweeper}
+	// HotAddressReaders may call GET /v1/wallet/hot-address: the services that need the Hot
+	// Wallet's own address (deposit-flow.md, Hot Wallet Address Discovery). chain-watcher reads it
+	// only to skip Hot Wallet Outflow (invariant #17); it still cannot reach either /v1/sign/*.
+	HotAddressReaders = []string{CNWithdrawalService, CNSweeper, CNChainWatcher}
 	// AddressLookupCallers may call GET /v1/addresses/{address}: chain-watcher only, and
 	// from day one (service-auth-mtls.md matrix) — it cannot resolve a deposit's user_id without it.
 	AddressLookupCallers = []string{CNChainWatcher}

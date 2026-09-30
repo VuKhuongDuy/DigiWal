@@ -18,7 +18,7 @@ gen-key:
 # an existing CA is kept, missing leaf certs are issued (delete infra/pki/out/<svc> to rotate). See docs/design/service-auth-mtls.md.
 certs:
 	@test -f "$${CA_DIR:-$$HOME/.digiwal-ca}/ca-key.pem" || ../../infra/pki/gen-ca.sh
-	@for svc in wallet-service ledger-service chain-watcher withdrawal-service sweeper; do test -f ../../infra/pki/out/$$svc/cert.pem || ../../infra/pki/gen-leaf.sh $$svc; done
+	@for svc in wallet-service ledger-service chain-watcher withdrawal-service sweeper api-gateway; do test -f ../../infra/pki/out/$$svc/cert.pem || ../../infra/pki/gen-leaf.sh $$svc; done
 
 up: certs
 	$(COMPOSE) up -d --build postgres redis anvil wallet-service
@@ -38,7 +38,7 @@ up: certs
 #   make init-seed ROLE=hot_wallet
 init-seed:
 	@test -n "$(ROLE)" || (echo "usage: make init-seed ROLE=user_derivation|hot_wallet" && exit 1)
-	$(COMPOSE) run --rm wallet-service /usr/local/bin/service -init-seed $(ROLE)
+	$(COMPOSE) run --rm wallet-service -init-seed $(ROLE)
 	$(COMPOSE) restart wallet-service
 
 init-seeds:

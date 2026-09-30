@@ -26,8 +26,11 @@ balance goes through one operation, `Apply`.
 - **Deposits** enter only through the `deposits.confirmed` consumer (never over REST, so they can't
   skip screening). The event carries the depositor's `user_id` (resolved once by chain-watcher), so the
   ledger has no address->user mapping and no dependency on wallet-service. `Apply` is idempotent on `(chain_id, tx_hash, log_index)`; sum-to-zero per asset.
-- All four endpoints are on the **mTLS** listener (`:8443`), `CN=withdrawal-service` only
-  (`service-auth-mtls.md` invariant #7).
+- `GET /v1/ledger/balances/{user_id}[?asset_id=]`: Total / Locked / Available per registered asset (zeros
+  for untouched ones). `CN=api-gateway` only.
+- The four write endpoints above (transactions, locks, settle, release) are on the **mTLS** listener
+  (`:8443`), `CN=withdrawal-service` only (`service-auth-mtls.md` invariant #7). Balances is on the same
+  listener, with its own allow-list.
 - **Asset Registry**: the one canonical `infra/assets.yaml`, validated strictly at startup, synced
   into Postgres; assets that leave the file are deactivated, never deleted.
 - **Screening List** (`infra/screening.yaml`) and the consumer (runs when `KAFKA_BROKERS` is set): flag (never credit) a sender on

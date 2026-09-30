@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ethereum/go-ethereum/common"
+
 	"digiwal/services/wallet-service/internal/signing"
 	"digiwal/services/wallet-service/internal/storage"
 )
@@ -26,6 +28,10 @@ func (f *fakeHot) Sign(_ context.Context, req signing.Request) (signing.Response
 	f.n++
 	f.req = req
 	return f.resp, f.err
+}
+
+func (f *fakeHot) HotWalletAddress() common.Address {
+	return common.HexToAddress("0x3d0290A916B57AE48a2840E7d3547fA317F976c3")
 }
 
 // withPeer fakes what the TLS stack leaves on a request after a successful
@@ -53,7 +59,7 @@ func call(t *testing.T, h *fakeHot, cn, body string) *httptest.ResponseRecorder 
 
 func TestSignHotWallet_Authorization(t *testing.T) {
 	for cn, want := range map[string]int{
-		"withdrawal-service": 200, "sweeper": 200, "api-gateway": 403, "": 403,
+		"withdrawal-service": 200, "sweeper": 200, "chain-watcher": 403, "api-gateway": 403, "": 403,
 	} {
 		h := &fakeHot{resp: signing.Response{SignedRawTx: "0x01", Nonce: 3}}
 		rec := call(t, h, cn, `{"idempotency_key":"k"}`)
@@ -121,7 +127,7 @@ func callUser(t *testing.T, u *fakeUser, cn string) *httptest.ResponseRecorder {
 
 // service-auth-mtls.md invariant #4: withdrawal-service can never pick a user key.
 func TestSignUserAddress_OnlySweeperMayCall(t *testing.T) {
-	for cn, want := range map[string]int{"sweeper": 200, "withdrawal-service": 403, "api-gateway": 403, "": 403} {
+	for cn, want := range map[string]int{"sweeper": 200, "withdrawal-service": 403, "chain-watcher": 403, "api-gateway": 403, "": 403} {
 		u := &fakeUser{}
 		if got := callUser(t, u, cn).Code; got != want {
 			t.Errorf("CN=%q: %d, want %d", cn, got, want)
@@ -206,5 +212,31 @@ func TestAddressLookup_WireContract(t *testing.T) {
 		if rec := lookup(t, f, "chain-watcher", bad); rec.Code != 400 || f.calls != 0 {
 			t.Errorf("%q: %d (lookups %d), want 400 and 0", bad, rec.Code, f.calls)
 		}
+	}
+}
+
+func TestHotAddress(t *testing.T) {
+	get := func(srv *Server, cn string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest("GET", "/v1/wallet/hot-address", nil)
+		if cn != "" {
+			req = withPeer(req, cn)
+		}
+		rec := httptest.NewRecorder()
+		srv.MTLSRoutes().ServeHTTP(rec, req)
+		return rec
+	}
+	srv := &Server{hotSigner: &fakeHot{}}
+	for cn, want := range map[string]int{"sweeper": 200, "withdrawal-service": 200, "chain-watcher": 200, "api-gateway": 403, "": 403} {
+		if got := get(srv, cn).Code; got != want {
+			t.Errorf("CN=%q: %d, want %d", cn, got, want)
+		}
+	}
+	rec := get(srv, "sweeper")
+	if strings.TrimSpace(rec.Body.String()) != `{"address":"0x3d0290A916B57AE48a2840E7d3547fA317F976c3"}` {
+		t.Fatalf("body = %s", rec.Body)
+	}
+	// Without a hot_wallet seed there is no address to give: 503, never an empty/zero address.
+	if rec := get(&Server{}, "sweeper"); rec.Code != 503 || strings.Contains(rec.Body.String(), "0x") {
+		t.Fatalf("unconfigured = %d %s", rec.Code, rec.Body)
 	}
 }
