@@ -5,6 +5,7 @@ import (
 	"errors"
 	"math/big"
 	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -29,23 +30,7 @@ const (
 	depAddr  = "0x90F79bf6EB2c4f870365E785982E1f101E93b906"
 )
 
-type fixedUsers map[string]string
-
-func (f fixedUsers) UserForAddress(_ context.Context, _ int64, a string) (string, error) {
-	if u, ok := f[a]; ok {
-		return u, nil
-	}
-	return "", ErrUnknownAddress
-}
-
-type brokenUsers struct{ calls atomic.Int32 }
-
-func (b *brokenUsers) UserForAddress(context.Context, int64, string) (string, error) {
-	b.calls.Add(1)
-	return "", errors.New("wallet-service unreachable")
-}
-
-func setup(t *testing.T, users UserResolver) (*ledger.Store, *Processor) {
+func setup(t *testing.T) (*ledger.Store, *Processor) {
 	t.Helper()
 	ctx := context.Background()
 	s, err := ledger.Connect(ctx, testdb.New(t))
@@ -57,13 +42,13 @@ func setup(t *testing.T, users UserResolver) (*ledger.Store, *Processor) {
 		HotFloor: big.NewInt(0), HotCeiling: big.NewInt(0), MinWithdrawalAmount: big.NewInt(1)}}); err != nil {
 		t.Fatal(err)
 	}
-	return s, &Processor{Ledger: s, Screening: screening.New(badActor), Users: users}
+	return s, &Processor{Ledger: s, Screening: screening.New(badActor)}
 }
 
 func deposit(logIndex int64, from, amount string) events.DepositConfirmed {
 	return events.DepositConfirmed{Version: events.Version, ChainID: 31337,
 		TxHash:   "0x" + "ab" + "00000000000000000000000000000000000000000000000000000000000000"[:62],
-		LogIndex: logIndex, AssetID: eth, FromAddress: from, ToAddress: depAddr,
+		LogIndex: logIndex, AssetID: eth, FromAddress: from, ToAddress: depAddr, UserID: "alice",
 		Amount: events.Amount(amount), BlockNumber: 100}
 }
 
@@ -86,7 +71,7 @@ func failedCount(t *testing.T, s *ledger.Store) (n int) {
 }
 
 func TestDepositIsCreditedOnceEvenWhenRedelivered(t *testing.T) {
-	s, p := setup(t, fixedUsers{depAddr: "alice"})
+	s, p := setup(t)
 	ctx := context.Background()
 	m := msg(t, deposit(-1, sender, "1000"))
 	for i := 0; i < 3; i++ { // Kafka is at-least-once
@@ -103,7 +88,7 @@ func TestDepositIsCreditedOnceEvenWhenRedelivered(t *testing.T) {
 }
 
 func TestErc20StyleLogsInOneTxAreSeparateDeposits(t *testing.T) {
-	s, p := setup(t, fixedUsers{depAddr: "alice"})
+	s, p := setup(t)
 	ctx := context.Background()
 	for _, li := range []int64{0, 1} {
 		if err := p.Handle(ctx, msg(t, deposit(li, sender, "10"))); err != nil {
@@ -117,7 +102,7 @@ func TestErc20StyleLogsInOneTxAreSeparateDeposits(t *testing.T) {
 
 // compliance-screening.md invariant #1
 func TestDepositFromScreeningListIsFlaggedNotCredited(t *testing.T) {
-	s, p := setup(t, fixedUsers{depAddr: "alice"})
+	s, p := setup(t)
 	ctx := context.Background()
 	m := msg(t, deposit(-1, badActor, "5000"))
 	for i := 0; i < 2; i++ { // redelivery must not duplicate the flag (invariant #4)
@@ -146,20 +131,18 @@ func TestDepositFromScreeningListIsFlaggedNotCredited(t *testing.T) {
 }
 
 func TestUnprocessableEventsAreParkedAndAcknowledged(t *testing.T) {
-	s, p := setup(t, fixedUsers{depAddr: "alice"})
+	s, p := setup(t)
 	ctx := context.Background()
 
 	unknownAsset := deposit(-1, sender, "10")
 	unknownAsset.AssetID = "99999999-9999-9999-9999-999999999999"
-	unknownAddr := deposit(0, sender, "10")
-	unknownAddr.ToAddress = "0x15d34AAf54267DB7D7c367839AAf71A00a2C6A65"
 
 	cases := map[string]Message{
 		"garbage":       {Topic: events.TopicDepositsConfirmed, Key: []byte("k"), Value: []byte(`{not json`)},
 		"wrong version": {Topic: events.TopicDepositsConfirmed, Value: []byte(`{"version":2}`)},
 		"zero amount":   msg(t, deposit(1, sender, "0")),
 		"unknown asset": msg(t, unknownAsset),
-		"unknown addr":  msg(t, unknownAddr),
+		"no user_id":    Message{Topic: events.TopicDepositsConfirmed, Value: msgNoUser(t)},
 	}
 	for name, m := range cases {
 		if err := p.Handle(ctx, m); err != nil {
@@ -175,19 +158,39 @@ func TestUnprocessableEventsAreParkedAndAcknowledged(t *testing.T) {
 }
 
 func TestTransientFailuresAreRetriedNotParked(t *testing.T) {
-	s, p := setup(t, &brokenUsers{})
+	s, p := setup(t)
+	p.Ledger = &flakyLedger{Ledger: s, failures: 1 << 30} // the database is "down"
 	if err := p.Handle(context.Background(), msg(t, deposit(-1, sender, "10"))); err == nil {
-		t.Fatal("a resolver outage must surface as an error so the message is retried")
+		t.Fatal("a database outage must surface as an error so the message is retried")
 	}
 	if got := failedCount(t, s); got != 0 {
 		t.Fatalf("a transient failure was parked (%d)", got)
 	}
+}
 
-	// no resolver wired at all (the open design gap): also retried, never silently dropped
-	_, none := setup(t, nil)
-	if err := none.Handle(context.Background(), msg(t, deposit(-1, sender, "10"))); err == nil {
-		t.Fatal("missing UserResolver must not acknowledge the deposit")
+func TestCreditsTheUserNamedOnTheEvent(t *testing.T) {
+	s, p := setup(t)
+	ctx := context.Background()
+	e := deposit(-1, sender, "700")
+	e.UserID = "carol"
+	if err := p.Handle(ctx, msg(t, e)); err != nil {
+		t.Fatal(err)
 	}
+	if b, _ := s.Balance(ctx, "carol", eth); b.String() != "700" {
+		t.Fatalf("carol has %s, want 700", b)
+	}
+	if b, _ := s.Balance(ctx, "alice", eth); b.Sign() != 0 {
+		t.Fatalf("alice has %s: the deposit must go to the event's user_id and nobody else", b)
+	}
+}
+
+func msgNoUser(t *testing.T) []byte {
+	t.Helper()
+	b, err := events.Encode(deposit(5, sender, "10"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return []byte(strings.Replace(string(b), `"user_id":"alice",`, ``, 1))
 }
 
 // ---- Run: at-least-once commit discipline ---------------------------------
@@ -220,7 +223,7 @@ func (f *fakeReader) Commit(_ context.Context, m Message) error {
 }
 
 func TestRunCommitsOnlyAfterSuccessAndRetriesTransientFailures(t *testing.T) {
-	s, p := setup(t, fixedUsers{depAddr: "alice"})
+	s, p := setup(t)
 	// fail the first two attempts, then let the database through
 	flaky := &flakyLedger{Ledger: s, failures: 2}
 	p.Ledger = flaky
@@ -255,7 +258,8 @@ func TestRunCommitsOnlyAfterSuccessAndRetriesTransientFailures(t *testing.T) {
 }
 
 func TestRunDoesNotCommitARecordThatNeverSucceeds(t *testing.T) {
-	_, p := setup(t, &brokenUsers{})
+	s, p := setup(t)
+	p.Ledger = &flakyLedger{Ledger: s, failures: 1 << 30}
 	r := &fakeReader{queue: []Message{msg(t, deposit(-1, sender, "1"))}}
 	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
 	defer cancel()

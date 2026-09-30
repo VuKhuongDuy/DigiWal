@@ -14,20 +14,6 @@ import (
 	"digiwal/services/ledger-service/internal/ledger"
 )
 
-// ErrUnknownAddress: the deposit address belongs to no user we know of.
-var ErrUnknownAddress = errors.New("unknown deposit address")
-
-// UserResolver maps a deposit's to_address to the user who owns it.
-//
-// OPEN DESIGN GAP: nothing in docs/design says how ledger-service learns this.
-// deposits.confirmed carries to_address but no user_id, and only wallet-service
-// knows address -> user. Until the Solution Architect decides (add user_id to the
-// event, have ledger call wallet-service, or replicate the mapping) there is no real
-// implementation; main wires none and the consumer stays off.
-type UserResolver interface {
-	UserForAddress(ctx context.Context, chainID int64, address string) (string, error)
-}
-
 // Ledger is the slice of ledger.Store the processor uses.
 type Ledger interface {
 	Apply(ctx context.Context, t ledger.Transaction) (ledger.Status, error)
@@ -56,12 +42,13 @@ type Reader interface {
 type Processor struct {
 	Ledger    Ledger
 	Screening Screener
-	Users     UserResolver
 }
 
-// Handle processes one deposits.confirmed record. A nil return means "done, safe to
-// commit the offset"; a non-nil return is transient (database down, resolver
-// unreachable) and the message must be retried, not committed.
+// Handle processes one deposits.confirmed record. The event carries the depositor's user_id
+// (resolved once by chain-watcher, deposit-flow.md "Address Resolution"), so the ledger never
+// maps an address to a user itself and has no dependency on wallet-service. A nil return means "done, safe to
+// commit the offset"; a non-nil return is transient (database down) and the message must be
+// retried, not committed.
 //
 // Events that can never succeed — malformed, unregistered asset, unknown address,
 // zero amount — are stored in failed_events and then acknowledged, because retrying
@@ -92,23 +79,12 @@ func (p *Processor) Handle(ctx context.Context, m Message) error {
 		return nil
 	}
 
-	if p.Users == nil {
-		return errors.New("no UserResolver configured: cannot map deposit address to a user")
-	}
-	userID, err := p.Users.UserForAddress(ctx, ev.ChainID, ev.ToAddress)
-	if errors.Is(err, ErrUnknownAddress) {
-		return p.fail(ctx, m, ev.Key(), fmt.Sprintf("no user owns deposit address %s", ev.ToAddress))
-	}
-	if err != nil {
-		return fmt.Errorf("resolving user for %s: %w", ev.ToAddress, err)
-	}
-
 	tx := ledger.Transaction{
 		IdempotencyKey: ev.Key(), // (chain_id, tx_hash, log_index), ledger.md invariant #3
 		Source:         ledger.SourceDeposit,
 		Deposit:        &ledger.DepositRef{ChainID: ev.ChainID, TxHash: ev.TxHash, LogIndex: ev.LogIndex},
 		Entries: []ledger.Entry{
-			{Ref: ledger.RefUser, UserID: userID, AssetID: ev.AssetID, Amount: amount},
+			{Ref: ledger.RefUser, UserID: ev.UserID, AssetID: ev.AssetID, Amount: amount},
 			{Ref: ledger.RefChain, AssetID: ev.AssetID, Amount: new(big.Int).Neg(amount)},
 		},
 	}

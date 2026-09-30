@@ -16,7 +16,7 @@ services:
       TLS_CERT_FILE: /certs/cert.pem
       TLS_KEY_FILE: /certs/key.pem
       TLS_CA_FILE: /certs/ca-cert.pem
-      # KAFKA_BROKERS: kafka:9092   # consumer stays off until the UserResolver gap is decided
+      KAFKA_BROKERS: kafka:9092      # deposits.confirmed consumer; omit to run without a broker
     volumes:
       - ../../infra/assets.yaml:/config/assets.yaml:ro
       - ../../infra/screening.yaml:/config/screening.yaml:ro
@@ -25,3 +25,5 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      kafka:
+        condition: service_started

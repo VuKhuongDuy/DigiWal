@@ -67,22 +67,20 @@ func main() {
 		log.Println("WARNING: TLS_CERT_FILE not set — mTLS listener disabled, POST /v1/ledger/transactions unavailable (run `make certs`)")
 	}
 
-	// The deposits.confirmed consumer needs a UserResolver (deposit address -> user),
-	// which no design doc specifies yet — see consumer.UserResolver. Until it exists the
-	// consumer stays off rather than acknowledging deposits it cannot credit.
-	var users consumer.UserResolver
-	if brokers := os.Getenv("KAFKA_BROKERS"); brokers != "" && users != nil {
+	// The deposits.confirmed consumer. It stays off without KAFKA_BROKERS so the service
+	// (and the REST surface) still runs in an environment with no broker.
+	if brokers := os.Getenv("KAFKA_BROKERS"); brokers != "" {
 		reader := consumer.NewKafkaReader(strings.Split(brokers, ","), envOr("KAFKA_GROUP_ID", "ledger-service"), events.TopicDepositsConfirmed)
 		defer reader.Close()
-		proc := &consumer.Processor{Ledger: store, Screening: screen, Users: users}
+		proc := &consumer.Processor{Ledger: store, Screening: screen}
 		go func() {
 			if err := consumer.Run(ctx, reader, proc); err != nil {
 				log.Fatalf("deposit consumer: %v", err)
 			}
 		}()
-		log.Println("deposit consumer running")
+		log.Printf("deposit consumer running on %s (group %s)", events.TopicDepositsConfirmed, envOr("KAFKA_GROUP_ID", "ledger-service"))
 	} else {
-		log.Println("deposit consumer disabled (no UserResolver yet: deposit-address -> user mapping is an open design question)")
+		log.Println("KAFKA_BROKERS not set: deposit consumer disabled")
 	}
 
 	port := envOr("PORT", "8080")

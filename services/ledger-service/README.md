@@ -24,12 +24,13 @@ balance goes through one operation, `Apply`.
   whatever the caller sends for them is ignored. Every leg must be reversed, and an entry can be
   reversed once. A correction's debit is checked against Available, so it can't undercut an active Lock.
 - **Deposits** enter only through the `deposits.confirmed` consumer (never over REST, so they can't
-  skip screening). `Apply` is idempotent on `(chain_id, tx_hash, log_index)`; sum-to-zero per asset.
+  skip screening). The event carries the depositor's `user_id` (resolved once by chain-watcher), so the
+  ledger has no address->user mapping and no dependency on wallet-service. `Apply` is idempotent on `(chain_id, tx_hash, log_index)`; sum-to-zero per asset.
 - All four endpoints are on the **mTLS** listener (`:8443`), `CN=withdrawal-service` only
   (`service-auth-mtls.md` invariant #7).
 - **Asset Registry**: the one canonical `infra/assets.yaml`, validated strictly at startup, synced
   into Postgres; assets that leave the file are deactivated, never deleted.
-- **Screening List** (`infra/screening.yaml`) and the consumer: flag (never credit) a sender on
+- **Screening List** (`infra/screening.yaml`) and the consumer (runs when `KAFKA_BROKERS` is set): flag (never credit) a sender on
   the list, otherwise credit. Events that can never succeed go to `failed_events` and are
   acknowledged; transient failures are retried, and the offset is committed only after success.
 
@@ -43,9 +44,6 @@ make test    # integration tests need Postgres: testcontainers (Docker) or TEST_
 
 ## Open gaps
 
-- **Deposit consumer is off: there is no `UserResolver`.** `deposits.confirmed` carries
-  `to_address` but no `user_id`, and no design doc says how the ledger learns which user owns an
-  address (only wallet-service knows). See `consumer.UserResolver`.
 - **A correction names `corrects_entry_id`, but `withdrawal-service` can't know entry ids.** Settle
   returns a `ledger_transaction_id`, not entry ids. The reference should probably be the
   transaction or the lock key.

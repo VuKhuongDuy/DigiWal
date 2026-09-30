@@ -126,6 +126,20 @@ func (s *Store) AddressFor(ctx context.Context, userID, chain string) (string, e
 	return addr, nil
 }
 
+// UserForAddress is the reverse of AddressFor: which user, and on which chain, owns an
+// address. ErrNotFound if it is not one of ours. The lookup is by the exact stored
+// spelling (EIP-55 checksum, as CreateAddress stores it); callers normalize first.
+func (s *Store) UserForAddress(ctx context.Context, address string) (userID, chain string, err error) {
+	err = s.pool.QueryRow(ctx, `SELECT user_id, chain FROM wallet_addresses WHERE address = $1`, address).Scan(&userID, &chain)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", "", ErrNotFound
+	}
+	if err != nil {
+		return "", "", fmt.Errorf("reading address owner: %w", err)
+	}
+	return userID, chain, nil
+}
+
 // DerivationIndexFor returns the BIP44 index of the user's address, or ErrNotFound.
 func (s *Store) DerivationIndexFor(ctx context.Context, userID, chain string) (uint32, error) {
 	var idx uint32

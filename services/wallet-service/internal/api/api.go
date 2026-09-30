@@ -11,6 +11,8 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/ethereum/go-ethereum/common"
+
 	"digiwal/services/wallet-service/internal/authz"
 	"digiwal/services/wallet-service/internal/signing"
 	"digiwal/services/wallet-service/internal/storage"
@@ -28,6 +30,11 @@ type HotSigner interface {
 	Sign(ctx context.Context, req signing.Request) (signing.Response, error)
 }
 
+// AddressLookup resolves an address to its owner (GET /v1/addresses/{address}).
+type AddressLookup interface {
+	UserForAddress(ctx context.Context, address string) (userID, chain string, err error)
+}
+
 // UserSigner signs Sweeps (POST /v1/sign/user-address).
 type UserSigner interface {
 	Sign(ctx context.Context, req signing.UserRequest) (signing.UserResponse, error)
@@ -39,10 +46,11 @@ type Server struct {
 	signer    Signer     // nil until the user_derivation seed is initialized and loaded
 	hotSigner HotSigner  // nil until the hot_wallet seed, RPC and assets are configured
 	userSign  UserSigner // nil until both seeds, RPC and assets are configured
+	addresses AddressLookup
 }
 
 func NewServer(store *storage.Store, cache *storage.Cache, signer Signer, hotSigner HotSigner, userSign UserSigner) *Server {
-	return &Server{store: store, cache: cache, signer: signer, hotSigner: hotSigner, userSign: userSign}
+	return &Server{store: store, cache: cache, signer: signer, hotSigner: hotSigner, userSign: userSign, addresses: store}
 }
 
 // Routes is the plain-HTTP listener: /healthz (exempt from client certs,
@@ -64,8 +72,31 @@ func (s *Server) Routes() http.Handler {
 func (s *Server) MTLSRoutes() http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("POST /v1/sign/hot-wallet", authz.Require(authz.HotWalletSigners, http.HandlerFunc(s.handleSignHotWallet)))
+	mux.Handle("GET /v1/addresses/{address}", authz.Require(authz.AddressLookupCallers, http.HandlerFunc(s.handleAddressOwner)))
 	mux.Handle("POST /v1/sign/user-address", authz.Require(authz.UserAddressSigners, http.HandlerFunc(s.handleSignUserAddress)))
 	return mux
+}
+
+// handleAddressOwner is chain-watcher's cache-miss fallback (deposit-flow.md, Address
+// Resolution): who owns this deposit address? Read-only. 404 means it is genuinely not one
+// of ours; the caller must treat any other failure as "unknown, retry", never as "not ours".
+func (s *Server) handleAddressOwner(w http.ResponseWriter, r *http.Request) {
+	raw := r.PathValue("address")
+	if !common.IsHexAddress(raw) {
+		writeErr(w, http.StatusBadRequest, "address must be a 20-byte hex address")
+		return
+	}
+	// Addresses are stored EIP-55 checksummed; accept any casing.
+	userID, chain, err := s.addresses.UserForAddress(r.Context(), common.HexToAddress(raw).Hex())
+	switch {
+	case err == nil:
+		writeJSON(w, http.StatusOK, map[string]string{"user_id": userID, "chain": chain})
+	case errors.Is(err, storage.ErrNotFound):
+		writeErr(w, http.StatusNotFound, "not a watched address")
+	default:
+		log.Printf("looking up owner of %s: %v", raw, err)
+		writeErr(w, http.StatusInternalServerError, "internal error")
+	}
 }
 
 // handleSignUserAddress signs a Sweep: the caller picks whose key signs, but the
@@ -180,7 +211,7 @@ func (s *Server) handleCreateOrGetDepositAddress(w http.ResponseWriter, r *http.
 		writeErr(w, http.StatusInternalServerError, "internal error")
 		return
 	}
-	if err := s.cache.AddDepositAddress(ctx, addr); err != nil {
+	if err := s.cache.AddDepositAddress(ctx, addr, userID); err != nil {
 		// Non-fatal: Postgres already has it, chain-watcher can fall
 		// back to a Postgres lookup on a cache miss. Just log it.
 		log.Printf("caching address %s: %v (non-fatal)", addr, err)
