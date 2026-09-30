@@ -70,4 +70,6 @@ make test    # Postgres via testcontainers/TEST_POSTGRES_DSN; Redis via TEST_RED
 - Each service's `docker-compose.yml` is its own Compose project, so `wallet-service` is not on this one's network by that name; override `WALLET_SERVICE_URL` (e.g. `https://host.docker.internal:8443`) until the e2e task (2.6) provides one shared compose.
 - Not run against Docker/Kafka/Sepolia/Anvil here (no Docker in the sandbox). What was run: a real
   EVM (go-ethereum's simulated backend: native transfer, a real ERC-20 `Transfer` log, sender
-  recovery, receipts), a scriptable chain for reorgs and failures, and real Postgres and Redis.
+  recovery, receipts), a scriptable chain for reorgs and failures, and real Postgres and Redis. The resolver was also run once (throwaway
+  check, not committed) against the real `wallet-service` binary over mTLS: Redis hit, endpoint fallback, unknown address `404` = not ours,
+  `CN=sweeper` refused with `403` (surfaced as an error, not "not ours").

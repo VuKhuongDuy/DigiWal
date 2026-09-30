@@ -51,4 +51,6 @@ event for that address sweeps its whole balance.
 - The Kafka consumer loop is the third copy of the same code (`ledger-service`, `history-service`); a shared package is deferred.
 - Not run under Docker/Kafka/Anvil (none in the sandbox). Run: the sweep logic against a fake chain and wallet-service
   (mutation-checked), the chain adapter against go-ethereum's in-process EVM (real transfers, receipts, mempool nonces, `balanceOf`),
-  and the wallet client against an HTTP stub. **Not run: against the real `wallet-service` binary.**
+  and the wallet client against an HTTP stub. The wallet client was also run once (throwaway check, not committed) against the real
+  `wallet-service` binary over mTLS with a mock RPC: top-up signed by the Hot Wallet and identical on replay, token and native-`max` sweeps signed by
+  the user's derived key, wrong destination `403`, unknown user `404`, `CN=chain-watcher` refused.
