@@ -200,7 +200,7 @@ func TestRunCommitsOnlyAfterSuccessAndRetriesTransientFailures(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	finished := make(chan error, 1)
-	go func() { finished <- Run(ctx, rd, &Processor{Store: st}) }()
+	go func() { finished <- Run(ctx, rd, &Processor{Store: st}, 10) }()
 
 	time.Sleep(700 * time.Millisecond) // long enough for at least one failed attempt
 	rd.mu.Lock()
@@ -234,5 +234,54 @@ func TestRunCommitsOnlyAfterSuccessAndRetriesTransientFailures(t *testing.T) {
 	cancel()
 	if err := <-finished; err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestRunGivesUpAfterMaxAttemptsThenSkipsAndKeepsGoing(t *testing.T) {
+	st := &fakeStore{fail: errors.New("mongo down")}
+	first := encode(t, events.DepositConfirmed{Version: 1, ChainID: 1, TxHash: hash1, LogIndex: 0, AssetID: asset,
+		FromAddress: addrB, ToAddress: addrA, UserID: "alice", Amount: "1", BlockNumber: 1})
+	second := encode(t, events.DepositConfirmed{Version: 1, ChainID: 1, TxHash: hash1, LogIndex: 1, AssetID: asset,
+		FromAddress: addrB, ToAddress: addrA, UserID: "alice", Amount: "2", BlockNumber: 1})
+	rd := &scriptedReader{msgs: []Message{first, second}, done: make(chan struct{})}
+	ctx, cancel := context.WithCancel(context.Background())
+	fin := make(chan error, 1)
+	go func() { fin <- Run(ctx, rd, &Processor{Store: st}, 2) }()
+
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		rd.mu.Lock()
+		n := len(rd.committed)
+		rd.mu.Unlock()
+		if n >= 1 || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	rd.mu.Lock()
+	committed := len(rd.committed)
+	rd.mu.Unlock()
+	if committed < 1 {
+		t.Fatal("never gave up on a record that kept failing: the partition is wedged")
+	}
+	// The store recovers: the next record is processed normally.
+	st.mu.Lock()
+	st.fail = nil
+	st.mu.Unlock()
+	for {
+		rd.mu.Lock()
+		n := len(rd.committed)
+		rd.mu.Unlock()
+		if n >= 2 || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	cancel()
+	<-fin
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if len(st.calls) != 1 || st.calls[0].Entry.Amount != "2" {
+		t.Fatalf("calls = %+v: want only the second record applied", st.calls)
 	}
 }

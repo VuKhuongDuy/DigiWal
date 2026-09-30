@@ -31,7 +31,7 @@ event for that address sweeps its whole balance.
 
 | Env | Default | |
 |---|---|---|
-| `KAFKA_BROKERS`, `RPC_URL`, `ASSETS_FILE`, `SCREENING_FILE`, `WALLET_SERVICE_URL`, `HOT_WALLET_ADDRESS`, `TLS_CERT_FILE`, `TLS_KEY_FILE`, `TLS_CA_FILE` | required | |
+| `KAFKA_BROKERS`, `RPC_URL`, `ASSETS_FILE`, `SCREENING_FILE`, `WALLET_SERVICE_URL`, `TLS_CERT_FILE`, `TLS_KEY_FILE`, `TLS_CA_FILE` | required | |
 | `GAS_TOPUP_WEI` | `1000000000000000` | 0.001 ETH (decided, `deposit-flow.md`) |
 | `SWEEP_GAS_RESERVE_WEI` | `650000000000000` | below this an ERC-20 address gets a top-up: 65,000 gas x 10 gwei, the design's own arithmetic |
 | `INCLUSION_TIMEOUT` / `POLL_INTERVAL` | `5m` / `3s` | wait for a broadcast tx to be mined |
@@ -39,13 +39,11 @@ event for that address sweeps its whole balance.
 
 ## Please confirm / known gaps
 
-- **Two PROPOSED design points are implemented as proposed** and need the Tech Lead's decision (`deposit-flow.md`
-  Open Questions #7, #8): the user-address nonce is a live `eth_getTransactionCount(pending)` read (built that way in
-  `wallet-service`), and the Gas Top-Up key is `gas-topup:{chain_id}:{tx_hash}:{log_index}` (one constant, `sweep.TopUpKey`).
-- **The Hot Wallet address is an env var.** No endpoint or doc says how sweeper learns it. `wallet-service` enforces the
-  destination anyway, so a wrong value is a `403`, never a mis-sent Sweep.
+- The Tech Lead approved the live nonce read and the `gas-topup:...` key (`deposit-flow.md` Open Questions #7, #8), and the
+  Hot Wallet address is fetched from `wallet-service` (`GET /v1/wallet/hot-address`, `CN=sweeper`) once at startup, retried for
+  two minutes; there is no address in config to drift (invariant #15).
 - **The "wait for pending" check and waiting for inclusion are dev additions** (not in the design), for the reasons above.
-- **No dead-letter.** A given-up record only leaves an `ALERT` log line (sweeper has no store); same open gap as elsewhere.
+- **No dead-letter topic, by decision** (`deposit-flow.md` invariant #16, `integration-contracts.md` §5): a given-up record leaves an `ALERT` log line and can be re-driven by hand.
 - Processing is serial: each event waits for its transactions to be mined (seconds on Anvil, ~12 s per block on Sepolia).
 - A native sweep leaves a little dust: wallet-service reserves the fee *cap*, not the expected fee.
 - The Kafka consumer loop is the third copy of the same code (`ledger-service`, `history-service`); a shared package is deferred.

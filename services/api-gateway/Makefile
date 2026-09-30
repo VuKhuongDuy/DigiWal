@@ -1,10 +1,15 @@
 # docker-compose.yml pulls in ../../infra/docker-compose.yml via `include:` — don't also pass it with -f.
 COMPOSE = docker compose
 
-.PHONY: up down logs test
+.PHONY: certs up down logs test
+
+# Issues api-gateway's leaf cert (and the CA, once). It calls ledger-service as CN=api-gateway.
+certs:
+	@test -f "$${CA_DIR:-$$HOME/.digiwal-ca}/ca-key.pem" || ../../infra/pki/gen-ca.sh
+	@test -f ../../infra/pki/out/api-gateway/cert.pem || ../../infra/pki/gen-leaf.sh api-gateway
 
 # The service uses its own database on the shared Postgres.
-up:
+up: certs
 	$(COMPOSE) up -d postgres
 	@until $(COMPOSE) exec -T postgres pg_isready -U custody >/dev/null 2>&1; do sleep 1; done
 	@$(COMPOSE) exec -T postgres psql -U custody -tc "SELECT 1 FROM pg_database WHERE datname='api_gateway'" | grep -q 1 || $(COMPOSE) exec -T postgres psql -U custody -c "CREATE DATABASE api_gateway"

@@ -28,6 +28,8 @@ type Signer interface {
 // HotSigner signs Hot Wallet transactions (POST /v1/sign/hot-wallet).
 type HotSigner interface {
 	Sign(ctx context.Context, req signing.Request) (signing.Response, error)
+	// HotWalletAddress is the address derived from the hot_wallet seed.
+	HotWalletAddress() common.Address
 }
 
 // AddressLookup resolves an address to its owner (GET /v1/addresses/{address}).
@@ -72,9 +74,20 @@ func (s *Server) Routes() http.Handler {
 func (s *Server) MTLSRoutes() http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("POST /v1/sign/hot-wallet", authz.Require(authz.HotWalletSigners, http.HandlerFunc(s.handleSignHotWallet)))
+	mux.Handle("GET /v1/wallet/hot-address", authz.Require(authz.HotAddressReaders, http.HandlerFunc(s.handleHotAddress)))
 	mux.Handle("GET /v1/addresses/{address}", authz.Require(authz.AddressLookupCallers, http.HandlerFunc(s.handleAddressOwner)))
 	mux.Handle("POST /v1/sign/user-address", authz.Require(authz.UserAddressSigners, http.HandlerFunc(s.handleSignUserAddress)))
 	return mux
+}
+
+// handleHotAddress tells sweeper and withdrawal-service the Hot Wallet's own address, so
+// neither keeps a second, driftable copy in config (deposit-flow.md invariant #15).
+func (s *Server) handleHotAddress(w http.ResponseWriter, _ *http.Request) {
+	if s.hotSigner == nil {
+		writeErr(w, http.StatusServiceUnavailable, "hot wallet not configured")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"address": s.hotSigner.HotWalletAddress().Hex()})
 }
 
 // handleAddressOwner is chain-watcher's cache-miss fallback (deposit-flow.md, Address

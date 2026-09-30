@@ -42,20 +42,42 @@ func (f *fakeWallet) handler() http.Handler {
 		const prefix, suffix = "/v1/users/", "/deposit-address"
 		user := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, prefix), suffix)
 		addr, has := f.addresses[user]
-		switch {
-		case r.Method == http.MethodGet && !has:
-			w.WriteHeader(404)
-			_, _ = w.Write([]byte(`{"error":"no address"}`))
-		case r.Method == http.MethodGet:
-			_, _ = w.Write([]byte(`{"user_id":"` + user + `","chain":"evm","address":"` + addr + `"}`))
-		case r.Method == http.MethodPost:
-			if f.addresses == nil {
-				f.addresses = map[string]string{}
-			}
-			f.addresses[user] = "0xADDR_FOR_" + user
-			w.WriteHeader(201)
-			_, _ = w.Write([]byte(`{"user_id":"` + user + `","chain":"evm","address":"` + f.addresses[user] + `"}`))
+		if r.Method != http.MethodPost { // the gateway must only ever use the idempotent get-or-create
+			w.WriteHeader(405)
+			return
 		}
+		if has {
+			_, _ = w.Write([]byte(`{"user_id":"` + user + `","chain":"evm","address":"` + addr + `"}`))
+			return
+		}
+		if f.addresses == nil {
+			f.addresses = map[string]string{}
+		}
+		f.addresses[user] = "0xADDR_FOR_" + user
+		w.WriteHeader(201)
+		_, _ = w.Write([]byte(`{"user_id":"` + user + `","chain":"evm","address":"` + f.addresses[user] + `"}`))
+	})
+}
+
+// fakeLedger stands in for ledger-service and records who it was asked about.
+type fakeLedger struct {
+	mu       sync.Mutex
+	requests []string // request URI
+	status   int
+	body     string
+}
+
+func (f *fakeLedger) handler() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		f.requests = append(f.requests, r.Method+" "+r.URL.RequestURI())
+		if f.status != 0 {
+			w.WriteHeader(f.status)
+			_, _ = w.Write([]byte(f.body))
+			return
+		}
+		_, _ = w.Write([]byte(`[{"asset_id":"a","symbol":"ETH","total_balance":"100","locked_balance":"30","available_balance":"70"}]`))
 	})
 }
 
@@ -65,6 +87,7 @@ type env struct {
 	srv       *httptest.Server
 	wallet    *fakeWallet
 	walletSrv *httptest.Server
+	ledger    *fakeLedger
 }
 
 func newEnv(t *testing.T) *env {
@@ -77,10 +100,14 @@ func newEnv(t *testing.T) *env {
 	fw := &fakeWallet{}
 	ws := httptest.NewServer(fw.handler())
 	t.Cleanup(ws.Close)
-	s := &api.Server{Auth: st, Users: st, Wallet: &api.WalletClient{BaseURL: ws.URL, HTTP: ws.Client()}}
+	fl := &fakeLedger{}
+	ls := httptest.NewServer(fl.handler())
+	t.Cleanup(ls.Close)
+	s := &api.Server{Auth: st, Users: st, Wallet: &api.WalletClient{BaseURL: ws.URL, HTTP: ws.Client()},
+		Ledger: &api.LedgerClient{BaseURL: ls.URL, HTTP: ls.Client()}}
 	srv := httptest.NewServer(s.Routes())
 	t.Cleanup(srv.Close)
-	return &env{t: t, st: st, srv: srv, wallet: fw, walletSrv: ws}
+	return &env{t: t, st: st, srv: srv, wallet: fw, walletSrv: ws, ledger: fl}
 }
 
 func (e *env) do(method, path, auth string, body string, hdr ...string) (int, string) {
@@ -240,7 +267,7 @@ func TestClientCannotNameAnotherUser(t *testing.T) {
 	}
 }
 
-func TestDepositAddressCreatesOnFirstUseThenReuses(t *testing.T) {
+func TestDepositAddressAlwaysUsesTheIdempotentPost(t *testing.T) {
 	e := newEnv(t)
 	id, key := e.newUser()
 	code, body := e.do("GET", "/v1/deposit-address", "Bearer "+key, "")
@@ -252,8 +279,51 @@ func TestDepositAddressCreatesOnFirstUseThenReuses(t *testing.T) {
 	if code != 200 || !strings.Contains(body, "0xADDR_FOR_"+id) {
 		t.Fatalf("second call: %d %s", code, body)
 	}
-	if len(e.wallet.requests) != 1 || !strings.HasPrefix(e.wallet.requests[0], "GET ") {
-		t.Fatalf("an existing address must not trigger another issue: %v", e.wallet.requests)
+	if len(e.wallet.requests) != 1 || !strings.HasPrefix(e.wallet.requests[0], "POST ") {
+		t.Fatalf("every call must be one POST (no GET, no create-on-404 round trip): %v", e.wallet.requests)
+	}
+}
+
+func TestBalancesAreTheAuthenticatedUsersOwn(t *testing.T) {
+	e := newEnv(t)
+	aliceID, aliceKey := e.newUser()
+	bobID, _ := e.newUser()
+	code, body := e.do("GET", "/v1/balances?asset_id=abc&user_id="+bobID, "Bearer "+aliceKey, `{"user_id":"`+bobID+`"}`, "X-User-Id", bobID)
+	if code != 200 || !strings.Contains(body, `"available_balance":"70"`) {
+		t.Fatalf("%d %s", code, body)
+	}
+	if len(e.ledger.requests) != 1 || e.ledger.requests[0] != "GET /v1/ledger/balances/"+aliceID+"?asset_id=abc" {
+		t.Fatalf("ledger was asked %v — must be alice's id only, with just the asset filter", e.ledger.requests)
+	}
+	// No filter: no query string at all.
+	e.ledger.requests = nil
+	e.do("GET", "/v1/balances", "Bearer "+aliceKey, "")
+	if e.ledger.requests[0] != "GET /v1/ledger/balances/"+aliceID {
+		t.Fatalf("ledger was asked %v", e.ledger.requests)
+	}
+}
+
+func TestBalancesNeedAKeyAndPassUpstreamErrorsThrough(t *testing.T) {
+	e := newEnv(t)
+	_, key := e.newUser()
+	if code, _ := e.do("GET", "/v1/balances", "", ""); code != 401 {
+		t.Fatalf("no key = %d", code)
+	}
+	if len(e.ledger.requests) != 0 {
+		t.Fatal("an unauthenticated request reached ledger-service")
+	}
+	e.ledger.status, e.ledger.body = 400, `{"error":"asset_id must be a uuid"}`
+	if code, body := e.do("GET", "/v1/balances?asset_id=x", "Bearer "+key, ""); code != 400 || !strings.Contains(body, "uuid") {
+		t.Fatalf("upstream 400 = %d %s", code, body)
+	}
+	e.ledger.status = 0
+	// ledger-service unreachable
+	e2 := newEnv(t)
+	_, k2 := e2.newUser()
+	e2.srv.Config.Handler = (&api.Server{Auth: e2.st, Users: e2.st, Wallet: &api.WalletClient{BaseURL: e2.walletSrv.URL, HTTP: e2.walletSrv.Client()},
+		Ledger: &api.LedgerClient{BaseURL: "http://127.0.0.1:1", HTTP: http.DefaultClient}}).Routes()
+	if code, _ := e2.do("GET", "/v1/balances", "Bearer "+k2, ""); code != 502 {
+		t.Fatalf("unreachable ledger = %d, want 502", code)
 	}
 }
 

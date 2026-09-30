@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 
@@ -41,7 +42,7 @@ func main() {
 	}()
 
 	log.Printf("history-service consuming %s", strings.Join(topics, ", "))
-	if err := history.Run(ctx, reader, &history.Processor{Store: store}); err != nil {
+	if err := history.Run(ctx, reader, &history.Processor{Store: store}, maxAttempts()); err != nil {
 		log.Fatalf("consumer: %v", err)
 	}
 }
@@ -59,4 +60,13 @@ func envOr(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// maxAttempts is the bounded retry per record (integration-contracts.md §5: 10).
+func maxAttempts() int {
+	n, err := strconv.Atoi(envOr("MAX_ATTEMPTS", "10"))
+	if err != nil || n < 1 {
+		log.Fatalf("MAX_ATTEMPTS must be a positive integer")
+	}
+	return n
 }

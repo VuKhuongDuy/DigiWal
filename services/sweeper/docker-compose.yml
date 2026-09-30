@@ -13,10 +13,7 @@ services:
       RPC_URL: ${RPC_URL:-http://anvil:8545}
       ASSETS_FILE: /config/assets.yaml
       SCREENING_FILE: /config/screening.yaml
-      # The Sweep's destination. wallet-service also enforces it, so a wrong value is refused there.
-      # `make init-seed ROLE=hot_wallet` in ../wallet-service prints the Hot Wallet address.
-      HOT_WALLET_ADDRESS: ${HOT_WALLET_ADDRESS:?set the Hot Wallet address (see wallet-service)}
-      # Both signing calls go to wallet-service over mTLS as CN=sweeper.
+      # wallet-service, over mTLS as CN=sweeper: signing, and the Hot Wallet address (asked once at startup).
       WALLET_SERVICE_URL: ${WALLET_SERVICE_URL:-https://wallet-service:8443}
       TLS_CERT_FILE: /certs/cert.pem
       TLS_KEY_FILE: /certs/key.pem

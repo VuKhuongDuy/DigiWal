@@ -137,8 +137,10 @@ type Reader interface {
 }
 
 // Run reads until ctx ends. A record is committed only after Handle succeeded (at-least-once);
-// a transient failure backs off and retries the same record.
-func Run(ctx context.Context, r Reader, p *Processor) error {
+// a transient failure backs off and retries the same record, up to maxAttempts, then logs an
+// ALERT and skips it — the offset still advances (integration-contracts.md §5). Safe because
+// nothing depends on this read model: a lost row is one missing line of history, never a balance.
+func Run(ctx context.Context, r Reader, p *Processor, maxAttempts int) error {
 	const maxBackoff = 30 * time.Second
 	for {
 		m, err := r.Fetch(ctx)
@@ -149,12 +151,19 @@ func Run(ctx context.Context, r Reader, p *Processor) error {
 			return fmt.Errorf("fetching: %w", err)
 		}
 		backoff := 500 * time.Millisecond
-		for {
+		for attempt := 1; ; attempt++ {
 			err := p.Handle(ctx, m)
 			if err == nil {
 				break
 			}
-			log.Printf("transient failure handling %s (will retry): %v", m.Topic, err)
+			if ctx.Err() != nil {
+				return nil
+			}
+			if attempt >= maxAttempts {
+				log.Printf("ALERT: giving up on %s record %q after %d attempts, skipping it: %v", m.Topic, m.Key, attempt, err)
+				break
+			}
+			log.Printf("transient failure handling %s (attempt %d/%d, will retry): %v", m.Topic, attempt, maxAttempts, err)
 			select {
 			case <-ctx.Done():
 				return nil

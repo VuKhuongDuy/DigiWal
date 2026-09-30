@@ -10,6 +10,7 @@ import (
 	"log"
 	"math/big"
 	"net/http"
+	"regexp"
 
 	"digiwal/services/ledger-service/internal/authz"
 	"digiwal/services/ledger-service/internal/ledger"
@@ -21,6 +22,7 @@ type Ledger interface {
 	Lock(ctx context.Context, r ledger.LockRequest) (ledger.Lock, error)
 	Settle(ctx context.Context, key string) (ledger.SettleResult, error)
 	Release(ctx context.Context, key string) error
+	BalanceSheet(ctx context.Context, userID, assetID string) ([]ledger.AssetBalance, error)
 }
 
 type Server struct{ ledger Ledger }
@@ -46,6 +48,8 @@ func (s *Server) MTLSRoutes() http.Handler {
 	mux.Handle("POST /v1/ledger/locks", guard(s.handleLock))
 	mux.Handle("POST /v1/ledger/locks/{key}/settle", guard(s.handleSettle))
 	mux.Handle("POST /v1/ledger/locks/{key}/release", guard(s.handleRelease))
+	// Read-only, for api-gateway's GET /v1/balances.
+	mux.Handle("GET /v1/ledger/balances/{user_id}", authz.Require(authz.BalanceReaders, http.HandlerFunc(s.handleBalances)))
 	return mux
 }
 
@@ -169,4 +173,39 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+var uuidRe = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
+
+// handleBalances returns the user's Total/Locked/Available per registered asset, all amounts as
+// decimal strings. Every registered asset has a row even if the user never touched it.
+func (s *Server) handleBalances(w http.ResponseWriter, r *http.Request) {
+	userID := r.PathValue("user_id")
+	if userID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "user_id is required"})
+		return
+	}
+	assetID := r.URL.Query().Get("asset_id")
+	if assetID != "" && !uuidRe.MatchString(assetID) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "asset_id must be a uuid"})
+		return
+	}
+	sheet, err := s.ledger.BalanceSheet(r.Context(), userID, assetID)
+	if err != nil {
+		log.Printf("reading balances: %v", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
+		return
+	}
+	type row struct {
+		AssetID          string `json:"asset_id"`
+		Symbol           string `json:"symbol"`
+		TotalBalance     string `json:"total_balance"`
+		LockedBalance    string `json:"locked_balance"`
+		AvailableBalance string `json:"available_balance"`
+	}
+	out := make([]row, len(sheet))
+	for i, b := range sheet {
+		out[i] = row{b.AssetID, b.Symbol, b.Total.String(), b.Locked.String(), b.Available.String()}
+	}
+	writeJSON(w, http.StatusOK, out)
 }

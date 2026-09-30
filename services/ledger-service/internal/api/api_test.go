@@ -23,6 +23,7 @@ type fake struct {
 	gotLock ledger.LockRequest
 	gotKey  string
 	calls   int
+	sheet   []ledger.AssetBalance
 }
 
 func (f *fake) Apply(_ context.Context, t ledger.Transaction) (ledger.Status, error) {
@@ -44,6 +45,12 @@ func (f *fake) Release(_ context.Context, key string) error {
 	f.calls++
 	f.gotKey = key
 	return f.err
+}
+
+func (f *fake) BalanceSheet(_ context.Context, userID, assetID string) ([]ledger.AssetBalance, error) {
+	f.calls++
+	f.gotKey = userID + "|" + assetID
+	return f.sheet, f.err
 }
 
 func call(t *testing.T, f *fake, cn, path, body string) *httptest.ResponseRecorder {
@@ -199,5 +206,47 @@ func TestHealthzIsOnThePlainListener(t *testing.T) {
 		if rec.Code == 200 {
 			t.Fatalf("%s must not exist on the plain listener", path)
 		}
+	}
+}
+
+func get(f *fake, cn, path string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest("GET", path, nil)
+	if cn != "" {
+		cert := &x509.Certificate{Subject: pkix.Name{CommonName: cn}}
+		req.TLS = &tls.ConnectionState{VerifiedChains: [][]*x509.Certificate{{cert}}}
+	}
+	rec := httptest.NewRecorder()
+	NewServer(f).MTLSRoutes().ServeHTTP(rec, req)
+	return rec
+}
+
+func TestBalancesAreReadableByAPIGatewayOnly(t *testing.T) {
+	for cn, want := range map[string]int{"api-gateway": 200, "withdrawal-service": 403, "sweeper": 403, "chain-watcher": 403, "": 403} {
+		f := &fake{}
+		if got := get(f, cn, "/v1/ledger/balances/alice").Code; got != want {
+			t.Errorf("CN=%q: %d, want %d", cn, got, want)
+		}
+		if want == 403 && f.calls != 0 {
+			t.Errorf("CN=%q reached the ledger", cn)
+		}
+	}
+}
+
+func TestBalancesWireContract(t *testing.T) {
+	f := &fake{sheet: []ledger.AssetBalance{{AssetID: eth, Symbol: "ETH", Total: big.NewInt(0).Mul(big.NewInt(1e18), big.NewInt(100)), Locked: big.NewInt(5), Available: big.NewInt(0).Sub(big.NewInt(0).Mul(big.NewInt(1e18), big.NewInt(100)), big.NewInt(5))}}}
+	rec := get(f, "api-gateway", "/v1/ledger/balances/alice?asset_id="+eth)
+	if rec.Code != 200 || f.gotKey != "alice|"+eth {
+		t.Fatalf("%d %s (%s)", rec.Code, rec.Body, f.gotKey)
+	}
+	want := `[{"asset_id":"` + eth + `","symbol":"ETH","total_balance":"100000000000000000000","locked_balance":"5","available_balance":"99999999999999999995"}]`
+	if strings.TrimSpace(rec.Body.String()) != want {
+		t.Fatalf("body = %s", rec.Body)
+	}
+	if rec := get(&fake{}, "api-gateway", "/v1/ledger/balances/alice?asset_id=nope"); rec.Code != 400 {
+		t.Fatalf("bad asset_id = %d", rec.Code)
+	}
+	// An empty sheet is an empty array, never null.
+	if rec := get(&fake{}, "api-gateway", "/v1/ledger/balances/alice"); strings.TrimSpace(rec.Body.String()) != "[]" {
+		t.Fatalf("empty sheet = %s", rec.Body)
 	}
 }

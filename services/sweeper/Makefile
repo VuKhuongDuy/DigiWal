@@ -8,7 +8,7 @@ certs:
 	@test -f "$${CA_DIR:-$$HOME/.digiwal-ca}/ca-key.pem" || ../../infra/pki/gen-ca.sh
 	@for svc in sweeper wallet-service; do test -f ../../infra/pki/out/$$svc/cert.pem || ../../infra/pki/gen-leaf.sh $$svc; done
 
-# Needs HOT_WALLET_ADDRESS (and wallet-service running with both seeds initialised).
+# Needs wallet-service running with both seeds initialised.
 up: certs
 	$(COMPOSE) up -d --build sweeper
 	@until curl -sf http://localhost:8085/healthz > /dev/null; do sleep 1; done

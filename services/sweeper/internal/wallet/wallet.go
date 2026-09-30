@@ -16,6 +16,8 @@ import (
 	"net/http"
 	"os"
 	"strings"
+
+	"github.com/ethereum/go-ethereum/common"
 )
 
 var (
@@ -70,6 +72,32 @@ func (c *Client) SignUserAddress(ctx context.Context, req UserRequest) ([]byte, 
 		return nil, err
 	}
 	return decodeTx(out.SignedRawTx)
+}
+
+// HotAddress: GET /v1/wallet/hot-address — the address wallet-service itself derived for the
+// Hot Wallet (deposit-flow.md invariant #15). Asked once at startup and cached by the caller:
+// a locally configured copy could drift from the real one.
+func (c *Client) HotAddress(ctx context.Context) (common.Address, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(c.BaseURL, "/")+"/v1/wallet/hot-address", nil)
+	if err != nil {
+		return common.Address{}, err
+	}
+	resp, err := c.HTTP.Do(req)
+	if err != nil {
+		return common.Address{}, fmt.Errorf("calling wallet-service hot-address: %w", err)
+	}
+	defer resp.Body.Close()
+	payload, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<12))
+	if resp.StatusCode != http.StatusOK {
+		return common.Address{}, fmt.Errorf("wallet-service hot-address answered %d: %s", resp.StatusCode, strings.TrimSpace(string(payload)))
+	}
+	var out struct {
+		Address string `json:"address"`
+	}
+	if err := json.Unmarshal(payload, &out); err != nil || !common.IsHexAddress(out.Address) {
+		return common.Address{}, fmt.Errorf("wallet-service returned an unusable hot address: %q", payload)
+	}
+	return common.HexToAddress(out.Address), nil
 }
 
 func decodeTx(s string) ([]byte, error) {

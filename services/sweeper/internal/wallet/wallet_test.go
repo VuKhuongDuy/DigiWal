@@ -99,3 +99,20 @@ func TestUnreachableWalletServiceIsTransient(t *testing.T) {
 		t.Fatalf("err = %v", err)
 	}
 }
+
+func TestHotAddress(t *testing.T) {
+	c, seen := serve(t, 200, `{"address":"0x3d0290A916B57AE48a2840E7d3547fA317F976c3"}`)
+	got, err := c.HotAddress(context.Background())
+	if err != nil || got.Hex() != "0x3d0290A916B57AE48a2840E7d3547fA317F976c3" || (*seen)[0][:len("GET /v1/wallet/hot-address")] != "GET /v1/wallet/hot-address" {
+		t.Fatalf("got %s %v %v", got, err, *seen)
+	}
+	for _, tc := range []struct {
+		status int
+		body   string
+	}{{503, `{"error":"hot wallet not configured"}`}, {403, `{}`}, {200, `{}`}, {200, `{"address":"nope"}`}, {200, `not json`}} {
+		c, _ := serve(t, tc.status, tc.body)
+		if a, err := c.HotAddress(context.Background()); err == nil {
+			t.Errorf("%d %q accepted as %s", tc.status, tc.body, a)
+		}
+	}
+}

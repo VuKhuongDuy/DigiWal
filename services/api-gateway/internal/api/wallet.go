@@ -17,16 +17,11 @@ type WalletClient struct {
 	HTTP    *http.Client
 }
 
-// DepositAddress returns wallet-service's answer for the user's address, creating it if the
-// user has none. It calls GET first (the documented endpoint) and only on a 404 the
-// idempotent POST that issues the address — the design lists GET alone, but nothing else
-// would ever create the first address (a gap reported to the Tech Lead).
+// DepositAddress returns the user's deposit address via wallet-service's POST, which is
+// idempotent get-or-create: an existing address comes back as-is, a first-time user's is
+// derived on the spot, so the client never sees a 404 (integration-contracts.md §2, decided).
 func (c *WalletClient) DepositAddress(ctx context.Context, userID string) (int, []byte, error) {
 	u := strings.TrimRight(c.BaseURL, "/") + "/v1/users/" + url.PathEscape(userID) + "/deposit-address"
-	status, body, err := c.do(ctx, http.MethodGet, u)
-	if err != nil || status != http.StatusNotFound {
-		return status, body, err
-	}
 	return c.do(ctx, http.MethodPost, u)
 }
 

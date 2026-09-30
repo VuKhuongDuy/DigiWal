@@ -417,3 +417,41 @@ func (s *Store) ChainBalance(ctx context.Context, assetID string) (*big.Int, err
 	n, _ := new(big.Int).SetString(text, 10)
 	return n, nil
 }
+
+// AssetBalance is one row of a user's balance sheet.
+type AssetBalance struct {
+	AssetID   string
+	Symbol    string
+	Total     *big.Int
+	Locked    *big.Int
+	Available *big.Int
+}
+
+// BalanceSheet returns one row per active Asset Registry entry, whether or not the user has
+// an Account for it: a never-touched asset reads 0/0/0, never a missing row
+// (integration-contracts.md §2). assetID, if not empty, restricts the sheet to that asset.
+func (s *Store) BalanceSheet(ctx context.Context, userID, assetID string) ([]AssetBalance, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT a.id::text, a.symbol, COALESCE(acc.total_balance, 0)::text, COALESCE(acc.locked_balance, 0)::text
+		FROM assets a
+		LEFT JOIN accounts acc ON acc.asset_id = a.id AND acc.kind = 'user' AND acc.user_id = $1
+		WHERE a.active AND ($2 = '' OR a.id::text = $2)
+		ORDER BY a.symbol, a.id`, userID, strings.ToLower(assetID))
+	if err != nil {
+		return nil, fmt.Errorf("reading balance sheet: %w", err)
+	}
+	defer rows.Close()
+	out := []AssetBalance{}
+	for rows.Next() {
+		var b AssetBalance
+		var total, locked string
+		if err := rows.Scan(&b.AssetID, &b.Symbol, &total, &locked); err != nil {
+			return nil, err
+		}
+		b.Total, _ = new(big.Int).SetString(total, 10)
+		b.Locked, _ = new(big.Int).SetString(locked, 10)
+		b.Available = new(big.Int).Sub(b.Total, b.Locked)
+		out = append(out, b)
+	}
+	return out, rows.Err()
+}

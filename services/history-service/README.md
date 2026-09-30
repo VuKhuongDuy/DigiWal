@@ -14,9 +14,10 @@ replaying the topics (a new consumer group starts from the beginning).
 - Statuses only move forward: `pending`/`broadcast` -> `confirmed`. A late or duplicate
   detected/broadcast event never turns a confirmed entry back (`$setOnInsert` upsert for progress,
   `$set` upsert for confirmed), so events may arrive out of order or twice.
-- At-least-once: the offset is committed only after the write succeeded; a store outage is retried;
-  an event that can never succeed (malformed, unknown schema version) goes to `failed_events` and is
-  acknowledged so it cannot wedge a partition.
+- At-least-once: the offset is committed only after the write succeeded. A store outage is retried up to
+  `MAX_ATTEMPTS` (10) times, then an `ALERT` log line and the record is skipped (`integration-contracts.md` §5: nothing depends
+  on this read model). An event that can never succeed (malformed, unknown schema version) goes to
+  `failed_events` and is acknowledged at once.
 
 ## Not built / to know
 

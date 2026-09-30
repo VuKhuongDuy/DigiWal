@@ -38,10 +38,16 @@ type Wallet interface {
 	DepositAddress(ctx context.Context, userID string) (status int, body []byte, err error)
 }
 
+// Ledger is the slice of ledger-service the gateway calls.
+type Ledger interface {
+	Balances(ctx context.Context, userID, assetID string) (status int, body []byte, err error)
+}
+
 type Server struct {
 	Auth   Authenticator
 	Users  UserCreator
 	Wallet Wallet
+	Ledger Ledger
 }
 
 // Routes: POST /users is the only unauthenticated route (invariant #3). Everything else,
@@ -50,6 +56,7 @@ type Server struct {
 func (s *Server) Routes() http.Handler {
 	authed := http.NewServeMux()
 	authed.HandleFunc("GET /v1/deposit-address", s.handleDepositAddress)
+	authed.HandleFunc("GET /v1/balances", s.handleBalances)
 
 	root := http.NewServeMux()
 	root.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
@@ -115,6 +122,23 @@ func (s *Server) handleDepositAddress(w http.ResponseWriter, r *http.Request) {
 	status, body, err := s.Wallet.DepositAddress(ctx, UserID(r.Context()))
 	if err != nil {
 		log.Printf("deposit address for %s: %v", UserID(r.Context()), err)
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "upstream unavailable"})
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_, _ = w.Write(body)
+}
+
+// handleBalances returns the authenticated user's Total/Locked/Available per asset, straight
+// from ledger-service. The only client-controlled input is the optional asset_id filter; the
+// user id comes from the context alone.
+func (s *Server) handleBalances(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+	defer cancel()
+	status, body, err := s.Ledger.Balances(ctx, UserID(r.Context()), r.URL.Query().Get("asset_id"))
+	if err != nil {
+		log.Printf("balances for %s: %v", UserID(r.Context()), err)
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "upstream unavailable"})
 		return
 	}

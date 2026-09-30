@@ -6,6 +6,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"math/big"
 	"net/http"
@@ -38,11 +39,6 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	hot := requireEnv("HOT_WALLET_ADDRESS")
-	if !common.IsHexAddress(hot) {
-		log.Fatalf("HOT_WALLET_ADDRESS %q is not an address", hot)
-	}
-
 	c, err := chain.Dial(ctx, requireEnv("RPC_URL"))
 	if err != nil {
 		log.Fatal(err)
@@ -61,11 +57,19 @@ func main() {
 		HTTP:    &http.Client{Timeout: 30 * time.Second, Transport: &http.Transport{TLSClientConfig: tlsCfg}},
 	}
 
+	// The Hot Wallet's address comes from wallet-service, which derived it — never from local
+	// config that could drift (deposit-flow.md invariant #15). Asked once; wallet-service may
+	// still be starting, so retry for a while before giving up.
+	hot, err := fetchHotAddress(ctx, w)
+	if err != nil {
+		log.Fatal(err)
+	}
+
 	s := &sweep.Sweeper{
 		Chain: c, Wallet: w, Assets: assets, Screening: screen,
 		Config: sweep.Config{
 			ChainID:   chainID,
-			HotWallet: common.HexToAddress(hot),
+			HotWallet: hot,
 			// deposit-flow.md: Gas Top-Up = 0.001 ETH; an address below 65,000 gas x 10 gwei cannot pay for a sweep.
 			GasTopUp:         envBig("GAS_TOPUP_WEI", "1000000000000000"),
 			GasReserve:       envBig("SWEEP_GAS_RESERVE_WEI", "650000000000000"),
@@ -85,10 +89,28 @@ func main() {
 
 	reader := sweep.NewKafkaReader(strings.Split(requireEnv("KAFKA_BROKERS"), ","), envOr("KAFKA_GROUP_ID", "sweeper"), events.TopicDepositsConfirmed)
 	defer reader.Close()
-	log.Printf("sweeper running: chain %d, hot wallet %s, consuming %s", chainID, hot, events.TopicDepositsConfirmed)
+	log.Printf("sweeper running: chain %d, hot wallet %s, consuming %s", chainID, hot.Hex(), events.TopicDepositsConfirmed)
 	if err := sweep.Run(ctx, reader, s, int(envInt("MAX_ATTEMPTS", 10))); err != nil {
 		log.Fatalf("consumer: %v", err)
 	}
+}
+
+func fetchHotAddress(ctx context.Context, w *wallet.Client) (common.Address, error) {
+	var last error
+	for i := 0; i < 30; i++ {
+		addr, err := w.HotAddress(ctx)
+		if err == nil {
+			return addr, nil
+		}
+		last = err
+		log.Printf("asking wallet-service for the hot wallet address (attempt %d/30): %v", i+1, err)
+		select {
+		case <-ctx.Done():
+			return common.Address{}, ctx.Err()
+		case <-time.After(4 * time.Second):
+		}
+	}
+	return common.Address{}, fmt.Errorf("could not learn the hot wallet address from wallet-service: %w", last)
 }
 
 func requireEnv(key string) string {

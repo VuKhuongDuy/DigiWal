@@ -26,9 +26,16 @@ func main() {
 	}
 	defer st.Close()
 
+	// ledger-service is reached over mTLS with this service's own certificate (CN=api-gateway).
+	tlsCfg, err := api.ClientTLSConfig(requireEnv("TLS_CERT_FILE"), requireEnv("TLS_KEY_FILE"), requireEnv("TLS_CA_FILE"))
+	if err != nil {
+		log.Fatalf("configuring mTLS client: %v", err)
+	}
 	s := &api.Server{
 		Auth: st, Users: st,
 		Wallet: &api.WalletClient{BaseURL: requireEnv("WALLET_SERVICE_URL"), HTTP: &http.Client{Timeout: 10 * time.Second}},
+		Ledger: &api.LedgerClient{BaseURL: requireEnv("LEDGER_SERVICE_URL"),
+			HTTP: &http.Client{Timeout: 10 * time.Second, Transport: &http.Transport{TLSClientConfig: tlsCfg}}},
 	}
 	port := envOr("PORT", "8080")
 	srv := &http.Server{Addr: ":" + port, Handler: s.Routes(), ReadHeaderTimeout: 10 * time.Second}
