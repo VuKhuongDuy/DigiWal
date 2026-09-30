@@ -38,7 +38,7 @@ up: certs
 #   make init-seed ROLE=hot_wallet
 init-seed:
 	@test -n "$(ROLE)" || (echo "usage: make init-seed ROLE=user_derivation|hot_wallet" && exit 1)
-	$(COMPOSE) run --rm wallet-service /usr/local/bin/service -init-seed $(ROLE)
+	$(COMPOSE) run --rm wallet-service -init-seed $(ROLE)
 	$(COMPOSE) restart wallet-service
 
 init-seeds:
