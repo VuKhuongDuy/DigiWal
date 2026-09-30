@@ -443,7 +443,7 @@ concrete Confirmation Depth and Gas Top-Up numbers below.
     `observed_transfers` row for it, even when the destination is a
     Watched Address.** **Decided (Tech Lead; bug found by the M2 e2e test) —
     implemented in commits 07fcb1d and 68e7dac, `make e2e` green; Open
-    Questions #12 resolved, #13-#15 still open.**
+    Questions #12-#14 resolved, #15 still open.**
     Without this, the sweeper's own Gas Top-Up (invariant #13: Hot Wallet
     -> user address, 0.001 ETH) is a native transfer to a Watched Address;
     `chain-watcher` records it as a native deposit, `ledger-service`
@@ -499,7 +499,8 @@ concrete Confirmation Depth and Gas Top-Up numbers below.
       stranded at a deposit address. (This rule stays correct on its own
       if that check were ever bypassed: the outflow is still not a
       deposit; the funds would simply be an operator matter.) Also: transfers already mis-recorded before the fix ships are not
-      retroactively corrected — Open Questions #14.
+      retroactively corrected, by decision: an environment that ran the
+      sweeper before this fix is reset, not repaired — Open Questions #14.
 
 ## Diagram
 
@@ -855,14 +856,22 @@ sequenceDiagram
     grant on that endpoint is **PROPOSED**, awaiting Tech Lead approval
     (`service-auth-mtls.md`, `integration-contracts.md`); plan task 3.10.
     Follow-on open points are `withdrawal-flow.md` Open Questions #9.
-14. **Open: remediation of deposits already mis-credited by Gas Top-Ups
+14. ~~**Open: remediation of deposits already mis-credited by Gas Top-Ups
     before the fix ships.** `chain-watcher` will not rescan history, and
     `ledger.md` has no designed reversal for a confirmed deposit
     credit other than a manual `correction` entry. On the local/e2e stack
     volumes are simply dropped; if any longer-lived environment (Sepolia)
     has run the sweeper, an operator must post a `correction` for each
     affected user. Do you want a one-off script/runbook, or is "testnet,
-    wipe it" acceptable?
+    wipe it" acceptable?~~
+    **Decided (Tech Lead): "testnet, wipe it" — no script, no runbook.**
+    Operational consequence: any longer-lived environment whose `sweeper`
+    ran before invariant #17 shipped is reset — drop the ledger and
+    `chain-watcher` databases and the Kafka state together (they must go
+    as a set: `chain-watcher` will not rescan, and `ledger.md` has no
+    designed reversal for a confirmed deposit credit, so a partial reset
+    would replay or orphan credits). Local/e2e stacks already drop their
+    volumes on every run, so nothing further is needed there.
 15. **Open, optional: defence in depth in `sweeper`.** `sweeper` already
     holds the Hot Wallet address (invariant #15) and could also skip (no
     top-up, no Sweep) a `deposits.confirmed` whose `from_address` equals
