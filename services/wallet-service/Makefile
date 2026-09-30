@@ -21,9 +21,11 @@ certs:
 	@for svc in wallet-service withdrawal-service sweeper; do test -f ../../infra/pki/out/$$svc/cert.pem || ../../infra/pki/gen-leaf.sh $$svc; done
 
 up: certs
-	$(COMPOSE) up -d --build postgres redis wallet-service
+	$(COMPOSE) up -d --build postgres redis anvil wallet-service
 	@echo "waiting for wallet-service to be healthy..."
-	@until curl -sf http://localhost:8080/healthz > /dev/null; do sleep 1; done
+	@until curl -sf http://localhost:8080/healthz > /dev/null; do \
+		$(COMPOSE) ps --status running --services | grep -qx wallet-service || { echo "wallet-service exited — see: $(COMPOSE) logs wallet-service" >&2; exit 1; }; \
+		sleep 1; done
 	@echo "up: http://localhost:8080"
 
 # Run exactly once per role per environment, after `make up` — see
