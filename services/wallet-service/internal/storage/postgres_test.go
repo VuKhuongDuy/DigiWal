@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 
@@ -173,5 +175,28 @@ func TestAllocateIndex_ConcurrentNeverDuplicates(t *testing.T) {
 		if !seen[i] {
 			t.Fatalf("index %d never allocated (indices must be dense 0..%d)", i, n-1)
 		}
+	}
+}
+
+func TestUserForAddress_IsTheReverseOfCreateAddress(t *testing.T) {
+	ctx := context.Background()
+	s, err := Connect(ctx, testdb.New(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if err := s.InitSeed(ctx, RoleUserDerivation, []byte("a")); err != nil {
+		t.Fatal(err)
+	}
+	addr, err := s.CreateAddress(ctx, "alice", "evm", func(i uint32) (string, error) { return fmt.Sprintf("0x%040x", i+1), nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	user, chain, err := s.UserForAddress(ctx, addr)
+	if err != nil || user != "alice" || chain != "evm" {
+		t.Fatalf("got %q %q %v", user, chain, err)
+	}
+	if _, _, err := s.UserForAddress(ctx, "0x"+strings.Repeat("9", 40)); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("unknown address: %v", err)
 	}
 }

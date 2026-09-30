@@ -94,6 +94,8 @@ func TestDecodeRejectsBadPayloads(t *testing.T) {
 		"negative amount":    mutate(`"amount":"1000000000000000000"`, `"amount":"-1"`),
 		"log_index below -1": mutate(`"log_index":-1`, `"log_index":-2`),
 		"asset not a uuid":   mutate(`11111111-1111-1111-1111-111111111111`, `native`),
+		"missing user_id":    mutate(`"user_id":"alice",`, ``),
+		"blank user_id":      mutate(`"user_id":"alice"`, `"user_id":"  "`),
 		"not json":           []byte(`{`),
 	}
 	for name, payload := range cases {
@@ -142,5 +144,20 @@ func TestKeys(t *testing.T) {
 	w, _ := Decode[WithdrawalBroadcast](golden(t, TopicWithdrawalsBroadcast))
 	if w.Key() != "33333333-3333-3333-3333-333333333333" {
 		t.Fatalf("withdrawal key %q", w.Key())
+	}
+}
+
+func TestBothDepositEventsRequireUserID(t *testing.T) {
+	for _, name := range []string{TopicDepositsDetected, TopicDepositsConfirmed} {
+		p := strings.Replace(string(golden(t, name)), `"user_id":"alice",`, ``, 1)
+		var err error
+		if name == TopicDepositsDetected {
+			_, err = Decode[DepositDetected]([]byte(p))
+		} else {
+			_, err = Decode[DepositConfirmed]([]byte(p))
+		}
+		if err == nil {
+			t.Errorf("%s decoded without a user_id: the ledger would have nobody to credit", name)
+		}
 	}
 }

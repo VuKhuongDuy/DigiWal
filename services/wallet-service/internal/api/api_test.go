@@ -145,3 +145,66 @@ func TestSignUserAddress_ErrorMapping(t *testing.T) {
 		}
 	}
 }
+
+type fakeAddresses struct {
+	user, chain string
+	err         error
+	got         string
+	calls       int
+}
+
+func (f *fakeAddresses) UserForAddress(_ context.Context, a string) (string, string, error) {
+	f.calls++
+	f.got = a
+	return f.user, f.chain, f.err
+}
+
+func lookup(t *testing.T, f *fakeAddresses, cn, addr string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest("GET", "/v1/addresses/"+addr, nil)
+	if cn != "" {
+		req = withPeer(req, cn)
+	}
+	rec := httptest.NewRecorder()
+	(&Server{addresses: f}).MTLSRoutes().ServeHTTP(rec, req)
+	return rec
+}
+
+const someAddr = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
+
+// service-auth-mtls.md matrix: chain-watcher only, from day one.
+func TestAddressLookup_OnlyChainWatcherMayCall(t *testing.T) {
+	for cn, want := range map[string]int{"chain-watcher": 200, "sweeper": 403, "withdrawal-service": 403, "api-gateway": 403, "ledger-service": 403, "": 403} {
+		f := &fakeAddresses{user: "alice", chain: "evm"}
+		if got := lookup(t, f, cn, someAddr).Code; got != want {
+			t.Errorf("CN=%q: %d, want %d", cn, got, want)
+		}
+		if want == 403 && f.calls != 0 {
+			t.Errorf("CN=%q reached the lookup", cn)
+		}
+	}
+}
+
+func TestAddressLookup_WireContract(t *testing.T) {
+	f := &fakeAddresses{user: "alice", chain: "evm"}
+	rec := lookup(t, f, "chain-watcher", strings.ToLower(someAddr)) // any casing in, checksum form to the store
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), `"user_id":"alice"`) || !strings.Contains(rec.Body.String(), `"chain":"evm"`) {
+		t.Fatalf("%d %s", rec.Code, rec.Body)
+	}
+	if f.got != someAddr {
+		t.Fatalf("store queried with %q, want the EIP-55 form %q", f.got, someAddr)
+	}
+	// 404 is the ONLY "not ours" signal; a failure must not look like one
+	if rec := lookup(t, &fakeAddresses{err: storage.ErrNotFound}, "chain-watcher", someAddr); rec.Code != 404 {
+		t.Fatalf("not found: %d", rec.Code)
+	}
+	if rec := lookup(t, &fakeAddresses{err: errors.New("db down")}, "chain-watcher", someAddr); rec.Code != 500 {
+		t.Fatalf("db error: %d, want 500 (so chain-watcher retries instead of dropping the transfer)", rec.Code)
+	}
+	for _, bad := range []string{"0x123", "alice", "70997970C51812dc3A010C7d01b50e0d17dc79C8zz"} {
+		f := &fakeAddresses{}
+		if rec := lookup(t, f, "chain-watcher", bad); rec.Code != 400 || f.calls != 0 {
+			t.Errorf("%q: %d (lookups %d), want 400 and 0", bad, rec.Code, f.calls)
+		}
+	}
+}

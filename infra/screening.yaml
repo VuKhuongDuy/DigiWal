@@ -1,0 +1,7 @@
+# The Screening List (docs/design/compliance-screening.md): addresses whose deposits
+# are never credited automatically (a Flagged Deposit is held for operator review) and
+# which withdrawals may not pay out to. Static, operator-maintained, checked in.
+# Same distribution pattern as assets.yaml: one file, mounted identically into every
+# service that reads it. Today only ledger-service does; sweeper and withdrawal-service
+# join in Milestone 5.
+addresses: []

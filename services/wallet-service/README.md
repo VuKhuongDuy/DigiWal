@@ -31,6 +31,7 @@ GET  /v1/users/{userID}/deposit-address   # 404 if the user has no address yet
 # mTLS listener :8443 (client cert CN checked per endpoint — docs/design/service-auth-mtls.md)
 POST /v1/sign/hot-wallet                  # CN: withdrawal-service, sweeper
 POST /v1/sign/user-address                # CN: sweeper only (Sweep: user key -> Hot Wallet)
+GET  /v1/addresses/{address}              # CN: chain-watcher only -> {user_id, chain} or 404
 ```
 
 `POST /v1/sign/hot-wallet` `{to_address, asset_id, amount, chain_id, idempotency_key, max_gas_price?}`
@@ -41,6 +42,14 @@ and is idempotent per `idempotency_key` (a retry returns the stored result and n
 claims a second nonce; same key with a different request is `409`). `503` while a Nonce
 Gap is open. `asset_id` resolves through the one canonical Asset Registry, `infra/assets.yaml`
 (`ASSETS_FILE`), mounted identically into every service that reads it.
+`GET /v1/addresses/{address}` is chain-watcher's cache-miss fallback for resolving a deposit's
+owner (`deposit-flow.md`, Address Resolution): any casing in, `200 {"user_id","chain"}`, `404` only
+when the address is genuinely not ours (any other failure is a 5xx, so the caller retries instead of
+dropping the transfer). Its fast path is the Redis hash `wallet:address_owners` (field = address
+LOWER-CASED, value = user_id), written when an address is issued. It replaces the old
+`wallet:deposit_addresses` set, which couldn't carry the owner; addresses issued before this change
+are simply not in the hash and resolve through the endpoint.
+
 `POST /v1/sign/user-address` `{user_id, to_address, asset_id, amount, chain_id}` → `{signed_raw_tx}`.
 The caller picks whose key signs but never the destination: `to_address` must equal the Hot
 Wallet or it is `403`. For a native-coin Sweep `amount` may be `"max"`: sweep everything

@@ -2,15 +2,16 @@ package storage
 
 import (
 	"context"
+	"strings"
 
 	"github.com/redis/go-redis/v9"
 )
 
-// depositAddressSet is the Redis set chain-watcher (a later phase) will
-// scan against on every incoming chain event — checking set membership
-// is O(1) instead of a Postgres round trip per transaction the chain
-// produces, most of which belong to someone else entirely.
-const depositAddressSet = "wallet:deposit_addresses"
+// AddressOwnersKey is the Redis hash chain-watcher resolves deposits with (deposit-flow.md,
+// "Address Resolution"): field = the deposit address, LOWER-CASED, value = its user_id.
+// It is a hash, not a set: chain-watcher needs the owner, not just a yes/no. (It replaces
+// the old "wallet:deposit_addresses" set, which cannot hold the owner.)
+const AddressOwnersKey = "wallet:address_owners"
 
 type Cache struct {
 	rdb *redis.Client
@@ -20,14 +21,21 @@ func NewCache(rdb *redis.Client) *Cache {
 	return &Cache{rdb: rdb}
 }
 
-// AddDepositAddress registers a newly created address in the cache.
-// Best-effort: Postgres is the source of truth, so a cache miss just
-// costs chain-watcher a fallback Postgres lookup later, it never causes
-// a missed deposit.
-func (c *Cache) AddDepositAddress(ctx context.Context, address string) error {
-	return c.rdb.SAdd(ctx, depositAddressSet, address).Err()
+// AddDepositAddress records address -> user_id the moment an address is issued.
+// Best-effort: Postgres is the source of truth, so a cache miss just costs chain-watcher a
+// fallback to GET /v1/addresses/{address}, it never causes a missed deposit.
+func (c *Cache) AddDepositAddress(ctx context.Context, address, userID string) error {
+	return c.rdb.HSet(ctx, AddressOwnersKey, strings.ToLower(address), userID).Err()
 }
 
-func (c *Cache) IsDepositAddress(ctx context.Context, address string) (bool, error) {
-	return c.rdb.SIsMember(ctx, depositAddressSet, address).Result()
+// OwnerOf returns the user owning a cached address, or ("", false) on a miss.
+func (c *Cache) OwnerOf(ctx context.Context, address string) (string, bool, error) {
+	v, err := c.rdb.HGet(ctx, AddressOwnersKey, strings.ToLower(address)).Result()
+	if err == redis.Nil {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	return v, true, nil
 }

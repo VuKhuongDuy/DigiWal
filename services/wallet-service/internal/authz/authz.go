@@ -19,6 +19,7 @@ import (
 const (
 	CNWithdrawalService = "withdrawal-service"
 	CNSweeper           = "sweeper"
+	CNChainWatcher      = "chain-watcher"
 )
 
 // Policy is the v1 authorization matrix for wallet-service, hardcoded on
@@ -30,6 +31,9 @@ var (
 	// UserAddressSigners may call POST /v1/sign/user-address — sweeper only
 	// (invariant #4): withdrawal-service's cert can never pick a user key.
 	UserAddressSigners = []string{CNSweeper}
+	// AddressLookupCallers may call GET /v1/addresses/{address}: chain-watcher only, and
+	// from day one (service-auth-mtls.md matrix) — it cannot resolve a deposit's user_id without it.
+	AddressLookupCallers = []string{CNChainWatcher}
 )
 
 // Require wraps next so only clients whose verified certificate CN is in

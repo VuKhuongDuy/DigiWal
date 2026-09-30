@@ -6,6 +6,8 @@
 // Conventions (all of them decided in the design docs unless noted):
 //   - JSON on the wire.
 //   - Amounts are decimal strings in minor units (Amount), never JSON numbers.
+//   - Deposit events carry user_id, resolved once by chain-watcher, so no consumer has to map
+//     an address to a user (deposit-flow.md, Address Resolution).
 //   - Every event carries `version` (schema version, currently 1); Decode rejects
 //     any version it doesn't know. Adding an optional field keeps version 1;
 //     renaming/removing/retyping one bumps it. (Versioning scheme: dev choice,
@@ -163,6 +165,7 @@ type DepositDetected struct {
 	AssetID     string    `json:"asset_id"`
 	FromAddress string    `json:"from_address"`
 	ToAddress   string    `json:"to_address"` // the Watched Address
+	UserID      string    `json:"user_id"`    // owner of ToAddress, resolved by chain-watcher (Address Resolution)
 	Amount      Amount    `json:"amount"`
 	BlockNumber int64     `json:"block_number"`
 	DetectedAt  time.Time `json:"detected_at"`
@@ -179,6 +182,7 @@ func (e DepositDetected) Validate() error {
 	c.uuid("asset_id", e.AssetID)
 	c.address("from_address", e.FromAddress)
 	c.address("to_address", e.ToAddress)
+	c.nonEmpty("user_id", e.UserID)
 	c.amount(e.Amount)
 	c.nonNegInt("block_number", e.BlockNumber)
 	c.present("detected_at", e.DetectedAt)
@@ -197,6 +201,7 @@ type DepositConfirmed struct {
 	AssetID     string `json:"asset_id"`
 	FromAddress string `json:"from_address"`
 	ToAddress   string `json:"to_address"`
+	UserID      string `json:"user_id"` // owner of ToAddress: the ledger credits (user_id, asset), never an address
 	Amount      Amount `json:"amount"`
 	BlockNumber int64  `json:"block_number"`
 }
@@ -212,6 +217,7 @@ func (e DepositConfirmed) Validate() error {
 	c.uuid("asset_id", e.AssetID)
 	c.address("from_address", e.FromAddress)
 	c.address("to_address", e.ToAddress)
+	c.nonEmpty("user_id", e.UserID)
 	c.amount(e.Amount)
 	c.nonNegInt("block_number", e.BlockNumber)
 	return c.err
