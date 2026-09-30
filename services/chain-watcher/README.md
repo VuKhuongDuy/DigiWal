@@ -26,7 +26,7 @@ One `Step` per poll:
    topic) and INFO-logged. The Hot Wallet address comes from `GET /v1/wallet/hot-address` on
    `wallet-service` (mTLS), asked **once at startup** with retries — never an env var — and the
    watcher refuses to scan until it has it. Restart chain-watcher if the Hot Wallet seed is ever
-   re-initialised. Deposits mis-credited by Gas Top-Ups *before* this fix are not corrected.
+   re-initialised. Deposits mis-credited by Gas Top-Ups *before* this fix are not corrected: an environment that ran the sweeper earlier is reset (ledger + chain-watcher databases and Kafka state together), not repaired (`deposit-flow.md` Open Question #14).
 3. **Confirm.** A pending transfer `ConfirmationDepth` blocks deep, whose transaction is still in the
    block we saw it in (receipt check), becomes `confirmed` via `UPDATE ... WHERE status='pending'`.
 4. **Publish.** Every recorded-but-unacknowledged event, `detected` before `confirmed`. A row is
