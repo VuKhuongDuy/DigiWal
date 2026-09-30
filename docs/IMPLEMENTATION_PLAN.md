@@ -157,14 +157,14 @@ the feature logic itself:
 
 | Service | Status | Design doc(s) |
 |---|---|---|
-| `wallet-service` | Skeleton exists (HD derive, seal/unseal, Postgres+Redis) — no signing endpoint, no tiering yet | `wallet-tiering.md`, `withdrawal-flow.md`, `service-auth-mtls.md` |
-| `chain-watcher` | Not started | `deposit-flow.md` |
-| `ledger-service` | Not started | `ledger.md`, `compliance-screening.md`, `service-auth-mtls.md` (`apply()`/`lock`/`settle`/`release` auth, all PROPOSED) |
-| `sweeper` | Not started | `deposit-flow.md` |
-| `withdrawal-service` | Not started | `withdrawal-flow.md`, `wallet-tiering.md`, `compliance-screening.md` |
-| `history-service` | Not started | `ARCHITECTURE.md` only (read-model, no dedicated design doc — schema-less enough not to need one) |
-| `api-gateway` | Not started | `docs/design/identity-auth.md` (found completely absent from this plan on Tech Lead review — a fully-designed doc with zero tasks against it; added as task 0.7 below) |
-| local signing CLI | Not started (operator tooling, not a service) | `wallet-tiering.md` |
+| `wallet-service` | **M0 done** (tasks 0.2-0.6): split Hot Wallet / user seeds; `POST /v1/sign/hot-wallet` (atomic nonce, idempotency key, Nonce-Gap flag honoured) and `POST /v1/sign/user-address` (destination pinned to the Hot Wallet); mTLS listener with per-endpoint CN allow-lists; `GET /v1/addresses/{address}`, `GET /v1/wallet/hot-address` (incl. `CN=chain-watcher`, task 2.7); Redis `address -> user_id` hash. Not yet: `withdrawal-service`'s address-lookup grant (task 3.10); deposit-address endpoints are still plain HTTP | `wallet-tiering.md`, `withdrawal-flow.md`, `service-auth-mtls.md` |
+| `chain-watcher` | **Done (M2: 2.1, 2.7):** polling, Address Resolution, reorg handling, Confirmation Depth, at-least-once `deposits.detected`/`confirmed` with `user_id`; skips Hot Wallet Outflows (invariant #17). Run in the e2e stack | `deposit-flow.md` |
+| `ledger-service` | **Done (M1: 1.1-1.8; M2: 2.2):** double-entry schema, Asset Registry, corrections via `POST /v1/ledger/transactions`, Lock/Settle/Release, balances endpoint (Total/Locked/Available), Screening List, live `deposits.confirmed` consumer; mTLS + CN authz | `ledger.md`, `compliance-screening.md`, `service-auth-mtls.md` (`apply()`/`lock`/`settle`/`release` auth, all PROPOSED) |
+| `sweeper` | **Done (M2: 2.3):** consumes `deposits.confirmed`, screening, Gas Top-Up, native and ERC-20 Sweep to the Hot Wallet, bounded retry then `ALERT`. Run in the e2e stack | `deposit-flow.md` |
+| `withdrawal-service` | Not started (M3; no code in the repo) | `withdrawal-flow.md`, `wallet-tiering.md`, `compliance-screening.md` |
+| `history-service` | **Consumer done (M2: 2.4):** MongoDB read model from the four topics. No query API (documented gap); its Mongo test is skipped without `TEST_MONGO_URI` | `ARCHITECTURE.md` only (read-model, no dedicated design doc — schema-less enough not to need one) |
+| `api-gateway` | **Done for M0/M2 (0.7, 2.5):** `POST /users`, API-key auth middleware, `GET /v1/deposit-address`, `GET /v1/balances`. No withdrawal or whitelist routes yet (3.7) | `docs/design/identity-auth.md` (found completely absent from this plan on Tech Lead review — a fully-designed doc with zero tasks against it; added as task 0.7 below) |
+| local signing CLI | Not started (M4; no code in the repo; operator tooling, not a service) | `wallet-tiering.md` |
 
 ## Milestone 0 — Foundations (no user-visible feature yet)
 
