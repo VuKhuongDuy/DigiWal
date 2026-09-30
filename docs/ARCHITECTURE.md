@@ -41,6 +41,75 @@ you instead of letting you fake them:
 Event bus (Kafka topics): `deposits.detected`, `deposits.confirmed`,
 `withdrawals.broadcast`, `withdrawals.confirmed`, `transfers.internal`.
 
+## System diagram
+
+```mermaid
+flowchart TB
+    Client(["User / Client"])
+
+    subgraph API["API layer"]
+        Gateway["api-gateway<br/>REST, API-key auth<br/>(identity-auth.md)"]
+    end
+
+    subgraph Core["Core services"]
+        Wallet["wallet-service<br/>≥2 sealed HD seeds, signing<br/>(wallet-tiering.md)"]
+        Watcher["chain-watcher<br/>observes deposits<br/>(deposit-flow.md)"]
+        Sweeper["sweeper<br/>gas top-up + sweep to Hot<br/>(deposit-flow.md)"]
+        Ledger["ledger-service<br/>double-entry, Lock/Settle/Release<br/>(ledger.md)"]
+        Withdrawal["withdrawal-service<br/>withdrawal state machine<br/>(withdrawal-flow.md)"]
+        History["history-service<br/>read model<br/>(no dedicated design doc)"]
+    end
+
+    subgraph Stores["Data stores — shared infra, per-service schema"]
+        PG[("Postgres<br/>wallets · ledger+locks · withdrawals · watermark")]
+        Redis[("Redis<br/>known-address cache · optional fast-fail lock")]
+        Kafka{{"Kafka<br/>deposits.detected / .confirmed<br/>withdrawals.broadcast / .confirmed"}}
+        Mongo[("MongoDB<br/>denormalized tx history")]
+    end
+
+    Chain(["EVM testnet RPC<br/>Sepolia / local Anvil"])
+
+    Client -->|"Authorization: Bearer api_key"| Gateway
+    Gateway -->|"deposit-address"| Wallet
+    Gateway -->|"balances"| Ledger
+    Gateway -->|"withdrawals, whitelist"| Withdrawal
+    Gateway -.->|"history — GAP, not designed"| History
+
+    Watcher -->|poll/subscribe| Chain
+    Watcher --> Redis
+    Watcher --> PG
+    Watcher -->|produce| Kafka
+
+    Kafka -->|deposits.confirmed| Sweeper
+    Kafka -->|deposits.confirmed| Ledger
+    Kafka -->|all 4 topics| History
+
+    Sweeper -->|"sign — mTLS"| Wallet
+    Sweeper --> Chain
+
+    Withdrawal -->|"lock / settle / release,<br/>apply(correction) — mTLS"| Ledger
+    Withdrawal -->|"sign — mTLS"| Wallet
+    Withdrawal --> Chain
+    Withdrawal -->|publish| Kafka
+    Withdrawal -.->|"fast-fail lock, optional —<br/>never load-bearing"| Redis
+
+    Wallet --> PG
+    Ledger --> PG
+    Withdrawal --> PG
+    History --> Mongo
+```
+
+Solid arrows are decided/built-toward calls; dashed arrows are either
+optional (the Redis fast-fail lock, never load-bearing — `ledger.md`
+Open Questions #1) or a named GAP (`GET /v1/history` — `history-service`
+has no dedicated design doc yet, per the module map in
+`docs/IMPLEMENTATION_PLAN.md`). `transfers.internal` and its
+`api-gateway`/`ledger-service` endpoint are omitted entirely — also a
+GAP (`docs/design/integration-contracts.md` §1), not yet designed, so
+drawing it here would imply more than exists. Full wire-level detail
+(exact payloads, idempotency keys, auth) for every arrow above:
+`docs/design/integration-contracts.md`.
+
 ## Data model split (the actual point of using 4 different stores)
 
 - **Postgres** — anything that must be transactionally correct: user
