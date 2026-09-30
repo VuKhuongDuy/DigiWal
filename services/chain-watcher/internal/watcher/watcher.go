@@ -61,6 +61,11 @@ type Watcher struct {
 	// (invariant #2: refreshed periodically, expected to change rarely).
 	LoadRegistry func() (*registry.Registry, error)
 	Config       Config
+	// HotWallet is wallet-service's Hot Wallet address, fetched once at startup. Transfers sent
+	// from it (Gas Top-Ups) are Hot Wallet Outflow, never a deposit (invariant #17). Required:
+	// with it unset the watcher refuses to scan, because scanning would advance the watermark
+	// past outflow it should have skipped.
+	HotWallet common.Address
 
 	reg     *registry.Registry
 	chainID int64
@@ -102,6 +107,9 @@ func (w *Watcher) Step(ctx context.Context) error {
 }
 
 func (w *Watcher) sync(ctx context.Context) error {
+	if w.HotWallet == (common.Address{}) {
+		return errors.New("hot wallet address not set: refusing to scan (deposit-flow.md invariant #17)")
+	}
 	if err := w.refreshRegistry(); err != nil {
 		return err
 	}
@@ -318,6 +326,10 @@ func (f *finder) native(b *chain.Block) error {
 		if tx.To == nil || tx.Value == nil || tx.Value.Sign() <= 0 {
 			continue
 		}
+		if tx.From == f.w.HotWallet { // Hot Wallet Outflow, e.g. a Gas Top-Up: not a deposit
+			log.Printf("skipping Hot Wallet Outflow %s (native, to %s)", tx.Hash, tx.To)
+			continue
+		}
 		o, err := f.resolve(*tx.To)
 		if err != nil {
 			return err
@@ -357,6 +369,12 @@ func (f *finder) erc20(l chain.Log) error {
 	}
 	amount := new(big.Int).SetBytes(l.Data)
 	if amount.Sign() == 0 {
+		return nil
+	}
+	// The Transfer log's `from`, not the transaction sender (a contract may move tokens on
+	// someone's behalf).
+	if common.BytesToAddress(l.Topics[1].Bytes()) == f.w.HotWallet {
+		log.Printf("skipping Hot Wallet Outflow %s:%d (ERC-20)", l.TxHash, l.Index)
 		return nil
 	}
 	to := common.BytesToAddress(l.Topics[2].Bytes())

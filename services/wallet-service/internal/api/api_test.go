@@ -59,7 +59,7 @@ func call(t *testing.T, h *fakeHot, cn, body string) *httptest.ResponseRecorder 
 
 func TestSignHotWallet_Authorization(t *testing.T) {
 	for cn, want := range map[string]int{
-		"withdrawal-service": 200, "sweeper": 200, "api-gateway": 403, "": 403,
+		"withdrawal-service": 200, "sweeper": 200, "chain-watcher": 403, "api-gateway": 403, "": 403,
 	} {
 		h := &fakeHot{resp: signing.Response{SignedRawTx: "0x01", Nonce: 3}}
 		rec := call(t, h, cn, `{"idempotency_key":"k"}`)
@@ -127,7 +127,7 @@ func callUser(t *testing.T, u *fakeUser, cn string) *httptest.ResponseRecorder {
 
 // service-auth-mtls.md invariant #4: withdrawal-service can never pick a user key.
 func TestSignUserAddress_OnlySweeperMayCall(t *testing.T) {
-	for cn, want := range map[string]int{"sweeper": 200, "withdrawal-service": 403, "api-gateway": 403, "": 403} {
+	for cn, want := range map[string]int{"sweeper": 200, "withdrawal-service": 403, "chain-watcher": 403, "api-gateway": 403, "": 403} {
 		u := &fakeUser{}
 		if got := callUser(t, u, cn).Code; got != want {
 			t.Errorf("CN=%q: %d, want %d", cn, got, want)
@@ -226,7 +226,7 @@ func TestHotAddress(t *testing.T) {
 		return rec
 	}
 	srv := &Server{hotSigner: &fakeHot{}}
-	for cn, want := range map[string]int{"sweeper": 200, "withdrawal-service": 200, "chain-watcher": 403, "api-gateway": 403, "": 403} {
+	for cn, want := range map[string]int{"sweeper": 200, "withdrawal-service": 200, "chain-watcher": 200, "api-gateway": 403, "": 403} {
 		if got := get(srv, cn).Code; got != want {
 			t.Errorf("CN=%q: %d, want %d", cn, got, want)
 		}

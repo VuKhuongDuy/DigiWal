@@ -6,6 +6,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -22,6 +23,7 @@ import (
 	"digiwal/services/chain-watcher/internal/store"
 	"digiwal/services/chain-watcher/internal/watcher"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -59,6 +61,15 @@ func main() {
 		&http.Client{Timeout: 10 * time.Second, Transport: &http.Transport{TLSClientConfig: tlsCfg}},
 		requireEnv("WALLET_SERVICE_URL"), envDuration("NEGATIVE_CACHE_TTL", 30*time.Second))
 
+	// Hot Wallet Outflow (Gas Top-Ups) must never be recorded as a deposit (deposit-flow.md
+	// invariant #17), so the address is needed before the first block is scanned. wallet-service
+	// may still be starting: retry for a while, then exit non-zero.
+	walletHTTP := &http.Client{Timeout: 10 * time.Second, Transport: &http.Transport{TLSClientConfig: tlsCfg}}
+	hot, err := fetchHotAddress(ctx, walletHTTP, requireEnv("WALLET_SERVICE_URL"))
+	if err != nil {
+		log.Fatal(err)
+	}
+
 	pub := publisher.NewKafka(strings.Split(requireEnv("KAFKA_BROKERS"), ","))
 	defer pub.Close()
 
@@ -74,7 +85,7 @@ func main() {
 		cfg.StartBlock = &n
 	}
 	w := &watcher.Watcher{
-		Chain: c, Store: st, Resolver: res, Publisher: pub, Config: cfg,
+		Chain: c, Store: st, Resolver: res, Publisher: pub, Config: cfg, HotWallet: hot,
 		LoadRegistry: func() (*registry.Registry, error) { return registry.Load(assetsFile) },
 	}
 
@@ -110,8 +121,26 @@ func main() {
 		}
 	}
 
-	log.Printf("chain-watcher running: chain %d, confirmation depth %d", chainID, cfg.ConfirmationDepth)
+	log.Printf("chain-watcher running: chain %d, confirmation depth %d, hot wallet %s", chainID, cfg.ConfirmationDepth, hot.Hex())
 	w.Run(ctx, envDuration("POLL_INTERVAL", 6*time.Second))
+}
+
+func fetchHotAddress(ctx context.Context, c *http.Client, walletURL string) (common.Address, error) {
+	var last error
+	for i := 0; i < 30; i++ {
+		addr, err := resolver.FetchHotAddress(ctx, c, walletURL)
+		if err == nil {
+			return addr, nil
+		}
+		last = err
+		log.Printf("asking wallet-service for the hot wallet address (attempt %d/30): %v", i+1, err)
+		select {
+		case <-ctx.Done():
+			return common.Address{}, ctx.Err()
+		case <-time.After(4 * time.Second):
+		}
+	}
+	return common.Address{}, fmt.Errorf("could not learn the hot wallet address from wallet-service: %w", last)
 }
 
 func requireEnv(key string) string {

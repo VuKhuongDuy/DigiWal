@@ -104,6 +104,37 @@ func (r *Remote) lookup(ctx context.Context, addr common.Address) (string, bool,
 	}
 }
 
+// FetchHotAddress asks wallet-service (GET /v1/wallet/hot-address, over mTLS) for the address it
+// derived for the Hot Wallet. chain-watcher needs it only to skip Hot Wallet Outflow
+// (deposit-flow.md invariant #17); like sweeper it asks once at startup and never takes it from
+// config, which could drift from what wallet-service actually derived (invariant #15).
+func FetchHotAddress(ctx context.Context, httpClient *http.Client, walletURL string) (common.Address, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(walletURL, "/")+"/v1/wallet/hot-address", nil)
+	if err != nil {
+		return common.Address{}, err
+	}
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return common.Address{}, fmt.Errorf("calling wallet-service hot-address: %w", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<12))
+	if resp.StatusCode != http.StatusOK {
+		return common.Address{}, fmt.Errorf("wallet-service hot-address answered %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	var out struct {
+		Address string `json:"address"`
+	}
+	if err := json.Unmarshal(body, &out); err != nil || !common.IsHexAddress(out.Address) {
+		return common.Address{}, fmt.Errorf("wallet-service returned an unusable hot address: %q", body)
+	}
+	a := common.HexToAddress(out.Address)
+	if a == (common.Address{}) {
+		return common.Address{}, errors.New("wallet-service returned the zero address as the hot address")
+	}
+	return a, nil
+}
+
 func (r *Remote) negativelyCached(addr common.Address) bool {
 	if r.negTTL <= 0 {
 		return false

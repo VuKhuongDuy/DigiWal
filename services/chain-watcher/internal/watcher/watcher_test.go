@@ -36,6 +36,7 @@ const (
 var (
 	alice     = common.HexToAddress("0x70997970C51812dc3A010C7d01b50e0d17dc79C8")
 	bob       = common.HexToAddress("0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC")
+	hotWallet = common.HexToAddress("0x9965507D1a55bcC2695C58ba16FB37d819B0A4dc")
 	stranger  = common.HexToAddress("0x90F79bf6EB2c4f870365E785982E1f101E93b906")
 	sender    = common.HexToAddress("0x15d34AAf54267DB7D7c367839AAf71A00a2C6A65")
 	token     = common.HexToAddress("0x5FbDB2315678afecb367f032d93F642f64180aa3")
@@ -275,7 +276,7 @@ func newRig(t *testing.T, start *int64) *rig {
 func (r *rig) newWatcher(start *int64) *Watcher {
 	reg := &registry.Registry{Native: nativeAsset, ERC20: map[common.Address]string{token: tokenAsset}}
 	return &Watcher{
-		Chain: r.ch, Store: r.st, Resolver: r.res, Publisher: r.pub,
+		Chain: r.ch, Store: r.st, Resolver: r.res, Publisher: r.pub, HotWallet: hotWallet,
 		LoadRegistry: func() (*registry.Registry, error) { return reg, nil },
 		Config:       Config{ConfirmationDepth: depth, BatchBlocks: 4, StartBlock: start},
 	}
@@ -810,5 +811,74 @@ func TestLogsFromAnotherBranchThanTheScannedBlocksAreRejected(t *testing.T) {
 	}
 	if wm, _, _ := r.st.Watermark(context.Background(), chainID); wm != 0 {
 		t.Fatalf("watermark = %d", wm)
+	}
+}
+
+// ---- Hot Wallet Outflow (deposit-flow.md invariant #17) ------------------------------------
+
+func TestHotWalletOutflowIsNotADeposit(t *testing.T) {
+	r := newRig(t, zero())
+	gasTopUp := nativeTx(hotWallet, alice, oneEther)
+	realNative := nativeTx(sender, alice, oneEther)
+	outTT := transferLog(token, hotWallet, bob, big.NewInt(50)) // ERC-20 sent from the Hot Wallet
+	realTT := transferLog(token, sender, bob, big.NewInt(60))
+	r.ch.mine(func(b *fakeBlock) { b.Txs = []chain.Tx{gasTopUp, realNative}; b.logs = []chain.Log{outTT, realTT} })
+
+	r.step()
+	if r.get(gasTopUp.Hash, events.NativeLogIndex) != nil || r.get(outTT.TxHash, 0) != nil {
+		t.Fatal("recorded Hot Wallet Outflow as a deposit")
+	}
+	if r.get(realNative.Hash, events.NativeLogIndex) == nil || r.get(realTT.TxHash, 1) == nil /* log index 1 in its block */ {
+		t.Fatal("dropped a real deposit from another sender")
+	}
+	if n := len(r.pub.on(events.TopicDepositsDetected)); n != 2 {
+		t.Fatalf("detected events = %d, want only the 2 real deposits", n)
+	}
+	// The outflow is skipped before Address Resolution: only the two real senders' recipients were asked.
+	if r.res.calls != 2 {
+		t.Fatalf("resolver calls = %d, want 2 (alice, bob)", r.res.calls)
+	}
+
+	// Past Confirmation Depth still nothing for the outflow, and the watermark advanced.
+	r.ch.mineEmpty(depth + 1)
+	r.step()
+	if n := len(r.pub.on(events.TopicDepositsConfirmed)); n != 2 {
+		t.Fatalf("confirmed events = %d, want 2", n)
+	}
+	if wm, ok, err := r.st.Watermark(context.Background(), chainID); err != nil || !ok || wm < r.ch.head() {
+		t.Fatalf("watermark = %d ok=%v (%v), want it at the head %d", wm, ok, err, r.ch.head())
+	}
+}
+
+func TestHotWalletOutflowSkipSurvivesRescanAndReorg(t *testing.T) {
+	r := newRig(t, zero())
+	gasTopUp := nativeTx(hotWallet, alice, oneEther)
+	r.ch.mine(func(b *fakeBlock) { b.Txs = []chain.Tx{gasTopUp} })
+	r.step()
+	// A restarted watcher rescans nothing new; a reorg re-including the same tx in another block
+	// is decided the same way, because the decision depends only on the sender.
+	r.w = r.newWatcher(nil)
+	r.step()
+	r.ch.reorgTo(0, func(b *fakeBlock) { b.Txs = []chain.Tx{gasTopUp} })
+	r.ch.mineEmpty(depth + 1)
+	r.step()
+	if r.get(gasTopUp.Hash, events.NativeLogIndex) != nil || len(r.pub.on(events.TopicDepositsDetected)) != 0 {
+		t.Fatal("Hot Wallet Outflow was recorded after a rescan/reorg")
+	}
+}
+
+func TestNoScanUntilTheHotWalletAddressIsKnown(t *testing.T) {
+	r := newRig(t, zero())
+	r.w.HotWallet = common.Address{}
+	tx := nativeTx(hotWallet, alice, oneEther)
+	r.ch.mine(func(b *fakeBlock) { b.Txs = []chain.Tx{tx} })
+	if err := r.w.Step(context.Background()); err == nil {
+		t.Fatal("Step scanned without a Hot Wallet address")
+	}
+	if wm, ok, err := r.st.Watermark(context.Background(), chainID); err != nil || ok {
+		t.Fatalf("watermark = %d ok=%v (%v): a watermark exists though nothing was scanned", wm, ok, err)
+	}
+	if r.res.calls != 0 {
+		t.Fatalf("resolver was called %d times", r.res.calls)
 	}
 }

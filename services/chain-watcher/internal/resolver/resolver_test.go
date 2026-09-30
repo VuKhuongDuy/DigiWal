@@ -154,3 +154,35 @@ func TestRedisDownFallsBackToWalletServiceNotToNotOurs(t *testing.T) {
 		t.Fatalf("got %q %v %v hits=%d", uid, ok, err, hits.Load())
 	}
 }
+
+func TestFetchHotAddress(t *testing.T) {
+	const hot = "0x9965507D1a55bcC2695C58ba16FB37d819B0A4dc"
+	serve := func(status int, body string) *httptest.Server {
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/v1/wallet/hot-address" {
+				t.Errorf("path = %s", r.URL.Path)
+			}
+			w.WriteHeader(status)
+			_, _ = w.Write([]byte(body))
+		}))
+	}
+	ok := serve(200, `{"address":"`+hot+`"}`)
+	defer ok.Close()
+	got, err := FetchHotAddress(context.Background(), ok.Client(), ok.URL+"/")
+	if err != nil || got != common.HexToAddress(hot) {
+		t.Fatalf("got %s, %v", got, err)
+	}
+	// Anything but a clean 200 with a real address is an error: never a zero/empty Hot Wallet,
+	// which would silently switch the Hot Wallet Outflow filter off.
+	for name, srv := range map[string]*httptest.Server{
+		"forbidden":    serve(403, `{"error":"forbidden"}`),
+		"unconfigured": serve(503, `{"error":"no hot wallet"}`),
+		"garbage":      serve(200, `{"address":"nope"}`),
+		"zero address": serve(200, `{"address":"0x0000000000000000000000000000000000000000"}`),
+	} {
+		if a, err := FetchHotAddress(context.Background(), srv.Client(), srv.URL); err == nil {
+			t.Errorf("%s: accepted %s", name, a)
+		}
+		srv.Close()
+	}
+}

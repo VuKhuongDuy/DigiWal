@@ -20,6 +20,13 @@ One `Step` per poll:
    `404` means "not ours"; any other failure aborts the range and it is retried, so a transient
    outage can never drop a deposit (invariant #1). Transfers are recorded as `pending` and the
    watermark advances **in the same transaction** (invariant #4).
+   **Hot Wallet Outflow is skipped** (invariant #17): a transfer *sent from* the Hot Wallet — the
+   sweeper's Gas Top-Up into a deposit address — is not a deposit, so no row is written and nothing is
+   published. It is checked before Address Resolution (native: `tx.from`; ERC-20: the log's `from`
+   topic) and INFO-logged. The Hot Wallet address comes from `GET /v1/wallet/hot-address` on
+   `wallet-service` (mTLS), asked **once at startup** with retries — never an env var — and the
+   watcher refuses to scan until it has it. Restart chain-watcher if the Hot Wallet seed is ever
+   re-initialised. Deposits mis-credited by Gas Top-Ups *before* this fix are not corrected.
 3. **Confirm.** A pending transfer `ConfirmationDepth` blocks deep, whose transaction is still in the
    block we saw it in (receipt check), becomes `confirmed` via `UPDATE ... WHERE status='pending'`.
 4. **Publish.** Every recorded-but-unacknowledged event, `detected` before `confirmed`. A row is
