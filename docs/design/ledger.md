@@ -359,7 +359,7 @@ sequenceDiagram
     else new transaction
         PG-->>Ledger: 1 row affected
         opt source_type = 'correction'
-            Ledger->>PG: for each entry, look up corrects_entry_id's original;<br/>recompute this entry's (account_id, amount) as its exact negation<br/>— never trust the caller's amount (invariant #11)
+            Ledger->>PG: for each entry, look up corrects_entry_id's original,<br/>recompute this entry's (account_id, amount) as its exact negation<br/>— never trust the caller's amount (invariant #11)
         end
         loop each entry
             Ledger->>PG: UPDATE accounts SET total_balance = total_balance + amount<br/>WHERE id=... [AND total_balance - locked_balance >= -amount if debit —<br/>Available Balance, not bare total_balance (invariant #9)]
@@ -409,7 +409,7 @@ sequenceDiagram
 
     alt withdrawal confirms
         WD->>Ledger: settle(idempotency_key)
-        Note over Ledger,PG: everything below is ONE Postgres transaction —<br/>the lock-status guard, both balance updates, and both entry inserts.<br/>Splitting the status flip from the balance/entry writes (as an earlier<br/>draft did) let a crash in between leave a lock 'settled' with no Entry;<br/>calling the generic apply() above as a second nested transaction<br/>would also double-decrement total_balance (once here, once inside it) —<br/>both bugs are why Settle is its own inline operation, not a two-step call.
+        Note over Ledger,PG: everything below is ONE Postgres transaction —<br/>the lock-status guard, both balance updates, and both entry inserts.<br/>Splitting the status flip from the balance/entry writes (as an earlier<br/>draft did) let a crash in between leave a lock 'settled' with no Entry,<br/>calling the generic apply() above as a second nested transaction<br/>would also double-decrement total_balance (once here, once inside it) —<br/>both bugs are why Settle is its own inline operation, not a two-step call.
         Ledger->>PG: BEGIN
         Ledger->>PG: UPDATE locks SET status='settled', resolved_at=now()<br/>WHERE idempotency_key=$key AND status='active'<br/>RETURNING account_id, amount
         alt zero rows (already resolved, or unknown key)

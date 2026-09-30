@@ -450,8 +450,7 @@ sequenceDiagram
     WD->>WD: INSERT whitelist_entries (status=pending, added_at=now())<br/>ON CONFLICT (user_id, address) DO NOTHING
     Note over WD: not usable for withdrawal yet<br/>(re-adding an existing pending/active entry no-ops, invariant #15)
 
-    loop 24h Whitelist Cooldown elapses
-    end
+    Note over WD: 24h Whitelist Cooldown elapses
 
     Note over WD: on next validate() call for this user,<br/>now() >= added_at + 24h → entry counts as active<br/>(computed on read, no background job)
 ```
