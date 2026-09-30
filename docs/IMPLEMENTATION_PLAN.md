@@ -163,7 +163,7 @@ the feature logic itself:
 | `sweeper` | Not started | `deposit-flow.md` |
 | `withdrawal-service` | Not started | `withdrawal-flow.md`, `wallet-tiering.md`, `compliance-screening.md` |
 | `history-service` | Not started | `ARCHITECTURE.md` only (read-model, no dedicated design doc — schema-less enough not to need one) |
-| `api-gateway` | Not started | `ARCHITECTURE.md` only |
+| `api-gateway` | Not started | `docs/design/identity-auth.md` (found completely absent from this plan on Tech Lead review — a fully-designed doc with zero tasks against it; added as task 0.7 below) |
 | local signing CLI | Not started (operator tooling, not a service) | `wallet-tiering.md` |
 
 ## Milestone 0 — Foundations (no user-visible feature yet)
@@ -176,13 +176,15 @@ the feature logic itself:
 | 0.4 | `wallet-service` | `withdrawal-flow.md` invariants #6, #7, #16 | Hot Wallet nonce allocation table (atomic `UPDATE...RETURNING`, same pattern as existing `allocateIndex`) + Nonce-Gap freeze flag + the idempotency-key persistence layer task 0.3 depends on | 0.3 |
 | 0.5 | `wallet-service` | `deposit-flow.md` invariants #6, #7, #12; `integration-contracts.md` §2 | `POST /v1/sign/user-address {user_id, to_address, asset_id, amount, chain_id}` → `{signed_raw_tx}`, over mTLS. Server-enforces `to_address == Hot Wallet`, never trusting the caller. Sources the signing user address's own EVM nonce via a live `eth_getTransactionCount(address, "pending")` RPC read (**PROPOSED**, `deposit-flow.md` invariant #12) rather than a DB counter. No idempotency key needed (idempotent by construction — caller always signs the live balance). | 0.2, 0.6 |
 | 0.6 | `infra/pki`, `wallet-service` | `docs/design/service-auth-mtls.md` | One-time CA generation script (`infra/pki/gen-ca.sh`) + per-service leaf-cert script (`infra/pki/gen-leaf.sh`), gitignored output, docker-compose volume-mount wiring for `wallet-service`'s (and later `withdrawal-service`'s/`sweeper`'s/`chain-watcher`'s) certs; `wallet-service` gains an mTLS listener (`tls.RequireAndVerifyClientCert`) separate from its plain `/healthz` listener, plus the CN-authorization middleware enforcing `service-auth-mtls.md`'s matrix (`hot-wallet` → `{withdrawal-service, sweeper}`, `user-address` → `{sweeper}`, `addresses/{address}` → `{chain-watcher}`) before any handler logic runs. **Includes the new `GET /v1/addresses/{address}` endpoint** (`integration-contracts.md` §2, fixes the `user_id` gap `deposit-flow.md`'s Address Resolution closes) — `wallet_addresses.address` is already `UNIQUE`-indexed, so this is a new query + handler, no migration. **Also changes `wallet-service`'s Redis cache from a set to a hash** (`internal/storage/redis.go`'s `AddDepositAddress`/`IsDepositAddress` → store and return `user_id`, not just membership), populated at `CreateAddress` time | — |
+| 0.7 | `api-gateway` | `docs/design/identity-auth.md` | **New — found on Tech Lead review that this fully-designed doc had zero tasks against it anywhere in this plan.** `api-gateway`'s own Postgres schema (`users`, `api_keys`, `docs/ARCHITECTURE.md`'s row updated to match — Open Questions #1, resolved), `POST /users` (mint `user_id` + plaintext API Key, shown once, invariant #1), the `Authorization: Bearer <api_key>` middleware that resolves and injects the authenticated `user_id` on every other route and rejects with `401` otherwise (invariants #2, #3, #6 — live `key_hash` lookup, no blocklist needed). This is a hard dependency for every other `api-gateway` task (2.5, 3.7) — none of their client-facing endpoints are safe to build against a client-supplied `user_id` until this exists | — |
 
 **DoD:** `wallet-service` can sign a Hot-Wallet transaction over mTLS
 and hand out monotonic nonces, and can sign a Sweep transaction from a
 specified user address to the Hot Wallet only, with both signing
 endpoints rejecting any caller whose certificate CN isn't on that
-endpoint's allow-list; nothing calls either endpoint for real yet.
-Estimated 6 PRs.
+endpoint's allow-list; `api-gateway` can mint a user + API Key and
+reject any request without a valid one; nothing calls either signing
+endpoint for real yet. Estimated 7 PRs.
 
 ## Milestone 1 — Ledger core (`ledger-service`)
 
@@ -209,9 +211,9 @@ or call `lock`/`settle`/`release` directly). Estimated 7-8 PRs.
 |---|---|---|---|---|
 | 2.1 | `chain-watcher` | `deposit-flow.md` | Postgres schema (watermark, `observed_transfers`, now including `user_id` per invariant #1's rewrite), Sepolia RPC polling, Address Resolution (Redis `HGET` against `wallet-service`'s address→`user_id` hash, falling back to `GET /v1/addresses/{address}` over mTLS with `chain-watcher`'s own leaf certificate from task 0.6 on a cache miss — never a direct cross-service Postgres read), Confirmation Depth = 32 blocks, publishes `deposits.detected`/`deposits.confirmed` with `user_id` included, exact payload per `integration-contracts.md` §1 | 0.1, 0.6 |
 | 2.2 | `ledger-service` | 2.1's real topic | Wire M1.4's consumer scaffold to the live topic | 1.5, 2.1 |
-| 2.3 | `sweeper` | `deposit-flow.md` invariants (Gas Top-Up, Sweep idempotency #8, #10, #12, #13) | Consumes `deposits.confirmed`, independent compliance check, Gas Top-Up (0.001 ETH) via `wallet-service /v1/sign/hot-wallet` with idempotency key `gas-topup:{chain_id}:{tx_hash}:{log_index}` (**PROPOSED**), fresh-balance-read before signing, sweeps to Hot Wallet via `wallet-service /v1/sign/user-address` — calls made with `sweeper`'s own leaf certificate (`CN=sweeper`, from task 0.6's tooling) | 0.3, 0.5, 2.1, 0.6 |
+| 2.3 | `sweeper` | `deposit-flow.md` invariants (Gas Top-Up, Sweep idempotency #8, #10, #12, #13) | Asset Registry loader (same static-config pattern as task 1.2 — fixes a gap found on Tech Lead review: `sweeper` needs `asset_type`/`contract_address` to branch native-vs-ERC20 for both the balance query and the signing call, `ledger.md`'s Bounded context(s)). Consumes `deposits.confirmed` (now carrying `user_id`, needed for `POST /v1/sign/user-address`'s request — `deposit-flow.md`'s Sweep term), independent compliance check, Gas Top-Up (0.001 ETH) via `wallet-service /v1/sign/hot-wallet` with idempotency key `gas-topup:{chain_id}:{tx_hash}:{log_index}` (**PROPOSED**), fresh-balance-read before signing, sweeps to Hot Wallet via `wallet-service /v1/sign/user-address` — calls made with `sweeper`'s own leaf certificate (`CN=sweeper`, from task 0.6's tooling) | 0.3, 0.5, 2.1, 0.6 |
 | 2.4 | `history-service` | `deposits.confirmed`/`deposits.detected` | Minimal MongoDB consumer, denormalized read model | 2.1 |
-| 2.5 | `api-gateway` | — | `GET /deposit-address` (proxies `wallet-service`), `GET /balances` (proxies `ledger-service`, returns `total_balance`/`locked_balance`/`available_balance` per asset — `integration-contracts.md` §2, `ledger.md`'s Total/Locked/Available split) | 1.3 |
+| 2.5 | `api-gateway` | — | `GET /deposit-address` (proxies `wallet-service`), `GET /balances` (proxies `ledger-service`, returns `total_balance`/`locked_balance`/`available_balance` per asset — `integration-contracts.md` §2, `ledger.md`'s Total/Locked/Available split). Both behind task 0.7's auth middleware — `user_id` comes from the resolved API Key, never a client-supplied field | 1.3, 0.7 |
 | 2.6 | all of the above | — | e2e test against a local Sepolia fork (Anvil, now running via `docker compose up anvil` — see `infra/docker-compose.yml` and `docs/DEVELOPMENT.md`): simulate a deposit, assert balance updates | 2.1–2.5 |
 
 **DoD:** a user can request a deposit address, send testnet ETH, and
@@ -223,12 +225,12 @@ see their balance update after 32 blocks — first real demo. Estimated
 | Task | Module | Input | Output | Depends on |
 |---|---|---|---|---|
 | 3.1 | `withdrawal-service` | `withdrawal-flow.md` invariant #11 | Schema (state machine `requested→validated→reserved→signed→broadcast→confirmed`), `POST /withdrawals` idempotent creation (`INSERT...ON CONFLICT DO NOTHING` first, before anything else) | 0.1 |
-| 3.2 | `withdrawal-service` | invariant #10, whitelist (below), `compliance-screening.md` | Validation: min-withdrawal-amount, whitelist-active check, blacklist check — all before any ledger reservation | 3.1, 3.6 |
+| 3.2 | `withdrawal-service` | invariant #10, whitelist (below), `compliance-screening.md` | Asset Registry loader (same static-config pattern as task 1.2 — fixes a gap found on Tech Lead review: `withdrawal-service` needs `min_withdrawal_amount` for this task's own check, `ledger.md`'s Bounded context(s)). Validation: min-withdrawal-amount, whitelist-active check, blacklist check — all before any ledger reservation | 3.1, 3.6 |
 | 3.3 | `withdrawal-service` | invariants #1–#6, #16 | Reserve (via `ledger-service`'s `POST /v1/ledger/locks` — `lock(idempotency_key, user_id, asset_id, amount)`, never `account_id`) → sign (via `wallet-service /v1/sign/hot-wallet`, passing the Withdrawal Request's own `idempotency_key`, using `withdrawal-service`'s own leaf certificate from task 0.6) → broadcast → poll to Withdrawal Confirmation Depth = 64 blocks → **Settle** (`.../{key}/settle`) at the `confirmed` transition, posting the real debit for the first time. Any failure before `confirmed` (signing failure, broadcast failure, abandonment) calls **Release** (`.../{key}/release`) instead — no Entry ever existed to compensate (`withdrawal-flow.md`'s revised invariant #3) | 3.2, 0.3, 0.4, 0.6, 1.7 |
 | 3.4 | `withdrawal-service` | invariants #7–#9 | Nonce Gap detection, `disputed` state, freeze via `wallet-service`, operator-resolution stub (manual DB action, no UI yet) | 3.3, 0.4 |
 | 3.5 | `withdrawal-service` | invariant #9 (revised scope — see `withdrawal-flow.md`'s Compensating Entry definition) | Compensating Entry — **only** reached from `disputed` → abandoned (post-Settle reorg case; the ordinary pre-confirm failure path is task 3.3's Release, not this) — via `ledger-service`'s `POST /v1/ledger/transactions` with `source_type='correction'`, the deterministic `{idempotency_key}:refund` key, and `corrects_entry_id` set on every entry (`ledger.md` invariant #11 — the endpoint recomputes the amount server-side, `withdrawal-service` never gets to assert it) | 3.4 |
 | 3.6 | `withdrawal-service` | new Withdrawal Whitelist section | Add (pending → active after 24h cooldown) / remove (instant) whitelist entries | 3.1 |
-| 3.7 | `api-gateway` | — | `POST /withdrawals`, `POST /whitelist`, `DELETE /whitelist/:id` | 3.2, 3.6 |
+| 3.7 | `api-gateway` | — | `POST /withdrawals`, `POST /whitelist`, `DELETE /whitelist/:id` — all behind task 0.7's auth middleware | 3.2, 3.6, 0.7 |
 | 3.8 | all of the above | — | e2e test incl. a forced Nonce Gap (reorg simulation on the local fork, via Anvil's `anvil_snapshot`/`anvil_revert` — `docker compose up anvil`, see `docs/DEVELOPMENT.md`) | 3.1–3.5 |
 | 3.9 | `withdrawal-service` | `withdrawal-flow.md` invariant #17 (new — Reaper) | Periodic Reaper loop: auto-Release `reserved`/`signed` requests past the Stuck Reservation Timeout; auto-Release `broadcast` requests past the Stuck Broadcast Timeout **only when** a live nonce read proves the Hot Wallet's on-chain nonce has already passed this tx's nonce; otherwise alert an operator rather than guess. **Both timeout values are Tech Lead's call** (`withdrawal-flow.md` Open Questions #3), same shape as `wallet-tiering.md`'s Hot Floor/Ceiling — confirm before this task starts | 3.3, 3.4 |
 
@@ -264,22 +266,24 @@ on how many PRs you can review per day, not developer headcount:
 
 | Milestone | PRs | Cumulative |
 |---|---|---|
-| 0 — Foundations | 6 | 6 |
-| 1 — Ledger core | 7-8 | 13-14 |
-| 2 — Deposit flow | 6 | 19-20 |
-| 3 — Withdrawal flow | 9-10 | 28-30 |
-| 4 — Tiering tooling | 3 | 31-33 |
-| 5 — Compliance completion | 2 | 33-35 |
+| 0 — Foundations | 7 | 7 |
+| 1 — Ledger core | 7-8 | 14-15 |
+| 2 — Deposit flow | 6 | 20-21 |
+| 3 — Withdrawal flow | 9-10 | 29-31 |
+| 4 — Tiering tooling | 3 | 32-34 |
+| 5 — Compliance completion | 2 | 34-36 |
 
-(Milestones 1 and 3 both grew by ~2 PRs from the original estimate —
-`ledger.md`'s Lock/Settle/Release split added tasks 1.7/1.8, and
-`withdrawal-flow.md`'s new Reaper invariant added task 3.9, both real
-scope surfaced by Tech Lead review, not padding.) At a sustainable pace
-of 2-4 reviewed PRs/day, milestones 0-3 (the "it actually works
-end-to-end" core) land in roughly **7-13 working days**; 4-5 add **1-2
-more**. Not included: Internal Transfer (blocked on a design doc — see
-above) and the observability phase (roadmap step 3, deliberately
-deferred by several open questions already).
+(Milestones 0, 1 and 3 all grew from the original estimate, each on
+Tech Lead review surfacing real, previously-undesigned-or-unplanned
+scope, not padding: `identity-auth.md` had zero tasks anywhere in this
+plan despite being fully designed (task 0.7); `ledger.md`'s Lock/Settle/
+Release split added tasks 1.7/1.8; `withdrawal-flow.md`'s new Reaper
+invariant added task 3.9.) At a sustainable pace of 2-4 reviewed
+PRs/day, milestones 0-3 (the "it actually works end-to-end" core) land
+in roughly **8-13 working days**; 4-5 add **1-2 more**. Not included:
+Internal Transfer (blocked on a design doc — see above) and the
+observability phase (roadmap step 3, deliberately deferred by several
+open questions already).
 
 ## Integration contracts
 

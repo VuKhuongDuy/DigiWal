@@ -38,7 +38,14 @@ by three existing services:
   the Screening List. **Never becomes a Ledger Transaction
   automatically** — recorded separately, held for operator review.
   Keyed by the same natural key a normal deposit would use:
-  `(chain_id, tx_hash, log_index)`.
+  `(chain_id, tx_hash, log_index)`. **Stores the full `deposits.confirmed`
+  event verbatim, `user_id` included** (`deposit-flow.md`'s Address
+  Resolution) — without it, Screening Resolution's `approved` path
+  (below) would have no `user_id` to build the eventual Ledger
+  Transaction's entries from. Same gap as `ledger-service`'s own
+  consumption of this event, one hop later: a Flagged Deposit is just
+  `deposits.confirmed` parked instead of applied immediately, so it
+  needs every field a normal `apply()` call would.
 - **Screening Resolution** — an operator's manual decision on a Flagged
   Deposit: `approved` (apply the Ledger Transaction now, using the
   deposit's original idempotency key — the same `ledger.apply()` path
@@ -71,8 +78,10 @@ by three existing services:
    any Reservation.
 4. **A Flagged Deposit is idempotent, keyed like its would-be Ledger
    Transaction.** `INSERT flagged_deposits (chain_id, tx_hash,
-   log_index, ...) ON CONFLICT DO NOTHING` — a Kafka redelivery of the
-   same `deposits.confirmed` event can't create a duplicate flag.
+   log_index, user_id, asset_id, amount, from_address, ...) ON CONFLICT
+   DO NOTHING` — a Kafka redelivery of the same `deposits.confirmed`
+   event can't create a duplicate flag. `user_id` is stored, not just
+   the on-chain natural key, per the Flagged Deposit definition above.
 5. **Approving a Flagged Deposit applies the Ledger Transaction using
    its original idempotency key** — the normal `ledger.apply()` path,
    not a special one. Approval just means "let this through the door
@@ -106,8 +115,8 @@ sequenceDiagram
 
     Op->>Ledger: review Flagged Deposit, decide
     alt approved
-        Op->>Ledger: apply(original idempotency_key, ...)
-        Note over Ledger: credited normally, from here on identical<br/>to any other deposit
+        Op->>Ledger: apply(original idempotency_key,<br/>[credit flagged_deposits.user_id, debit chain account])
+        Note over Ledger: entries built from the stored Flagged Deposit row<br/>(user_id, asset_id, amount — invariant #4), not re-derived from anywhere else.<br/>Credited normally, from here on identical to any other deposit
     else rejected
         Op->>Ledger: mark flagged_deposits.status = rejected
         Note over Ledger: never credited — physical on-chain<br/>fund disposition is out of scope (Open Questions #3)

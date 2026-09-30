@@ -120,8 +120,17 @@ concrete Confirmation Depth and Gas Top-Up numbers below.
   Triggered once a deposit reaches `deposits.confirmed`; closes the gap
   between "credited in the ledger" and "actually custodied where
   withdrawals pay from." Signed via `POST /v1/sign/user-address`
-  (`integration-contracts.md` §2) — a **user address's own EVM nonce**,
-  a completely separate sequence from the Hot Wallet Nonce
+  (`integration-contracts.md` §2), whose request shape is `{user_id,
+  to_address, asset_id, amount, chain_id}` — **`sweeper` selects the
+  source key by `user_id`, not by address** (there is no `from_address`
+  field on this endpoint at all; `wallet-service` derives the source
+  address from `user_id` itself). This is the same Address Resolution
+  gap as `ledger-service`'s, one level further down the pipe: before
+  `deposits.confirmed` carried `user_id`, `sweeper` had no way to
+  populate this field either — fixed as the same change, not a separate
+  one, since `sweeper` reads `user_id` straight off the event it already
+  consumes (Address Resolution above). A **user address's own EVM
+  nonce**, a completely separate sequence from the Hot Wallet Nonce
   (`withdrawal-flow.md`), is needed to sign it; see invariant #12 for how
   `wallet-service` sources that nonce.
 - **Gas Top-Up** — a small native-coin transfer from the Hot Wallet to
@@ -373,10 +382,10 @@ sequenceDiagram
     participant Wallet as wallet-service
     participant RPC as EVM testnet RPC
 
-    Kafka->>Sweeper: deliver deposits.confirmed<br/>{chain_id, tx_hash, log_index, ...}
+    Kafka->>Sweeper: deliver deposits.confirmed<br/>{chain_id, tx_hash, log_index, user_id, to_address, ...}
     Sweeper->>RPC: get user address's native balance
     alt native balance insufficient for Sweep gas
-        Sweeper->>Wallet: sign(from=Hot Wallet, to=user address, amount=gas top-up,<br/>idempotency_key=gas-topup:{chain_id}:{tx_hash}:{log_index})<br/>(PROPOSED key, invariant #13)
+        Sweeper->>Wallet: sign(to_address=user address, amount=gas top-up,<br/>idempotency_key=gas-topup:{chain_id}:{tx_hash}:{log_index})<br/>(PROPOSED key, invariant #13) — POST /v1/sign/hot-wallet, no user_id needed (FROM is the Hot Wallet)
         Note over Wallet: idempotent per key — a retry after a lost<br/>response returns the same signed tx/nonce (withdrawal-flow.md invariant #16)
         Wallet-->>Sweeper: signed raw tx
         Sweeper->>RPC: broadcast (Gas Top-Up)
@@ -385,10 +394,10 @@ sequenceDiagram
     Sweeper->>RPC: get user address's current asset balance (fresh read, invariant #10)
     alt asset is native coin
         Note over Sweeper,Wallet: Sweepable Amount = balance − gas cost (invariant #14)<br/>who computes it depends on integration-contracts.md Open Questions #11 —<br/>shown here assuming wallet-service owns gas construction (recommended)
-        Sweeper->>Wallet: sign(from=user address, to=Hot Wallet, asset, amount="max")
+        Sweeper->>Wallet: sign(user_id, to_address=Hot Wallet, asset, amount="max")<br/>POST /v1/sign/user-address — user_id (not an address) selects the source key,<br/>sourced from the deposits.confirmed event above (Address Resolution, Ubiquitous language > Sweep)
         Wallet->>Wallet: estimate gas, compute Sweepable Amount = balance − actual gas cost
     else asset is ERC-20
-        Sweeper->>Wallet: sign(from=user address, to=Hot Wallet, asset, amount=full token balance)
+        Sweeper->>Wallet: sign(user_id, to_address=Hot Wallet, asset, amount=full token balance)
     end
     Wallet->>RPC: eth_getTransactionCount(user address, "pending") — live nonce read (PROPOSED, invariant #12)
     Note over Wallet: enforces to_address == Hot Wallet server-side (invariant #7)

@@ -23,20 +23,36 @@ derivation only, no balance knowledge, unchanged by this doc) as two
 separate contexts, exactly as the architecture doc already implies.
 
 This doc also defines the **Asset Registry** as part of this context
-(ledger owns "what assets exist and can be credited"), even though
-`chain-watcher` and `wallet-service` (see `deposit-flow.md`'s Open
-Questions #2) also read from it — `wallet-service` needs
-`contract_address` to build ERC-20 `transfer()` calldata when it signs
-a Withdrawal, Sweep, or Gas Top-Up.
+(ledger owns "what assets exist and can be credited"), even though four
+other services also read from it, not just `ledger-service` itself —
+**found incomplete on Tech Lead review** (only `chain-watcher` and
+`wallet-service` were listed here before; `sweeper` and
+`withdrawal-service` need it just as much and were silently missing):
+- `chain-watcher` — filters ERC-20 `Transfer` logs against registered
+  contract addresses (`deposit-flow.md` invariant #2).
+- `wallet-service` — needs `contract_address` to build ERC-20
+  `transfer()` calldata when it signs a Withdrawal, Sweep, or Gas
+  Top-Up.
+- `sweeper` — needs `asset_type`/`contract_address` to decide which
+  branch it's in (native coin vs. ERC-20 — `deposit-flow.md`'s Sweep and
+  Gas Top-Up logic both branch on this) and which balance query to make
+  (native `eth_getBalance` vs. an ERC-20 `balanceOf` call). Without it,
+  `sweeper` has an `asset_id` and nothing telling it what kind of asset
+  that is.
+- `withdrawal-service` — needs `min_withdrawal_amount` for validation
+  (`withdrawal-flow.md` invariant #10, drawn as a call the service makes
+  against its own state, `WD->>WD: validate(...)`) and `hot_floor`/
+  `hot_ceiling` for its sweep-monitor loop (`wallet-tiering.md`).
 
 **Decided: one canonical Asset Registry file, not per-service copies.**
 A single file (e.g. `infra/assets.yaml`, checked into the repo) is
 mounted identically — same host path, same bytes — into every
 container that reads it (`chain-watcher`, `ledger-service`,
-`wallet-service`). None of them gets its own local copy; there is
-exactly one file to edit, so drift between services' views of the
-registry is impossible by construction, not just discouraged by
-convention. This is the answer to the risk Dev flagged while
+`wallet-service`, `sweeper`, `withdrawal-service`). None of them gets
+its own local copy; there is exactly one file to edit, so drift between
+services' views of the registry is impossible by construction, not just
+discouraged by convention. This is the answer to the risk Dev flagged
+while
 implementing `wallet-service`'s side of this.
 
 ## Ubiquitous language
