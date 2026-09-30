@@ -42,6 +42,9 @@ openssl x509 -req -sha256 -days 730 -in "$TMP/leaf.csr" \
 
 cp "$CA_DIR/ca-cert.pem" "$OUT/ca-cert.pem"
 # Containers run as a non-root user and read these through a read-only bind mount.
+# The directory needs o+x too (mkdir ran under umask 077), or the container's
+# non-root user gets "permission denied" traversing it.
+chmod 755 "$OUT"
 chmod 644 "$OUT/cert.pem" "$OUT/ca-cert.pem" "$OUT/key.pem"
 
 echo "issued $SERVICE → $OUT"
