@@ -31,7 +31,7 @@ you instead of letting you fake them:
 | Service | Responsibility | Talks to |
 |---|---|---|
 | `wallet-service` | Holds ≥2 sealed HD seeds (encrypted at rest): one derives every user's deposit address (BIP44 `m/44'/60'/0'/0/{index}`), a separate one is the Hot Wallet's signing key — kept apart so a compromised `wallet-service` process can never expose both at once. Signs outgoing transactions (withdrawals, Sweep, Gas Top-Up) on request; never exposes private keys. Warm/Cold tier keys live outside this service entirely (see `docs/design/wallet-tiering.md`). | Postgres (wallets, addresses, sealed seeds), Redis (address-set cache), **EVM testnet RPC — PROPOSED, pending Tech Lead sign-off** (gas price/limit estimation so `wallet-service` can construct outgoing transactions itself instead of trusting caller-supplied gas parameters, and to source a user address's live nonce for Sweep signing; see `docs/design/integration-contracts.md` §2 Open Questions #11 and `docs/design/deposit-flow.md` invariant #12) |
-| `chain-watcher` | Polls/subscribes to the EVM testnet RPC, checks incoming transfers against the known-address set, waits for confirmations, emits deposit events. Purely an observer — never signs or broadcasts. | Redis (address lookup), Postgres (watermark, observed transfers), Kafka (producer) |
+| `chain-watcher` | Polls/subscribes to the EVM testnet RPC, checks incoming transfers against the known-address set, resolves each one to the owning `user_id` (Redis first, `wallet-service` on a cache miss — see `docs/design/deposit-flow.md`'s Address Resolution), waits for confirmations, emits deposit events carrying that `user_id`. Purely an observer — never signs or broadcasts. | Redis (address→`user_id` lookup), Postgres (watermark, observed transfers), Kafka (producer), `wallet-service` (address resolution, mTLS, cache-miss fallback only) |
 | `sweeper` | Consumes confirmed deposits, tops up a user's deposit address with gas when its native balance can't cover it, then sweeps the deposit to the Hot Wallet. Signs via `wallet-service`; holds no key material of its own. See `docs/design/deposit-flow.md`. | `wallet-service` (sign, mTLS), EVM testnet RPC (broadcast), Kafka (consumer) |
 | `ledger-service` | Source of truth for balances. Double-entry bookkeeping in Postgres. Consumes deposit/withdrawal/transfer events idempotently (dedupe by tx hash + log index, or a client-supplied idempotency key for internal transfers). | Postgres (ledger), Kafka (consumer + producer) |
 | `withdrawal-service` | Validates a withdrawal request against the ledger, optionally takes a Redis lock on the user as a fast-fail optimization, reserves funds via `ledger-service`'s Lock (not an immediate debit — see below), asks `wallet-service` to sign, broadcasts, tracks confirmation, then Settles the Lock (the actual debit) on confirmation. The Redis lock is never load-bearing for correctness — the Postgres atomic `locked_balance` `UPDATE` inside `ledger-service`'s Lock creation is the sole boundary preventing overdraft; a lost/expired Redis lock can at worst let a doomed-to-fail concurrent request reach Postgres before being rejected there, not cause an overdraft. See `docs/design/ledger.md` Open Questions #1. | Postgres (read), Redis (optional fast-fail lock), Kafka, `wallet-service` |
@@ -40,6 +40,82 @@ you instead of letting you fake them:
 
 Event bus (Kafka topics): `deposits.detected`, `deposits.confirmed`,
 `withdrawals.broadcast`, `withdrawals.confirmed`, `transfers.internal`.
+
+## System diagram
+
+```mermaid
+flowchart TB
+    Client(["User / Client"])
+
+    subgraph API["API layer"]
+        Gateway["api-gateway<br/>REST, API-key auth<br/>(identity-auth.md)"]
+    end
+
+    subgraph Core["Core services"]
+        Wallet["wallet-service<br/>≥2 sealed HD seeds, signing<br/>(wallet-tiering.md)"]
+        Watcher["chain-watcher<br/>observes deposits<br/>(deposit-flow.md)"]
+        Sweeper["sweeper<br/>gas top-up + sweep to Hot<br/>(deposit-flow.md)"]
+        Ledger["ledger-service<br/>double-entry, Lock/Settle/Release<br/>(ledger.md)"]
+        Withdrawal["withdrawal-service<br/>withdrawal state machine<br/>(withdrawal-flow.md)"]
+        History["history-service<br/>read model<br/>(no dedicated design doc)"]
+    end
+
+    subgraph Stores["Data stores — shared infra, per-service schema"]
+        PG[("Postgres<br/>wallets · ledger+locks · withdrawals · watermark")]
+        Redis[("Redis<br/>known-address cache · optional fast-fail lock")]
+        Kafka{{"Kafka<br/>deposits.detected / .confirmed<br/>withdrawals.broadcast / .confirmed"}}
+        Mongo[("MongoDB<br/>denormalized tx history")]
+    end
+
+    Chain(["EVM testnet RPC<br/>Sepolia / local Anvil"])
+
+    Client -->|"Authorization: Bearer api_key"| Gateway
+    Gateway -->|"deposit-address"| Wallet
+    Gateway -->|"balances"| Ledger
+    Gateway -->|"withdrawals, whitelist"| Withdrawal
+    Gateway -.->|"history — GAP, not designed"| History
+
+    Watcher -->|poll/subscribe| Chain
+    Watcher --> Redis
+    Watcher --> PG
+    Watcher -.->|"resolve to_address -> user_id<br/>— mTLS, cache-miss fallback only"| Wallet
+    Watcher -->|produce| Kafka
+
+    Kafka -->|deposits.confirmed| Sweeper
+    Kafka -->|deposits.confirmed| Ledger
+    Kafka -->|all 4 topics| History
+
+    Sweeper -->|"sign — mTLS"| Wallet
+    Sweeper --> Chain
+
+    Withdrawal -->|"lock / settle / release,<br/>apply(correction) — mTLS"| Ledger
+    Withdrawal -->|"sign — mTLS"| Wallet
+    Withdrawal --> Chain
+    Withdrawal -->|publish| Kafka
+    Withdrawal -.->|"fast-fail lock, optional —<br/>never load-bearing"| Redis
+
+    Wallet --> PG
+    Ledger --> PG
+    Withdrawal --> PG
+    History --> Mongo
+```
+
+Solid arrows are decided/built-toward calls that happen on every
+request. Dashed arrows are one of three different things, not one —
+read the label, not just the line style: an **optional** call never
+load-bearing for correctness (the Redis fast-fail lock — `ledger.md`
+Open Questions #1); a **fallback-only** call that's fully decided and
+mandatory to build, just not on the common path (`chain-watcher`'s
+address resolution — the common path is a Redis hit; the mTLS call to
+`wallet-service` only fires on a cache miss, but skipping it entirely
+would be a real bug, not an optional nicety); or a named **GAP**
+(`GET /v1/history` — `history-service` has no dedicated design doc yet,
+per the module map in `docs/IMPLEMENTATION_PLAN.md`). `transfers.internal`
+and its `api-gateway`/`ledger-service` endpoint are omitted entirely —
+also a GAP (`docs/design/integration-contracts.md` §1), not yet
+designed, so drawing it here would imply more than exists. Full
+wire-level detail (exact payloads, idempotency keys, auth) for every
+arrow above: `docs/design/integration-contracts.md`.
 
 ## Data model split (the actual point of using 4 different stores)
 
@@ -52,9 +128,14 @@ Event bus (Kafka topics): `deposits.detected`, `deposits.confirmed`,
 - **MongoDB** — anything bulky, semi-structured, and append-mostly: raw
   chain tx receipts/logs, the denormalized transaction history feed
   shown to users.
-- **Kafka** — the connective tissue: nothing talks to another service
-  directly except `api-gateway` → `wallet-service`/`withdrawal-service`
-  synchronous calls; everything else is event-driven.
+- **Kafka** — the connective tissue: almost everything is event-driven.
+  The exceptions are `api-gateway`'s synchronous calls into
+  `wallet-service`/`ledger-service`/`withdrawal-service`,
+  `withdrawal-service`'s own synchronous calls to `wallet-service` and
+  `ledger-service`, and `chain-watcher`'s synchronous call to
+  `wallet-service` to resolve a deposit's `user_id` (a real gap fixed on
+  Tech Lead review — `docs/design/deposit-flow.md`'s Address Resolution;
+  full list, with auth, in `docs/design/integration-contracts.md` §3).
 
 ## Security notes (read before building further)
 
