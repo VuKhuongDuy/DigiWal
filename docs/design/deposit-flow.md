@@ -200,7 +200,9 @@ concrete Confirmation Depth and Gas Top-Up numbers below.
   Wallet Outflow into a Watched Address, so `chain-watcher` must not
   treat it as a deposit — invariant #17** (found by the M2 e2e test: the
   original design was silent on this and the user was credited 0.001 ETH
-  they never sent).
+  they never sent). A stuck (underpriced) top-up is fee-bumped by
+  `sweeper` (invariant #18), and its gas is recorded in the ledger
+  (invariant #19).
 - **Sweepable Amount** — for a **native-coin** Sweep specifically: the
   actual `amount` sent, after reserving enough of the address's own
   balance to pay the Sweep transaction's own gas. Sweeping the *entire*
@@ -505,6 +507,37 @@ concrete Confirmation Depth and Gas Top-Up numbers below.
       deposit; the funds would simply be an operator matter.) Also: transfers already mis-recorded before the fix ships are not
       retroactively corrected, by decision: an environment that ran the
       sweeper before this fix is reset, not repaired — Open Questions #14.
+18. **A stuck Gas Top-Up is fee-bumped by `sweeper`, never abandoned.**
+    **Decided (Tech Lead), `withdrawal-flow.md` Open Questions #17;
+    task 2.8.** A Gas Top-Up holds a Hot Wallet nonce; left underpriced
+    it blocks every later Hot Wallet tx, withdrawals included. While
+    waiting for a top-up's inclusion, `sweeper` uses `POST
+    /v1/sign/hot-wallet/{key}/replace` for its own `gas-topup:…` key
+    (`caller_cn` scoping — it can never touch a withdrawal's signature)
+    with the same rules as withdrawals: when the node refuses the
+    broadcast as underpriced, or the tx is not mined after 20 blocks and
+    is underpriced, bump ×1.125, at most 5 times, 50 gwei ceiling, then
+    `ALERT` (`withdrawal-flow.md` invariant #21). `sweeper` has no
+    database, so it reads `GET /v1/sign/hot-wallet/{key}` for the last
+    `replacement_seq` and every version's hash, and treats the top-up as
+    done when **any** version is mined. Re-broadcasts only the latest.
+    The invariant #16 give-up (10 attempts, `ALERT`, skip) no longer
+    abandons a stuck top-up silently: before skipping, the bump path
+    must have been exhausted and the `ALERT` names the key, so an
+    operator can still bump or fill it.
+19. **`sweeper` records the gas of every Gas Top-Up and Sweep it sends
+    in the ledger.** **Gas-in-the-ledger Decided (Tech Lead); the Entry
+    design is PROPOSED — `ledger.md` invariant #12; task 2.8.** Once a
+    Gas Top-Up or Sweep tx is mined (the point `sweeper` already waits
+    for), it posts `POST /v1/ledger/gas-fees` `{chain_id, tx_hash,
+    gas_used, effective_gas_price, purpose: gas_topup | sweep}` from the
+    receipt, idempotent on `gas:{chain_id}:{tx_hash}`. Covers native
+    Sweeps (gas paid out of the deposited ETH, so custody holds
+    `deposit − gas` while the user is credited the full deposit) and
+    ERC-20 Sweeps (gas paid out of the top-up). The top-up's value
+    itself is an internal custody move and posts nothing. Known gaps
+    (no depth wait; a crash between mined and posted loses the record):
+    `ledger.md` Open Questions #6.
 
 ## Diagram
 

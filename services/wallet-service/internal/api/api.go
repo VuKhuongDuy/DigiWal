@@ -57,6 +57,7 @@ type Server struct {
 	hotSigner HotSigner  // nil until the hot_wallet seed, RPC and assets are configured
 	userSign  UserSigner // nil until both seeds, RPC and assets are configured
 	addresses AddressLookup
+	nonceGaps NonceGaps
 	system    *SystemAddresses // nil until the Hot Wallet is configured (then 503)
 }
 
@@ -67,7 +68,11 @@ func (s *Server) WithSystemAddresses(a SystemAddresses) *Server {
 }
 
 func NewServer(store *storage.Store, cache *storage.Cache, signer Signer, hotSigner HotSigner, userSign UserSigner) *Server {
-	return &Server{store: store, cache: cache, signer: signer, hotSigner: hotSigner, userSign: userSign, addresses: store}
+	srv := &Server{store: store, cache: cache, signer: signer, hotSigner: hotSigner, userSign: userSign, addresses: store}
+	if store != nil {
+		srv.nonceGaps = store
+	}
+	return srv
 }
 
 // Routes is the plain-HTTP listener: /healthz (exempt from client certs,
@@ -90,6 +95,7 @@ func (s *Server) MTLSRoutes() http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("POST /v1/sign/hot-wallet", authz.Require(authz.HotWalletSigners, http.HandlerFunc(s.handleSignHotWallet)))
 	mux.Handle("GET /v1/wallet/hot-address", authz.Require(authz.HotAddressReaders, http.HandlerFunc(s.handleHotAddress)))
+	mux.Handle("POST /v1/wallet/nonce-gap", authz.Require(authz.NonceGapReporters, http.HandlerFunc(s.handleNonceGap)))
 	mux.Handle("GET /v1/wallet/system-addresses", authz.Require(authz.SystemAddressReaders, http.HandlerFunc(s.handleSystemAddresses)))
 	mux.Handle("GET /v1/addresses/{address}", authz.Require(authz.AddressLookupCallers, http.HandlerFunc(s.handleAddressOwner)))
 	mux.Handle("POST /v1/sign/user-address", authz.Require(authz.UserAddressSigners, http.HandlerFunc(s.handleSignUserAddress)))
@@ -104,6 +110,40 @@ func (s *Server) handleHotAddress(w http.ResponseWriter, _ *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"address": s.hotSigner.HotWalletAddress().Hex()})
+}
+
+// NonceGaps is the slice of storage.Store the nonce-gap endpoint needs.
+type NonceGaps interface {
+	FreezeNonceGap(ctx context.Context, chainID int64, fromNonce uint64) (storage.NonceFreeze, error)
+}
+
+// handleNonceGap is POST /v1/wallet/nonce-gap {chain_id, from_nonce} (withdrawal-flow.md invariant
+// #19): freeze new Hot Wallet nonce allocation from that nonce on, for every caller. Naturally
+// idempotent (the lowest reported nonce wins), so the reporter just retries until 200.
+func (s *Server) handleNonceGap(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		ChainID   int64   `json:"chain_id"`
+		FromNonce *uint64 `json:"from_nonce"`
+	}
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<10))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil || req.ChainID <= 0 || req.FromNonce == nil {
+		writeErr(w, http.StatusBadRequest, "body must be {chain_id > 0, from_nonce >= 0}")
+		return
+	}
+	f, err := s.nonceGaps.FreezeNonceGap(r.Context(), req.ChainID, *req.FromNonce)
+	switch {
+	case err == nil:
+		log.Printf("ALERT: Nonce Gap reported on chain %d at nonce %d; Hot Wallet signing frozen from nonce %d", req.ChainID, *req.FromNonce, f.FromNonce)
+		writeJSON(w, http.StatusOK, map[string]any{"chain_id": f.ChainID, "frozen_from_nonce": f.FromNonce, "frozen_at": f.At.UTC()})
+	case errors.Is(err, storage.ErrNotFound):
+		writeErr(w, http.StatusNotFound, "no Hot Wallet nonce was ever allocated on this chain")
+	case errors.Is(err, storage.ErrNonceNotAllocated):
+		writeErr(w, http.StatusUnprocessableEntity, "from_nonce was never allocated")
+	default:
+		log.Printf("freezing nonce gap: %v", err)
+		writeErr(w, http.StatusInternalServerError, "internal error")
+	}
 }
 
 // handleSystemAddresses is GET /v1/wallet/system-addresses: {chain_id, hot, warm}. 503 until the

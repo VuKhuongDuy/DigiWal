@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 
@@ -277,6 +278,65 @@ func TestSystemAddresses(t *testing.T) {
 		srv.MTLSRoutes().ServeHTTP(rec, req)
 		if rec.Code != 200 {
 			t.Errorf("hot-address as CN=%q: %d", cn, rec.Code)
+		}
+	}
+}
+
+type fakeGaps struct {
+	err   error
+	calls int
+	got   []uint64
+}
+
+func (f *fakeGaps) FreezeNonceGap(_ context.Context, chainID int64, from uint64) (storage.NonceFreeze, error) {
+	f.calls++
+	f.got = append(f.got, from)
+	if f.err != nil {
+		return storage.NonceFreeze{}, f.err
+	}
+	return storage.NonceFreeze{ChainID: chainID, FromNonce: from, At: time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)}, nil
+}
+
+func TestNonceGap(t *testing.T) {
+	post := func(g *fakeGaps, cn, body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest("POST", "/v1/wallet/nonce-gap", strings.NewReader(body))
+		if cn != "" {
+			req = withPeer(req, cn)
+		}
+		rec := httptest.NewRecorder()
+		(&Server{nonceGaps: g}).MTLSRoutes().ServeHTTP(rec, req)
+		return rec
+	}
+	// withdrawal-service only: the sweeper (or anyone else) can never freeze Hot Wallet signing.
+	for cn, want := range map[string]int{"withdrawal-service": 200, "sweeper": 403, "chain-watcher": 403, "api-gateway": 403, "": 403} {
+		g := &fakeGaps{}
+		if rec := post(g, cn, `{"chain_id":31337,"from_nonce":4}`); rec.Code != want || (want == 403 && g.calls != 0) {
+			t.Errorf("CN=%q: %d (calls %d), want %d", cn, rec.Code, g.calls, want)
+		}
+	}
+	g := &fakeGaps{}
+	rec := post(g, "withdrawal-service", `{"chain_id":31337,"from_nonce":0}`)
+	if rec.Code != 200 || strings.TrimSpace(rec.Body.String()) != `{"chain_id":31337,"frozen_at":"2026-10-01T00:00:00Z","frozen_from_nonce":0}` {
+		t.Fatalf("nonce 0: %d %s", rec.Code, rec.Body)
+	}
+	for _, bad := range []string{`{}`, `{"chain_id":31337}`, `{"chain_id":0,"from_nonce":1}`, `{"chain_id":1,"from_nonce":-1}`, `{"chain_id":1,"from_nonce":1,"x":1}`, `nope`} {
+		if rec := post(&fakeGaps{}, "withdrawal-service", bad); rec.Code != 400 {
+			t.Errorf("%s: %d, want 400", bad, rec.Code)
+		}
+	}
+	if rec := post(&fakeGaps{err: storage.ErrNotFound}, "withdrawal-service", `{"chain_id":1,"from_nonce":1}`); rec.Code != 404 {
+		t.Errorf("never signed: %d", rec.Code)
+	}
+	if rec := post(&fakeGaps{err: storage.ErrNonceNotAllocated}, "withdrawal-service", `{"chain_id":1,"from_nonce":9}`); rec.Code != 422 {
+		t.Errorf("not allocated: %d", rec.Code)
+	}
+	// There is no route to lift a freeze.
+	for _, m := range []string{"DELETE", "PUT", "PATCH"} {
+		req := withPeer(httptest.NewRequest(m, "/v1/wallet/nonce-gap", nil), "withdrawal-service")
+		rec := httptest.NewRecorder()
+		(&Server{nonceGaps: &fakeGaps{}}).MTLSRoutes().ServeHTTP(rec, req)
+		if rec.Code != 405 {
+			t.Errorf("%s: %d, want 405", m, rec.Code)
 		}
 	}
 }

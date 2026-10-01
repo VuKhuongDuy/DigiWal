@@ -39,6 +39,10 @@ var (
 	// only, to refuse withdrawals and whitelist entries to the Hot/Warm Wallet (withdrawal-flow.md
 	// invariant #18) and, later, as its Treasury Sweep destination (wallet-tiering.md invariant #9).
 	SystemAddressReaders = []string{CNWithdrawalService}
+	// NonceGapReporters may call POST /v1/wallet/nonce-gap: withdrawal-service only, the one
+	// component that tracks Hot Wallet txs to Withdrawal Confirmation Depth (withdrawal-flow.md
+	// invariant #19). There is no endpoint to lift a freeze: only an operator, in the database.
+	NonceGapReporters = []string{CNWithdrawalService}
 	// AddressLookupCallers may call GET /v1/addresses/{address}: chain-watcher, which cannot
 	// resolve a deposit's user_id without it (service-auth-mtls.md matrix), and withdrawal-service,
 	// which refuses withdrawals and whitelist entries to one of our own deposit addresses

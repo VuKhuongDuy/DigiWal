@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 )
@@ -130,22 +131,45 @@ func (s *Store) SignHotWallet(
 	return HotSignature{Nonce: uint64(next), SignedRawTx: raw}, nil
 }
 
-// FreezeNonceGap records an open Nonce Gap at fromNonce for the chain; from then
-// on SignHotWallet allocates nothing new (invariant #7). If a gap is already
-// open the lower nonce wins. Errors if the chain has never signed anything.
-func (s *Store) FreezeNonceGap(ctx context.Context, chainID int64, fromNonce uint64) error {
-	tag, err := s.pool.Exec(ctx, `
+// ErrNonceNotAllocated: a Nonce Gap was reported at a nonce this chain never allocated — a
+// buggy or hostile report, refused rather than freezing on nonsense.
+var ErrNonceNotAllocated = errors.New("nonce was never allocated")
+
+// NonceFreeze is the effective freeze on a chain.
+type NonceFreeze struct {
+	ChainID   int64
+	FromNonce uint64
+	At        time.Time
+}
+
+// FreezeNonceGap records an open Nonce Gap at fromNonce for the chain; from then on
+// SignHotWallet allocates nothing new (invariant #7). If a gap is already open the lower nonce
+// wins, so a repeat is a no-op and a lower report only widens it (#8). Returns the effective
+// freeze. ErrNotFound if the chain has never signed anything (no gap can exist);
+// ErrNonceNotAllocated if fromNonce >= next_nonce.
+func (s *Store) FreezeNonceGap(ctx context.Context, chainID int64, fromNonce uint64) (NonceFreeze, error) {
+	var from int64
+	var at time.Time
+	err := s.pool.QueryRow(ctx, `
 		UPDATE hot_wallet_nonces
 		   SET frozen_from_nonce = LEAST(COALESCE(frozen_from_nonce, $2), $2),
 		       frozen_at = COALESCE(frozen_at, now())
-		 WHERE chain_id = $1`, chainID, int64(fromNonce))
+		 WHERE chain_id = $1 AND $2 < next_nonce
+		RETURNING frozen_from_nonce, frozen_at`, chainID, int64(fromNonce)).Scan(&from, &at)
+	if errors.Is(err, pgx.ErrNoRows) {
+		var exists bool
+		if err := s.pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM hot_wallet_nonces WHERE chain_id = $1)`, chainID).Scan(&exists); err != nil {
+			return NonceFreeze{}, err
+		}
+		if !exists {
+			return NonceFreeze{}, ErrNotFound
+		}
+		return NonceFreeze{}, ErrNonceNotAllocated
+	}
 	if err != nil {
-		return fmt.Errorf("freezing nonce gap: %w", err)
+		return NonceFreeze{}, fmt.Errorf("freezing nonce gap: %w", err)
 	}
-	if tag.RowsAffected() == 0 {
-		return ErrNotFound
-	}
-	return nil
+	return NonceFreeze{ChainID: chainID, FromNonce: uint64(from), At: at}, nil
 }
 
 // ResolveNonceGap clears the freeze flag (operator action, invariant #9). It does

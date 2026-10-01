@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ecdsa"
 	"errors"
+	"fmt"
 	"math/big"
 	"os"
 	"strings"
@@ -161,7 +162,18 @@ func (p *fakePublisher) Publish(_ context.Context, topic, key string, value []by
 
 // ---- rig -----------------------------------------------------------------------------------
 
+type fakeReporter struct {
+	calls []string
+	err   error
+}
+
+func (r *fakeReporter) ReportNonceGap(_ context.Context, chainID int64, from uint64) error {
+	r.calls = append(r.calls, fmt.Sprintf("%d/%d", chainID, from))
+	return r.err
+}
+
 type rig struct {
+	rep    *fakeReporter
 	t      *testing.T
 	st     *store.Store
 	p      *Pipeline
@@ -178,9 +190,10 @@ func newRig(t *testing.T) *rig {
 		t.Fatal(err)
 	}
 	t.Cleanup(st.Close)
-	r := &rig{t: t, st: st, signer: newSigner(), chain: newChain(), ledger: &fakeLedger{}, pub: &fakePublisher{}}
+	r := &rig{t: t, st: st, signer: newSigner(), chain: newChain(), ledger: &fakeLedger{}, pub: &fakePublisher{}, rep: &fakeReporter{}}
 	r.p = &Pipeline{Store: st, Ledger: r.ledger, Signer: r.signer, Chain: r.chain, Publisher: r.pub,
-		ChainID: chainID, ConfirmationDepth: depth, Now: func() time.Time { return time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC) }}
+		ChainID: chainID, ConfirmationDepth: depth, Now: func() time.Time { return time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC) },
+		Gaps: &GapWatch{Store: st, Reporter: r.rep, Window: 256}}
 	return r
 }
 

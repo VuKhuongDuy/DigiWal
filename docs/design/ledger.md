@@ -103,6 +103,23 @@ implementing `wallet-service`'s side of this.
   reconciled against the real on-chain balance of the hot wallet for
   that asset — a genuine "did we lose or fabricate money" check, not
   just bookkeeping ceremony.
+- **Gas Expense Account** — **new; Decided (Tech Lead) that gas is
+  recorded in the ledger, Entry design PROPOSED (invariant #12).** One
+  per chain's native asset (`asset_type = native`), `kind =
+  'gas_expense'`, not tied to a user. The double-entry counterparty for
+  gas our own transactions burn: every mined tx we sign (withdrawals,
+  including reverted ones; Nonce Fillers; Gas Top-Ups; Sweeps; later
+  Treasury Sweeps) pays gas out of custody to the validators, which no
+  user Entry accounts for. Its `total_balance` only ever decreases
+  (cumulative gas spent, negative, same sign convention as the Chain
+  Account); `locked_balance` is always 0; never Locked, never checked by
+  invariant #1.
+- **Gas Fee** — **PROPOSED.** One Ledger Transaction per mined tx we
+  signed, `source_type = 'gas_fee'`: `{Gas Expense Account −fee, Chain
+  Account +fee}` in the native asset, where `fee = gasUsed ×
+  effectiveGasPrice` from that tx's receipt. The Chain Account side keeps
+  `−ChainAccount.total_balance` equal to what custody really holds after
+  gas has left it.
 - **Entry** — a single, immutable, append-only signed-amount posting to
   one Account. Never updated or deleted; a correction is a new entry
   referencing the one it corrects.
@@ -284,6 +301,49 @@ implementing `wallet-service`'s side of this.
     this server-side negation check, since `withdrawal-service` itself
     is the one caller expected to post corrections and is exactly the
     caller this invariant has to hold up against if compromised.
+12. **Every mined tx we sign has its gas recorded exactly once, as a
+    Gas Fee, and gas never touches a user's Account.** **PROPOSED
+    (Solution Architect) for the Tech Lead's review — the decision to
+    record gas in the ledger is Decided (`withdrawal-flow.md` Open
+    Questions #22).**
+    - **Entries:** `{gas_expense(native asset): −fee, chain(native
+      asset): +fee}`, sum zero per asset (invariant #2). The user is
+      never debited for gas: a confirmed withdrawal debits exactly
+      `amount` at Settle; a reverted one is Released in full.
+    - **Amount:** `fee = gas_used × effective_gas_price` from the mined
+      receipt, computed by `ledger-service` from the two values the
+      caller sends (never a caller-supplied total). Only the version
+      that was mined pays: a Fee Bump's unmined versions, and a
+      cancelled withdrawal whose nonce a Nonce Filler consumed, post
+      nothing for themselves (the filler posts its own Gas Fee).
+    - **Idempotency:** `idempotency_key = gas:{chain_id}:{tx_hash}` —
+      one tx, one Gas Fee, whoever reports it; a replay with the same
+      values returns the existing transaction, different values →
+      `409`.
+    - **API:** a dedicated `POST /v1/ledger/gas-fees` `{"chain_id",
+      "tx_hash", "gas_used", "effective_gas_price", "purpose"}` →
+      `200 {"ledger_transaction_id","amount"}` (`purpose` ∈
+      `withdrawal`, `withdrawal_reverted`, `nonce_filler`, `gas_topup`,
+      `sweep`, `treasury_sweep`; stored on the transaction for
+      reporting). Not part of Settle (reverts, fillers, top-ups and
+      sweeps have no Settle) and not a `source_type` on `POST
+      /v1/ledger/transactions` (that endpoint is `CN=withdrawal-service`
+      only and its correction rules don't apply); a separate endpoint
+      gets its own CN allow-list: `withdrawal-service`, `sweeper`.
+      `ledger-service` derives both accounts itself; the caller never
+      names one.
+    - **When, and who posts:** after the tx is final for its flow.
+      `withdrawal-service`: at Settle for a confirmed withdrawal and at
+      `→ failed` for `tx_reverted` (both after Withdrawal Confirmation
+      Depth), and for a mined Nonce Filler when the Reaper Releases its
+      request (`withdrawal-flow.md` invariant #26). `sweeper`: for each
+      Gas Top-Up and Sweep tx once it is mined (`deposit-flow.md`
+      invariant #19 — no extra depth wait; see Open Questions #6).
+    - **Trust:** `ledger-service` has no chain RPC and cannot verify the
+      tx; a compromised caller could post a fake Gas Fee. The damage is
+      bounded — no user balance moves, only the system accounts, and the
+      on-chain reconciliation would show the mismatch (Open Questions
+      #7).
 
 ## Diagram
 
@@ -309,7 +369,8 @@ erDiagram
     ACCOUNT {
         uuid id
         uuid asset_id
-        string user_id "null for the Chain Account"
+        string kind "user, chain, gas_expense (PROPOSED)"
+        string user_id "null for the Chain and Gas Expense Accounts"
         numeric_78_0 total_balance "minor units, materialized, sum of Entries; negative is normal for the Chain Account"
         numeric_78_0 locked_balance "minor units, materialized, sum of active Locks; always 0 for the Chain Account"
     }
@@ -324,7 +385,7 @@ erDiagram
     }
     LEDGER_TRANSACTION {
         uuid id
-        string source_type "deposit, withdrawal_settle, correction"
+        string source_type "deposit, withdrawal_settle, correction, gas_fee (PROPOSED)"
         string idempotency_key "unique; Settle reuses its Lock's own key unchanged"
         timestamptz created_at
     }
@@ -445,6 +506,13 @@ sequenceDiagram
 
 ## Alternatives considered
 
+- **(Gas) Fold the Gas Fee into Settle.** Rejected: reverted txs, Nonce
+  Fillers, Gas Top-Ups and Sweeps have no Settle; one endpoint for every
+  mined tx keeps one rule. Settle stays unchanged.
+- **(Gas) Keep gas outside the ledger as an operational record.**
+  Rejected by the Tech Lead (`withdrawal-flow.md` Open Questions #22):
+  the Chain Account would drift from custody by every gas payment.
+
 - **No entries table, only a materialized balance.** Rejected — no
   audit trail, no way to reconstruct how a balance got corrupted if a
   bug ever does that. The entries table is also the most realistic and
@@ -523,3 +591,24 @@ sequenceDiagram
    display layer). Flag if you want price data in scope now.
 4. No new technology introduced — Postgres only, per the existing
    data-model split.
+5. **PROPOSED: Gas Fee Entries (invariant #12).** Decided by the Tech
+   Lead that gas goes in the ledger; the Entry shape, the new
+   `gas_expense` account kind, `source_type = 'gas_fee'`, the
+   `gas:{chain_id}:{tx_hash}` key and the new `POST /v1/ledger/gas-fees`
+   endpoint (`CN=withdrawal-service`, `CN=sweeper`) need review.
+6. **Open: `sweeper` posts Gas Fees without durable state.** `sweeper`
+   has no database. A crash after a tx is mined but before its Gas Fee
+   is posted loses that record: on redelivery the Sweep is already done
+   (balance zero) and a Sweep tx has no key to recover its hash from
+   (Gas Top-Ups can be recovered via `GET /v1/sign/hot-wallet/{key}`).
+   It also posts at inclusion, not after a confirmation depth, so a
+   reorg that changes `gasUsed` is not reflected. Both are small drifts
+   the reconciliation would show; closing them needs `sweeper` state
+   (or a chain-side scanner of our own txs). Accept for now?
+7. **Open (pre-existing #2, now sharper): reconciliation scope.** With
+   Gas Fees, `−ChainAccount.total_balance` per asset equals all custody,
+   which includes not only the Hot Wallet but unswept deposits and the
+   ETH dust left at user addresses after an ERC-20 Sweep (Gas Top-Up
+   minus the Sweep's gas). A reconciliation job against the Hot Wallet
+   alone would always differ by that dust. Still deferred; flagging the
+   definition it will need.

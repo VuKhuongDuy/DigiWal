@@ -93,7 +93,9 @@ func main() {
 	pub := publisher.NewKafka(strings.Split(requireEnv("KAFKA_BROKERS"), ","))
 	defer pub.Close()
 	pipe := &pipeline.Pipeline{Store: st, Ledger: ledgerClient, Signer: walletClient, Chain: rpc, Publisher: pub,
-		ChainID: system.ChainID, ConfirmationDepth: envInt("WITHDRAWAL_CONFIRMATION_DEPTH", 64)} // Decided: 64 on Sepolia
+		ChainID: system.ChainID, ConfirmationDepth: envInt("WITHDRAWAL_CONFIRMATION_DEPTH", 64), // Decided: 64 on Sepolia
+		// Nonce Gap detection (task 3.4): confirmed txs of the last NONCE_GAP_WINDOW blocks are re-checked.
+		Gaps: &pipeline.GapWatch{Store: st, Reporter: walletClient, Window: envInt("NONCE_GAP_WINDOW", 256)}}
 	go pipe.Run(ctx, envDuration("POLL_INTERVAL", 3*time.Second))
 	log.Printf("withdrawal pipeline running: chain %d, confirmation depth %d", system.ChainID, pipe.ConfirmationDepth)
 

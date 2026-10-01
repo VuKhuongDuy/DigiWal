@@ -145,6 +145,20 @@ func (c *Client) SignHotWallet(ctx context.Context, r SignRequest) (rawTx string
 	}
 }
 
+// ReportNonceGap is POST /v1/wallet/nonce-gap (invariant #19): wallet-service stops allocating Hot
+// Wallet nonces from fromNonce on, for every caller. Idempotent; the caller retries until nil.
+func (c *Client) ReportNonceGap(ctx context.Context, chainID int64, fromNonce uint64) error {
+	b, _ := json.Marshal(map[string]any{"chain_id": chainID, "from_nonce": fromNonce})
+	code, body, err := c.do(ctx, http.MethodPost, "/v1/wallet/nonce-gap", b)
+	if err != nil {
+		return err
+	}
+	if code != http.StatusOK {
+		return fmt.Errorf("wallet-service nonce-gap answered %d: %s", code, strings.TrimSpace(string(body)))
+	}
+	return nil
+}
+
 // ErrUnknown means wallet-service gave no clean answer: never to be read as "not ours".
 var ErrUnknown = errors.New("could not tell whether the address is ours")
 

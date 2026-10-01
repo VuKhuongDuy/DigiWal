@@ -72,6 +72,8 @@ type Pipeline struct {
 	ConfirmationDepth int64
 	Batch             int
 	Now               func() time.Time
+	// Gaps enables Nonce Gap detection (task 3.4); nil disables it.
+	Gaps *GapWatch
 }
 
 // Run polls until ctx ends. A failed step is logged and retried on the next tick.
@@ -98,6 +100,7 @@ func (p *Pipeline) Step(ctx context.Context) error {
 		p.each(ctx, store.StatusSigned, p.broadcast),
 		p.each(ctx, store.StatusBroadcast, p.confirm),
 		p.publish(ctx),
+		p.watchGaps(ctx),
 	)
 }
 
