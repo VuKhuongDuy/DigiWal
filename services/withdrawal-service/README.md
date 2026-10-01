@@ -1,10 +1,9 @@
 # withdrawal-service
 
-Orchestrates withdrawals (`docs/design/withdrawal-flow.md`). **Tasks 3.1, 3.2, 3.6 and 3.10 so far:**
-the service, its schema, idempotent request creation, validation (including the destination checks
-against wallet-service), and the Withdrawal Whitelist. A request ends at `validated` or `rejected`;
-Reservation/signing/broadcast/Settle (3.3), Nonce Gap handling (3.4) and the Reaper (3.9) are not built
-yet.
+Orchestrates withdrawals (`docs/design/withdrawal-flow.md`). **Tasks 3.1-3.3, 3.6, 3.10 and the
+withdrawal-service part of 3.11 so far:** a request is recorded idempotently, validated, Reserved on the
+ledger, then signed, broadcast, confirmed and Settled in the background. Nonce Gap handling (3.4),
+refunds (3.5) and the Reaper (3.9) are not built yet.
 
 ## What works
 
@@ -18,17 +17,20 @@ yet.
 - **`POST /v1/withdrawals`** `{user_id, idempotency_key, asset_id, amount, to_address}` (mTLS,
   `CN=api-gateway` only; `user_id` is injected by the gateway):
   - The row is inserted **first**, `INSERT ... ON CONFLICT (user_id, idempotency_key) DO NOTHING`
-    (invariant #11), then validated in-line by the same handler (task 3.2, below):
-    `202 {idempotency_key, status: "validated", tx_hash}`, or `422 {..., status: "rejected", reject_reason}`.
+    (invariant #11), then validated and Reserved in-line by the same handler:
+    `202 {idempotency_key, status: "reserved", tx_hash: null}` once the ledger Lock holds the amount, or
+    `422 {..., status: "rejected", reject_reason}` — a failed check (below) or `insufficient_funds`
+    (the Lock was refused; nothing is held).
   - Duplicate (same user, same key, same request): `200` with the existing row's status. It never
     re-validates, whatever the status (Tech Lead, Open Questions #9b option B).
   - Same user and key but a **different** request (asset, amount or address): `409`. This is not a
     retry; answering with another request's status would mislead the client. Not spelled out in the
     design docs (which only cover the identical-retry case); it matches ledger-service's and
     wallet-service's handling of a reused key.
-  - `503` when validation could not reach a verdict (a dependency failed). The row stays `requested`
-    and that key is spent: retrying it only reads the row back. The Reaper (3.9) will mark it `failed`;
-    the client retries with a new key (Tech Lead, Open Questions #9b option B).
+  - `503` when validation could not reach a verdict, or the ledger could not be reached for the Lock.
+    The row stays `requested` (resp. `validated`) and that key is spent: retrying it only reads the row
+    back. The Reaper (3.9) will fail it (and Release, for `validated`); the client retries with a new key
+    (Tech Lead, Open Questions #9b option B).
   - `400` only for a body that cannot be stored (bad JSON, unknown field, missing field, a key that is
     not 1-128 printable ASCII characters, an amount that is not a positive integer in minor units).
     Everything else — asset registered, minimum, address format, whitelist, screening, destination —
@@ -55,6 +57,28 @@ yet.
   | 8 | not one of our deposit addresses (wallet-service `GET /v1/addresses/{address}`) | `destination_is_deposit_address` |
 
   Codes and order are Decided by the Tech Lead (`withdrawal-flow.md` invariant #10).
+- **Background pipeline** (task 3.3, `internal/pipeline`), one pass every `POLL_INTERVAL` (3s):
+  1. `reserved → signed`: `POST /v1/sign/hot-wallet` with the **Withdrawal Key** `withdrawal:{withdrawal_id}`
+     (never the client's key). The signed raw tx, its nonce and chain are stored. wallet-service returns
+     the stored tx for a key it already signed (invariant #16), so a lost response or a crash never
+     allocates a second nonce. A refusal (400/409/422: no nonce allocated) Releases the Lock and fails the
+     request (`sign_refused`); anything else (503 during a Nonce Gap, 5xx, timeout) is retried.
+  2. `signed → broadcast`: sends exactly the stored raw tx. "Already known", or a tx that is already
+     mined, counts as sent. If the node says the nonce is used and our tx is not mined, an `ALERT` is
+     logged and the request is left alone (invariant #4: never auto-resolved once a tx exists).
+  3. `broadcast → confirmed`: once the receipt is `WITHDRAWAL_CONFIRMATION_DEPTH` blocks deep (decided:
+     64; 2 in `e2e/`), **Settle** — the only point where the debit Entry is posted (#3) — then the row
+     records the block and the ledger transaction id (task 3.5 corrects it on a refund). A tx mined but
+     **reverted** paid nothing: Release, `failed` / `tx_reverted`. A Settle that conflicts (the Lock was
+     released) is logged `ALERT` and left for an operator.
+  4. Events: `withdrawals.broadcast` / `withdrawals.confirmed` are written to an **outbox** table in the
+     same transaction as the state change, then published (Kafka key = `withdrawal_id`) and marked
+     published only after the broker's ack. A crash in between republishes; nothing is lost.
+
+  Every step is idempotent and every transition is a guarded `UPDATE ... WHERE status = ...`, so running
+  a pass twice, or two instances at once, does no harm. A request that may already have a nonce is only
+  ever moved forward: dropping a signed tx would strand that Hot Wallet nonce and block every later Hot
+  Wallet tx.
 - **Destination checks** (task 3.10, invariant #18), on both `POST /v1/withdrawals` and
   `POST /v1/whitelist`:
   - Hot and Warm come from wallet-service's `GET /v1/wallet/system-addresses`, asked **once at
@@ -85,8 +109,9 @@ yet.
 
 ```bash
 make certs && make up   # Postgres (own database "withdrawal") + withdrawal-service, http://localhost:8086, mTLS :8446
-                        # needs ASSETS_FILE / SCREENING_FILE (mounted) and a reachable wallet-service
-                        # (WALLET_SERVICE_URL); the whole stack runs together in e2e/ (`make -C ../../e2e up`)
+                        # needs ASSETS_FILE / SCREENING_FILE (mounted), and reachable wallet-service,
+                        # ledger-service (mTLS), RPC_URL and KAFKA_BROKERS: the whole stack runs together
+                        # in e2e/ (`make -C ../../e2e up`)
 make test               # store tests on a real Postgres (testcontainers or TEST_POSTGRES_DSN)
 ```
 
@@ -95,7 +120,8 @@ make test               # store tests on a real Postgres (testcontainers or TEST
 - In the `e2e/` stack (with `WHITELIST_COOLDOWN=2s`), but no e2e test drives it yet (task 3.8), and
   api-gateway does not route to it yet (task 3.7).
 - `internal/screening` is a copy of ledger-service's loader (same file, same rules).
-- No `pkg/events` dependency yet: the withdrawal events come with task 3.3, keyed on `withdrawal_id`
-  (task 3.11).
+- Ran end to end on the `e2e/` stack by hand (deposit 2 ETH → whitelist → withdraw 0.5 ETH → reserved
+  with 0.5 locked → confirmed, total 1.5, destination +0.5 ETH on-chain, event in Kafka and history-service).
+  The automated e2e test is task 3.8.
 - `internal/authz` is a copy of wallet-service's, as in ledger-service (a shared package needs a
   repo-root Docker build context).

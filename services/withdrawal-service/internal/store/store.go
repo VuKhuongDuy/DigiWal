@@ -57,6 +57,15 @@ type Withdrawal struct {
 	TxHash         *string
 	CreatedAt      time.Time
 	UpdatedAt      time.Time
+
+	// Filled in by the pipeline (task 3.3).
+	Nonce            *int64
+	SignedRawTx      *string
+	ChainID          *int64
+	BroadcastAt      *time.Time
+	ConfirmedBlock   *int64
+	SettleLedgerTxID *string
+	ConfirmedAt      *time.Time
 }
 
 // Key is the Withdrawal Key every downstream call uses (ledger Lock/Settle/Release,
@@ -108,7 +117,8 @@ func MigrateUp(dsn string) error {
 }
 
 const columns = `withdrawal_id, user_id, idempotency_key, asset_id, amount::text, to_address,
-	status, reject_reason, tx_hash, created_at, updated_at`
+	status, reject_reason, tx_hash, created_at, updated_at,
+	nonce, signed_raw_tx, chain_id, broadcast_at, confirmed_block, settle_ledger_tx_id, confirmed_at`
 
 // Create is invariant #11's first step: insert the row, or — if (user_id, idempotency_key)
 // already exists, however concurrently — read back the existing one. created reports which.
@@ -139,14 +149,10 @@ var ErrStateChanged = errors.New("withdrawal request is no longer in the expecte
 // Transition moves the row from `from` to `to` (and records reason, for `rejected`) in one
 // guarded UPDATE, so two writers can never both succeed (invariant #11).
 func (s *Store) Transition(ctx context.Context, id, from, to string, reason *string) (Withdrawal, error) {
-	w, err := scan(s.pool.QueryRow(ctx, `
+	return guarded(scan(s.pool.QueryRow(ctx, `
 		UPDATE withdrawal_requests SET status = $3, reject_reason = $4, updated_at = now()
 		WHERE withdrawal_id = $1 AND status = $2
-		RETURNING `+columns, id, from, to, reason))
-	if errors.Is(err, ErrNotFound) {
-		return Withdrawal{}, ErrStateChanged
-	}
-	return w, err
+		RETURNING `+columns, id, from, to, reason)))
 }
 
 // Get returns the user's own request for that key (invariant #20: never another user's).
@@ -160,7 +166,8 @@ func scan(row pgx.Row) (Withdrawal, error) {
 	var w Withdrawal
 	var amount string
 	err := row.Scan(&w.ID, &w.UserID, &w.IdempotencyKey, &w.AssetID, &amount, &w.ToAddress,
-		&w.Status, &w.RejectReason, &w.TxHash, &w.CreatedAt, &w.UpdatedAt)
+		&w.Status, &w.RejectReason, &w.TxHash, &w.CreatedAt, &w.UpdatedAt,
+		&w.Nonce, &w.SignedRawTx, &w.ChainID, &w.BroadcastAt, &w.ConfirmedBlock, &w.SettleLedgerTxID, &w.ConfirmedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Withdrawal{}, ErrNotFound
 	}

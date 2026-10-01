@@ -16,6 +16,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 
 	"digiwal/services/withdrawal-service/internal/authz"
+	"digiwal/services/withdrawal-service/internal/ledger"
 	"digiwal/services/withdrawal-service/internal/store"
 	"digiwal/services/withdrawal-service/internal/validate"
 )
@@ -41,7 +42,13 @@ type Validator interface {
 	Check(ctx context.Context, w store.Withdrawal) (reason string, err error)
 }
 
+// Reserver places the Reservation: ledger-service's Lock (task 3.3, invariant #1).
+type Reserver interface {
+	Lock(ctx context.Context, key, userID, assetID string, amount *big.Int) error
+}
+
 type Server struct {
+	reserver  Reserver // nil only in tests that stop at `validated`
 	requests  Requests
 	whitelist Whitelist
 	validator Validator
@@ -54,10 +61,11 @@ type Server struct {
 type Config struct {
 	WhitelistCooldown time.Duration
 	Destinations      validate.Destinations
+	Reserver          Reserver
 }
 
 func NewServer(r Requests, wl Whitelist, v Validator, cfg Config) *Server {
-	return &Server{requests: r, whitelist: wl, validator: v, cooldown: cfg.WhitelistCooldown, destinations: cfg.Destinations}
+	return &Server{requests: r, whitelist: wl, validator: v, cooldown: cfg.WhitelistCooldown, destinations: cfg.Destinations, reserver: cfg.Reserver}
 }
 
 // Routes is the plain listener: /healthz only (service-auth-mtls.md invariant #8).
@@ -156,43 +164,87 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	s.validateNew(w, r, wd)
 }
 
-// validateNew runs the validation step in-line, right after the row was created: only this
-// handler ever moves a row out of `requested` (invariant #11, Open Questions #9b option B).
-//   - all checks pass: `validated`, 202 (the Reservation, task 3.3, continues from here);
+// validateNew runs validation and then the Reservation in-line, right after the row was created:
+// only this handler ever moves a row out of `requested` (invariant #11, Open Questions #9b option B).
 //   - a check fails: `rejected` with reject_reason, 422 — nothing was reserved (#10);
 //   - no verdict (a dependency failed): the row stays `requested`, 503. That key is spent: a
 //     retry with it only reads the row back; the Reaper fails it after the Stuck Request Timeout,
-//     and the client retries with a new key (#17, #18).
+//     and the client retries with a new key (#17, #18);
+//   - all checks pass: `validated`, then the ledger Lock (#1):
+//     locked → `reserved`, 202 (signing and broadcast continue in the background, task 3.3);
+//     not enough Available Balance → `rejected` / insufficient_funds, 422, no Lock exists;
+//     ledger unreachable → 503, the row stays `validated` and the Reaper Releases and fails it.
 func (s *Server) validateNew(w http.ResponseWriter, r *http.Request, wd store.Withdrawal) {
 	reason, err := s.validator.Check(r.Context(), wd)
 	if err != nil {
 		log.Printf("validating withdrawal %s: %v", wd.ID, err)
-		writeJSON(w, http.StatusServiceUnavailable, map[string]string{
-			"error":           "validation could not complete; retry with a new idempotency_key",
-			"idempotency_key": wd.IdempotencyKey,
-			"status":          wd.Status,
-		})
+		writeUnavailable(w, wd)
 		return
 	}
-	to, code := store.StatusValidated, http.StatusAccepted
-	var why *string
 	if reason != "" {
-		to, code, why = store.StatusRejected, http.StatusUnprocessableEntity, &reason
+		s.advance(w, r, wd, store.StatusRequested, store.StatusRejected, &reason, http.StatusUnprocessableEntity)
+		return
 	}
-	next, err := s.requests.Transition(r.Context(), wd.ID, store.StatusRequested, to, why)
-	if errors.Is(err, store.ErrStateChanged) {
-		// Someone else (the Reaper) moved it first; report what it is now.
-		if next, err = s.requests.Get(r.Context(), wd.UserID, wd.IdempotencyKey); err == nil {
-			writeJSON(w, http.StatusOK, response(next))
-			return
+	next, ok := s.advance(nil, r, wd, store.StatusRequested, store.StatusValidated, nil, 0)
+	if !ok || s.reserver == nil {
+		if ok {
+			writeJSON(w, http.StatusAccepted, response(next))
+		} else {
+			s.writeCurrent(w, r, wd)
 		}
+		return
 	}
+	err = s.reserver.Lock(r.Context(), next.Key(), next.UserID, next.AssetID, next.Amount)
+	switch {
+	case errors.Is(err, ledger.ErrInsufficientFunds):
+		why := RejectInsufficientFunds
+		s.advance(w, r, next, store.StatusValidated, store.StatusRejected, &why, http.StatusUnprocessableEntity)
+	case err != nil:
+		log.Printf("reserving withdrawal %s: %v", wd.ID, err)
+		writeUnavailable(w, next)
+	default:
+		s.advance(w, r, next, store.StatusValidated, store.StatusReserved, nil, http.StatusAccepted)
+	}
+}
+
+// RejectInsufficientFunds: the ledger refused the Lock for lack of Available Balance (Decided).
+const RejectInsufficientFunds = "insufficient_funds"
+
+// advance makes one guarded transition. With a writer it also answers: code on success, the
+// row's current status if someone else (the Reaper) moved it first. ok reports success.
+func (s *Server) advance(w http.ResponseWriter, r *http.Request, wd store.Withdrawal, from, to string, reason *string, code int) (store.Withdrawal, bool) {
+	next, err := s.requests.Transition(r.Context(), wd.ID, from, to, reason)
 	if err != nil {
-		log.Printf("recording validation of %s: %v", wd.ID, err)
+		if !errors.Is(err, store.ErrStateChanged) {
+			log.Printf("recording %s -> %s for %s: %v", from, to, wd.ID, err)
+		}
+		if w != nil {
+			s.writeCurrent(w, r, wd)
+		}
+		return store.Withdrawal{}, false
+	}
+	if w != nil {
+		writeJSON(w, code, response(next))
+	}
+	return next, true
+}
+
+// writeCurrent answers with the row as it is now.
+func (s *Server) writeCurrent(w http.ResponseWriter, r *http.Request, wd store.Withdrawal) {
+	cur, err := s.requests.Get(r.Context(), wd.UserID, wd.IdempotencyKey)
+	if err != nil {
+		log.Printf("reading withdrawal %s: %v", wd.ID, err)
 		writeErr(w, http.StatusInternalServerError, "internal error")
 		return
 	}
-	writeJSON(w, code, response(next))
+	writeJSON(w, http.StatusOK, response(cur))
+}
+
+func writeUnavailable(w http.ResponseWriter, wd store.Withdrawal) {
+	writeJSON(w, http.StatusServiceUnavailable, map[string]string{
+		"error":           "the request could not be completed; retry with a new idempotency_key",
+		"idempotency_key": wd.IdempotencyKey,
+	})
 }
 
 // handleGet is GET /v1/withdrawals/{idempotency_key}?user_id=… — the caller's own request only;

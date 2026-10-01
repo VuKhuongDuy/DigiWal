@@ -3,6 +3,7 @@
 package wallet
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
@@ -50,17 +51,26 @@ type SystemAddresses struct {
 }
 
 func (c *Client) get(ctx context.Context, path string) (int, []byte, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(c.BaseURL, "/")+path, nil)
+	return c.do(ctx, http.MethodGet, path, nil)
+}
+
+func (c *Client) do(ctx context.Context, method, path string, body []byte) (int, []byte, error) {
+	var rd io.Reader
+	if body != nil {
+		rd = bytes.NewReader(body)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, strings.TrimRight(c.BaseURL, "/")+path, rd)
 	if err != nil {
 		return 0, nil, err
 	}
+	req.Header.Set("Content-Type", "application/json")
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
 		return 0, nil, fmt.Errorf("calling wallet-service %s: %w", path, err)
 	}
 	defer resp.Body.Close()
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<14))
-	return resp.StatusCode, body, nil
+	out, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<14))
+	return resp.StatusCode, out, nil
 }
 
 // SystemAddresses is asked once at startup and cached by the caller (invariant #18); anything but
@@ -86,6 +96,45 @@ func (c *Client) SystemAddresses(ctx context.Context) (SystemAddresses, error) {
 		return SystemAddresses{}, fmt.Errorf("wallet-service returned unusable system addresses: %q", body)
 	}
 	return a, nil
+}
+
+// SignRequest is what to pay, never which key nor how to build the tx (withdrawal-flow.md #5).
+type SignRequest struct {
+	ToAddress      string `json:"to_address"`
+	AssetID        string `json:"asset_id"`
+	Amount         string `json:"amount"`
+	ChainID        int64  `json:"chain_id"`
+	IdempotencyKey string `json:"idempotency_key"` // the Withdrawal Key (invariant #20)
+}
+
+// ErrSignRefused: wallet-service refused the request itself (400/409/422) — it allocated no nonce,
+// so the Lock can be Released. Anything else (503 while a Nonce Gap is open, 5xx, no response) is
+// transient: the same key is asked again, and wallet-service returns the stored tx if it had
+// already signed (invariant #16), so a lost response can never strand a nonce.
+var ErrSignRefused = errors.New("wallet-service refused to sign")
+
+// SignHotWallet is POST /v1/sign/hot-wallet → the signed raw tx and the Hot Wallet nonce it claims.
+func (c *Client) SignHotWallet(ctx context.Context, r SignRequest) (rawTx string, nonce uint64, err error) {
+	b, _ := json.Marshal(r)
+	code, body, err := c.do(ctx, http.MethodPost, "/v1/sign/hot-wallet", b)
+	if err != nil {
+		return "", 0, err
+	}
+	switch code {
+	case http.StatusOK:
+		var out struct {
+			SignedRawTx string `json:"signed_raw_tx"`
+			Nonce       uint64 `json:"nonce"`
+		}
+		if err := json.Unmarshal(body, &out); err != nil || !strings.HasPrefix(out.SignedRawTx, "0x") {
+			return "", 0, fmt.Errorf("wallet-service returned an unusable signature: %q", body)
+		}
+		return out.SignedRawTx, out.Nonce, nil
+	case http.StatusBadRequest, http.StatusConflict, http.StatusUnprocessableEntity:
+		return "", 0, fmt.Errorf("%w (%d): %s", ErrSignRefused, code, strings.TrimSpace(string(body)))
+	default:
+		return "", 0, fmt.Errorf("wallet-service sign answered %d: %s", code, strings.TrimSpace(string(body)))
+	}
 }
 
 // ErrUnknown means wallet-service gave no clean answer: never to be read as "not ours".

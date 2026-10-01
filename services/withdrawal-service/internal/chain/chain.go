@@ -1,0 +1,100 @@
+// Package chain is withdrawal-service's view of the EVM RPC: broadcast a signed tx, and read its
+// receipt and the head to count confirmations.
+package chain
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"strings"
+
+	"github.com/ethereum/go-ethereum"
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/common/hexutil"
+	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/ethclient"
+)
+
+type Receipt struct {
+	BlockNumber int64
+	Success     bool
+}
+
+type Chain interface {
+	ChainID(ctx context.Context) (int64, error)
+	Head(ctx context.Context) (int64, error)
+	// Broadcast sends the raw tx. A node that already has it is not an error.
+	Broadcast(ctx context.Context, rawTx string) error
+	// Receipt is nil (no error) while the tx is not in a block.
+	Receipt(ctx context.Context, hash common.Hash) (*Receipt, error)
+}
+
+// TxHash is the hash of a signed raw tx, known before (and independent of) broadcasting it.
+func TxHash(rawTx string) (common.Hash, error) {
+	b, err := hexutil.Decode(rawTx)
+	if err != nil {
+		return common.Hash{}, fmt.Errorf("decoding raw tx: %w", err)
+	}
+	var tx types.Transaction
+	if err := tx.UnmarshalBinary(b); err != nil {
+		return common.Hash{}, fmt.Errorf("decoding raw tx: %w", err)
+	}
+	return tx.Hash(), nil
+}
+
+type Eth struct{ c *ethclient.Client }
+
+func Dial(ctx context.Context, url string) (*Eth, error) {
+	c, err := ethclient.DialContext(ctx, url)
+	if err != nil {
+		return nil, fmt.Errorf("dialing RPC: %w", err)
+	}
+	return &Eth{c: c}, nil
+}
+
+func (e *Eth) ChainID(ctx context.Context) (int64, error) {
+	id, err := e.c.ChainID(ctx)
+	if err != nil {
+		return 0, err
+	}
+	return id.Int64(), nil
+}
+
+func (e *Eth) Head(ctx context.Context) (int64, error) {
+	n, err := e.c.BlockNumber(ctx)
+	return int64(n), err
+}
+
+func (e *Eth) Broadcast(ctx context.Context, rawTx string) error {
+	b, err := hexutil.Decode(rawTx)
+	if err != nil {
+		return err
+	}
+	var tx types.Transaction
+	if err := tx.UnmarshalBinary(b); err != nil {
+		return err
+	}
+	err = e.c.SendTransaction(ctx, &tx)
+	if err != nil && isAlreadyKnown(err) {
+		return nil
+	}
+	return err
+}
+
+// isAlreadyKnown: the node already has this exact tx (a re-broadcast after a crash). Geth says
+// "already known", Anvil and others "transaction already imported" / "known transaction".
+func isAlreadyKnown(err error) bool {
+	m := strings.ToLower(err.Error())
+	return strings.Contains(m, "already known") || strings.Contains(m, "already imported") || strings.Contains(m, "known transaction")
+}
+
+func (e *Eth) Receipt(ctx context.Context, hash common.Hash) (*Receipt, error) {
+	r, err := e.c.TransactionReceipt(ctx, hash)
+	if errors.Is(err, ethereum.NotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &Receipt{BlockNumber: r.BlockNumber.Int64(), Success: r.Status == types.ReceiptStatusSuccessful}, nil
+}

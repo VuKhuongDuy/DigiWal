@@ -1,8 +1,12 @@
+# Build context is the REPO ROOT (it needs pkg/events):
+#   docker build -f services/withdrawal-service/Dockerfile .
 FROM golang:1.26-alpine AS build
 WORKDIR /src
-COPY go.mod go.sum ./
+COPY pkg/events pkg/events
+COPY services/withdrawal-service/go.mod services/withdrawal-service/go.sum services/withdrawal-service/
+WORKDIR /src/services/withdrawal-service
 RUN go mod download
-COPY . .
+COPY services/withdrawal-service/ .
 RUN CGO_ENABLED=0 go build -o /out/service ./cmd/service
 
 FROM alpine:3.20
