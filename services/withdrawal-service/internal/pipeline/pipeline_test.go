@@ -84,6 +84,7 @@ func (s *fakeSigner) SignHotWallet(_ context.Context, r wallet.SignRequest) (str
 }
 
 type fakeChain struct {
+	revertReason string
 	head         int64
 	receipts     map[common.Hash]*chain.Receipt
 	sent         []string
@@ -103,6 +104,10 @@ func (c *fakeChain) Broadcast(_ context.Context, raw string) error {
 }
 func (c *fakeChain) Receipt(_ context.Context, h common.Hash) (*chain.Receipt, error) {
 	return c.receipts[h], nil
+}
+
+func (c *fakeChain) RevertReason(context.Context, common.Hash, int64) (string, error) {
+	return c.revertReason, nil
 }
 
 // mine puts every sent tx in the current head block.
@@ -361,7 +366,14 @@ func TestRevertedTxReleasesTheLock(t *testing.T) {
 	w := r.reserved("k1")
 	_ = r.step()
 	r.chain.mine(false)
-	r.chain.head += depth
+	r.chain.revertReason = "execution reverted: ERC20: transfer amount exceeds balance"
+	// Not deep yet: a shallow revert may still be reorged away, so nothing happens.
+	r.chain.head += depth - 1
+	_ = r.step()
+	if r.get("k1").Status != store.StatusBroadcast || len(r.ledger.released) != 0 {
+		t.Fatal("acted on a revert before Withdrawal Confirmation Depth")
+	}
+	r.chain.head++
 	if err := r.step(); err != nil {
 		t.Fatal(err)
 	}
@@ -432,5 +444,19 @@ func TestSeveralRequests(t *testing.T) {
 			t.Fatalf("%s: %s nonce %d", k, got.Status, *got.Nonce)
 		}
 		seen[*got.Nonce] = true
+	}
+}
+
+func TestHotWalletShort(t *testing.T) {
+	for msg, want := range map[string]bool{
+		"execution reverted: ERC20: transfer amount exceeds balance": true,
+		"execution reverted: insufficient balance":                   true,
+		"insufficient funds for gas * price + value":                 true,
+		"execution reverted: Pausable: paused":                       false,
+		"":                                                           false,
+	} {
+		if got := HotWalletShort(msg); got != want {
+			t.Errorf("%q: %v, want %v", msg, got, want)
+		}
 	}
 }

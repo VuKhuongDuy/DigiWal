@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math/big"
 	"strings"
 
 	"github.com/ethereum/go-ethereum"
@@ -27,6 +28,9 @@ type Chain interface {
 	Broadcast(ctx context.Context, rawTx string) error
 	// Receipt is nil (no error) while the tx is not in a block.
 	Receipt(ctx context.Context, hash common.Hash) (*Receipt, error)
+	// RevertReason replays a reverted tx (eth_call against the state before its block) and
+	// returns the node's revert message. Best effort: "" when it cannot be recovered.
+	RevertReason(ctx context.Context, hash common.Hash, block int64) (string, error)
 }
 
 // TxHash is the hash of a signed raw tx, known before (and independent of) broadcasting it.
@@ -86,6 +90,25 @@ func (e *Eth) Broadcast(ctx context.Context, rawTx string) error {
 func isAlreadyKnown(err error) bool {
 	m := strings.ToLower(err.Error())
 	return strings.Contains(m, "already known") || strings.Contains(m, "already imported") || strings.Contains(m, "known transaction")
+}
+
+func (e *Eth) RevertReason(ctx context.Context, hash common.Hash, block int64) (string, error) {
+	tx, _, err := e.c.TransactionByHash(ctx, hash)
+	if err != nil {
+		return "", fmt.Errorf("reading tx %s: %w", hash.Hex(), err)
+	}
+	from, err := types.Sender(types.LatestSignerForChainID(tx.ChainId()), tx)
+	if err != nil {
+		return "", err
+	}
+	// The state just before the tx's block; earlier txs in the same block are not replayed, so
+	// this is a close approximation, which is all a log line needs.
+	_, err = e.c.CallContract(ctx, ethereum.CallMsg{From: from, To: tx.To(), Gas: tx.Gas(), Value: tx.Value(), Data: tx.Data()},
+		big.NewInt(block-1))
+	if err == nil {
+		return "", nil // succeeds on replay: the cause was something earlier in the same block
+	}
+	return err.Error(), nil
 }
 
 func (e *Eth) Receipt(ctx context.Context, hash common.Hash) (*Receipt, error) {

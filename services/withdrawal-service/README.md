@@ -69,7 +69,11 @@ refunds (3.5) and the Reaper (3.9) are not built yet.
   3. `broadcast → confirmed`: once the receipt is `WITHDRAWAL_CONFIRMATION_DEPTH` blocks deep (decided:
      64; 2 in `e2e/`), **Settle** — the only point where the debit Entry is posted (#3) — then the row
      records the block and the ledger transaction id (task 3.5 corrects it on a refund). A tx mined but
-     **reverted** paid nothing: Release, `failed` / `tx_reverted`. A Settle that conflicts (the Lock was
+     **reverted** paid nothing: once the revert is itself that deep (a shallower receipt can still change),
+     Release, `failed` / `tx_reverted`, no auto-retry (Decided). The revert reason is recovered by
+     replaying the tx (`eth_call` at the block before) and logged; a reason that says the sender lacked
+     funds — the Hot Wallet short of the asset, our fault — is logged as `ALERT`. Not yet reported to the
+     user: the `withdrawals.failed` event is being designed. A Settle that conflicts (the Lock was
      released) is logged `ALERT` and left for an operator.
   4. Events: `withdrawals.broadcast` / `withdrawals.confirmed` are written to an **outbox** table in the
      same transaction as the state change, then published (Kafka key = `withdrawal_id`) and marked

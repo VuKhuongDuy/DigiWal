@@ -195,7 +195,18 @@ func (p *Pipeline) confirm(ctx context.Context, w store.Withdrawal) error {
 		return nil
 	}
 	if !r.Success {
-		log.Printf("withdrawal %s: tx %s reverted in block %d — releasing its Lock", w.ID, *w.TxHash, r.BlockNumber)
+		// Decided (Tech Lead): only once the revert is itself Withdrawal Confirmation Depth deep (a
+		// shallower receipt can still change under a reorg); Release, fail, no auto-retry. The revert
+		// reason is recorded; a Hot Wallet short of the asset is our fault, not the user's: ALERT.
+		reason, rerr := p.Chain.RevertReason(ctx, common.HexToHash(*w.TxHash), r.BlockNumber)
+		if rerr != nil {
+			reason = "unknown (" + rerr.Error() + ")"
+		}
+		level := "withdrawal"
+		if HotWalletShort(reason) {
+			level = "ALERT: withdrawal"
+		}
+		log.Printf("%s %s: tx %s reverted in block %d, revert reason %q — releasing its Lock", level, w.ID, *w.TxHash, r.BlockNumber, reason)
 		return p.releaseAndFail(ctx, w, store.StatusBroadcast, ReasonTxReverted)
 	}
 	ledgerTx, err := p.Ledger.Settle(ctx, w.Key())
@@ -218,6 +229,18 @@ func (p *Pipeline) confirm(ctx context.Context, w store.Withdrawal) error {
 		return events.TopicWithdrawalsConfirmed, b, err
 	})
 	return err
+}
+
+// HotWalletShort reports whether a revert message says the sender lacked funds — for a withdrawal
+// that is the Hot Wallet running short of the asset, an operational fault that ops must fix.
+func HotWalletShort(revertReason string) bool {
+	m := strings.ToLower(revertReason)
+	for _, s := range []string{"insufficient balance", "exceeds balance", "insufficient funds", "transfer amount exceeds"} {
+		if strings.Contains(m, s) {
+			return true
+		}
+	}
+	return false
 }
 
 // releaseAndFail gives the Lock back, then marks the request failed. Release first: if the
