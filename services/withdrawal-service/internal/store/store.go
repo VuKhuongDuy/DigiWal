@@ -70,6 +70,9 @@ type Withdrawal struct {
 	// Set when a Nonce Gap disputed the request (task 3.4): the status it was in.
 	DisputedFrom *string
 	DisputedAt   *time.Time
+
+	// The chain head the Reaper first saw this request `broadcast` at (task 3.9).
+	BroadcastHeadSeen *int64
 }
 
 // Key is the Withdrawal Key every downstream call uses (ledger Lock/Settle/Release,
@@ -123,7 +126,7 @@ func MigrateUp(dsn string) error {
 const columns = `withdrawal_id, user_id, idempotency_key, asset_id, amount::text, to_address,
 	status, reject_reason, tx_hash, created_at, updated_at,
 	nonce, signed_raw_tx, chain_id, broadcast_at, confirmed_block, settle_ledger_tx_id, confirmed_at,
-	disputed_from, disputed_at`
+	disputed_from, disputed_at, broadcast_head_seen`
 
 // Create is invariant #11's first step: insert the row, or — if (user_id, idempotency_key)
 // already exists, however concurrently — read back the existing one. created reports which.
@@ -178,7 +181,7 @@ func scan(row pgx.Row) (Withdrawal, error) {
 	err := row.Scan(&w.ID, &w.UserID, &w.IdempotencyKey, &w.AssetID, &amount, &w.ToAddress,
 		&w.Status, &w.RejectReason, &w.TxHash, &w.CreatedAt, &w.UpdatedAt,
 		&w.Nonce, &w.SignedRawTx, &w.ChainID, &w.BroadcastAt, &w.ConfirmedBlock, &w.SettleLedgerTxID, &w.ConfirmedAt,
-		&w.DisputedFrom, &w.DisputedAt)
+		&w.DisputedFrom, &w.DisputedAt, &w.BroadcastHeadSeen)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Withdrawal{}, ErrNotFound
 	}

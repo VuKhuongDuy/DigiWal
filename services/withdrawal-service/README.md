@@ -1,10 +1,11 @@
 # withdrawal-service
 
-Orchestrates withdrawals (`docs/design/withdrawal-flow.md`). **Tasks 3.1-3.6, 3.10 and the
+Orchestrates withdrawals (`docs/design/withdrawal-flow.md`). **Tasks 3.1-3.6, 3.9, 3.10 and the
 withdrawal-service part of 3.11 so far:** a request is recorded idempotently, validated, Reserved on the
 ledger, then signed, broadcast, confirmed and Settled in the background; confirmed txs are watched for
-Nonce Gaps; an operator can abandon a disputed request (refund or Release, 3.5). The Reaper (3.9) and the
-never-strand-a-nonce work (3.13) are not built yet.
+Nonce Gaps; an operator can abandon a disputed request (refund or Release, 3.5). A Reaper reclaims stuck
+requests (3.9). The never-strand-a-nonce work (3.13: void/replace in wallet-service, Fee Bump, Nonce
+Filler CLI) and the e2e test (3.8) are not built yet.
 
 ## What works
 
@@ -115,6 +116,25 @@ never-strand-a-nonce work (3.13) are not built yet.
      becomes `failed` (`abandoned_refunded` / `abandoned`). Safe to re-run after a crash.
   3. When no request is `disputed` any more, lift the freeze in wallet-service's database (its README).
   The Nonce Filler is not built yet (task 3.13); until then a filler has to be sent by hand.
+- **Reaper** (task 3.9, invariant #17, `internal/pipeline/reaper.go`), one pass every `REAPER_INTERVAL`
+  (30s). It frees stuck requests only when it can *prove* nothing can still reach the chain and no Hot
+  Wallet nonce is left allocated but unused. Every write is a guarded `UPDATE ... WHERE status = <expected>`,
+  so it never overwrites a row the request handler or pipeline just moved (it simply loses the race).
+
+  | Status | Rule | Result |
+  |---|---|---|
+  | `requested` > `STUCK_REQUEST_TIMEOUT` (5 min) | nothing was ever held | `failed` / `stale_request`, no ledger call |
+  | `validated` > `STUCK_RESERVATION_TIMEOUT` (5 min) | the key never reached wallet-service, so no nonce | Release, `failed` / `stale_reservation` |
+  | `reserved` > 5 min | a sign call may have landed: only wallet-service's `void` rules that out | **ALERT only for now** (no `/void` until task 3.13); then `voided` → Release, `already_signed` → `signed` |
+  | `signed` > 5 min | **never** Released on a timeout | ALERT naming the likely cause: underpriced, Hot Wallet lacks ETH, or an earlier nonce is unmined |
+  | `signed`/`broadcast`: Hot Wallet's **mined** (`latest`) nonce > N **and** no receipt for any of the request's tx hashes (`broadcast`: also `STUCK_BROADCAST_BLOCKS` = 128 blocks) | nonce N is consumed by another tx, none of ours can land | Release, `failed` / `replaced_or_dropped` (this is how a Nonce Filler completes) |
+  | `broadcast` > 128 blocks, N unconsumed | the tx may still be in a mempool | ALERT only |
+
+  Notes: the mined nonce is read **before** the receipts (the other way round, our own tx mined between the
+  two reads would look like another tx's), and the `pending` nonce is never used. ALERTs go to the log with
+  an `ALERT:` prefix, each repeated at most every 10 minutes. The 128 blocks are counted from the chain head
+  the Reaper first saw the row `broadcast` at (`broadcast_head_seen`), so it can only wait longer than 128
+  blocks, never shorter. Stuck rows that are only ALERTed stay in the queue (500 per pass).
 - **Destination checks** (task 3.10, invariant #18), on both `POST /v1/withdrawals` and
   `POST /v1/whitelist`:
   - Hot and Warm come from wallet-service's `GET /v1/wallet/system-addresses`, asked **once at

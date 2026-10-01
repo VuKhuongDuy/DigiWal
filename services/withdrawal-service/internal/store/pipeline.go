@@ -103,3 +103,22 @@ func (s *Store) MarkPublished(ctx context.Context, id int64) error {
 	_, err := s.pool.Exec(ctx, `UPDATE withdrawal_outbox SET published_at = now() WHERE id = $1 AND published_at IS NULL`, id)
 	return err
 }
+
+// ListOlderThan returns up to limit requests in status that have not changed since before,
+// oldest first: the Reaper's work queue (updated_at is when the row entered its status).
+func (s *Store) ListOlderThan(ctx context.Context, status string, before time.Time, limit int) ([]Withdrawal, error) {
+	rows, err := s.pool.Query(ctx, `SELECT `+columns+` FROM withdrawal_requests
+		WHERE status = $1 AND updated_at < $2 ORDER BY updated_at, withdrawal_id LIMIT $3`, status, before, limit)
+	if err != nil {
+		return nil, err
+	}
+	return pgx.CollectRows(rows, func(r pgx.CollectableRow) (Withdrawal, error) { return scan(r) })
+}
+
+// StampBroadcastHead records the chain head the Reaper first saw a request `broadcast` at. Guarded:
+// only a still-`broadcast` row that has no stamp yet is touched, and updated_at is left alone.
+func (s *Store) StampBroadcastHead(ctx context.Context, id string, head int64) error {
+	_, err := s.pool.Exec(ctx, `UPDATE withdrawal_requests SET broadcast_head_seen = $2
+		WHERE withdrawal_id = $1 AND status = 'broadcast' AND broadcast_head_seen IS NULL`, id, head)
+	return err
+}

@@ -255,10 +255,18 @@ func HotWalletShort(revertReason string) bool {
 // releaseAndFail gives the Lock back, then marks the request failed. Release first: if the
 // transition then fails, the next pass Releases again (idempotent) and retries the transition.
 func (p *Pipeline) releaseAndFail(ctx context.Context, w store.Withdrawal, from, reason string) error {
-	if err := p.Ledger.Release(ctx, w.Key()); err != nil {
+	return releaseAndFail(ctx, p.Store, p.Ledger, w, from, reason)
+}
+
+type transitioner interface {
+	Transition(ctx context.Context, id, from, to string, reason *string) (store.Withdrawal, error)
+}
+
+func releaseAndFail(ctx context.Context, st transitioner, lg Ledger, w store.Withdrawal, from, reason string) error {
+	if err := lg.Release(ctx, w.Key()); err != nil {
 		return fmt.Errorf("releasing: %w", err)
 	}
-	_, err := p.Store.Transition(ctx, w.ID, from, store.StatusFailed, &reason)
+	_, err := st.Transition(ctx, w.ID, from, store.StatusFailed, &reason)
 	return err
 }
 

@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"sync"
 	"testing"
+	"time"
 
 	"digiwal/services/withdrawal-service/internal/testdb"
 )
@@ -153,5 +154,44 @@ func TestTransitionIsGuarded(t *testing.T) {
 	}
 	if again, _ := s.Get(ctx, "alice", "t1"); again.Status != StatusRejected {
 		t.Fatalf("row overwritten: %s", again.Status)
+	}
+}
+
+func TestListOlderThanAndStampBroadcastHead(t *testing.T) {
+	s := newStore(t)
+	ctx := context.Background()
+	w, _, err := s.Create(ctx, req("alice", "k1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	future := w.UpdatedAt.Add(time.Minute)
+	if rows, err := s.ListOlderThan(ctx, StatusRequested, w.UpdatedAt.Add(-time.Minute), 10); err != nil || len(rows) != 0 {
+		t.Fatalf("a fresh row listed as old: %v %v", rows, err)
+	}
+	if rows, err := s.ListOlderThan(ctx, StatusValidated, future, 10); err != nil || len(rows) != 0 {
+		t.Fatalf("wrong status listed: %v %v", rows, err)
+	}
+	rows, err := s.ListOlderThan(ctx, StatusRequested, future, 10)
+	if err != nil || len(rows) != 1 || rows[0].ID != w.ID {
+		t.Fatalf("old row not listed: %v %v", rows, err)
+	}
+
+	// The stamp only lands on a `broadcast` row, and only once.
+	if err := s.StampBroadcastHead(ctx, w.ID, 7); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := s.GetByID(ctx, w.ID); got.BroadcastHeadSeen != nil {
+		t.Fatal("stamped a row that is not broadcast")
+	}
+	if _, err := s.pool.Exec(ctx, `UPDATE withdrawal_requests SET status = 'broadcast' WHERE withdrawal_id = $1`, w.ID); err != nil {
+		t.Fatal(err)
+	}
+	for _, head := range []int64{7, 99} {
+		if err := s.StampBroadcastHead(ctx, w.ID, head); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got, _ := s.GetByID(ctx, w.ID); got.BroadcastHeadSeen == nil || *got.BroadcastHeadSeen != 7 {
+		t.Fatalf("stamp = %v, want the first head (7)", got.BroadcastHeadSeen)
 	}
 }

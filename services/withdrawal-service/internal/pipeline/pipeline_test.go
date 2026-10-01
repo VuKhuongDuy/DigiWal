@@ -95,6 +95,8 @@ type fakeChain struct {
 	receipts     map[common.Hash]*chain.Receipt
 	sent         []string
 	broadcastErr error
+	baseFee      int64
+	balance      *big.Int
 }
 
 func newChain() *fakeChain { return &fakeChain{head: 100, receipts: map[common.Hash]*chain.Receipt{}} }
@@ -114,6 +116,15 @@ func (c *fakeChain) Receipt(_ context.Context, h common.Hash) (*chain.Receipt, e
 
 func (c *fakeChain) MinedNonce(context.Context, common.Address) (uint64, error) {
 	return c.minedNonce, nil
+}
+
+func (c *fakeChain) BaseFee(context.Context) (*big.Int, error) { return big.NewInt(c.baseFee), nil }
+
+func (c *fakeChain) Balance(context.Context, common.Address) (*big.Int, error) {
+	if c.balance == nil {
+		return new(big.Int).Exp(big.NewInt(10), big.NewInt(21), nil), nil // plenty
+	}
+	return c.balance, nil
 }
 
 func (c *fakeChain) RevertReason(context.Context, common.Hash, int64) (string, error) {

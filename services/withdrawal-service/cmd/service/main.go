@@ -1,6 +1,6 @@
 // Command withdrawal-service orchestrates withdrawals (docs/design/withdrawal-flow.md).
 //
-// Today (tasks 3.1-3.3, 3.6, 3.10): apply migrations, load the Asset Registry and Screening
+// Today (tasks 3.1-3.6, 3.9, 3.10): apply migrations, load the Asset Registry and Screening
 // List, learn the Hot/Warm addresses from wallet-service, then serve /healthz on a plain listener
 // and the withdrawal and whitelist endpoints on an mTLS listener restricted to CN=api-gateway.
 // A request is recorded idempotently, validated and Reserved in-line; a background pipeline
@@ -107,6 +107,17 @@ func main() {
 		Gaps: &pipeline.GapWatch{Store: st, Reporter: walletClient, Window: envInt("NONCE_GAP_WINDOW", 256)}}
 	go pipe.Run(ctx, envDuration("POLL_INTERVAL", 3*time.Second))
 	log.Printf("withdrawal pipeline running: chain %d, confirmation depth %d", system.ChainID, pipe.ConfirmationDepth)
+
+	// The Reaper (task 3.9, invariant #17). Decided (Tech Lead): 5 minutes, 5 minutes, 128 blocks.
+	// Voider stays nil until task 3.13 builds wallet-service's /void: a stuck `reserved` row is
+	// then only ALERTed, never Released.
+	reaper := &pipeline.Reaper{Store: st, Ledger: ledgerClient, Chain: rpc, ChainID: system.ChainID,
+		StuckRequestTimeout:     envDuration("STUCK_REQUEST_TIMEOUT", 5*time.Minute),
+		StuckReservationTimeout: envDuration("STUCK_RESERVATION_TIMEOUT", 5*time.Minute),
+		StuckBroadcastBlocks:    envInt("STUCK_BROADCAST_BLOCKS", 128)}
+	go reaper.Run(ctx, envDuration("REAPER_INTERVAL", 30*time.Second))
+	log.Printf("withdrawal reaper running: requested %s, reserved %s, broadcast %d blocks",
+		reaper.StuckRequestTimeout, reaper.StuckReservationTimeout, reaper.StuckBroadcastBlocks)
 
 	tlsCfg, err := authz.ServerTLSConfig(requireEnv("TLS_CERT_FILE"), requireEnv("TLS_KEY_FILE"), requireEnv("TLS_CA_FILE"))
 	if err != nil {
