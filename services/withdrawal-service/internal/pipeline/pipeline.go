@@ -129,7 +129,9 @@ func (p *Pipeline) now() time.Time {
 	return time.Now()
 }
 
-// sign: reserved → signed. A refusal (no nonce allocated) Releases the Lock and fails the request.
+// sign: reserved → signed. A refusal (400/422: no nonce allocated) Releases the Lock and fails the
+// request; a 409 (the key is already signed for a different request) is an ALERT and is never
+// released, since a nonce exists under that key.
 // Anything else — wallet-service down, a Nonce Gap freeze (503) — is retried with the same key.
 func (p *Pipeline) sign(ctx context.Context, w store.Withdrawal) error {
 	raw, nonce, err := p.Signer.SignHotWallet(ctx, wallet.SignRequest{
@@ -138,6 +140,10 @@ func (p *Pipeline) sign(ctx context.Context, w store.Withdrawal) error {
 	if errors.Is(err, wallet.ErrSignRefused) {
 		log.Printf("withdrawal %s: %v — releasing its Lock", w.ID, err)
 		return p.releaseAndFail(ctx, w, store.StatusReserved, ReasonSignRefused)
+	}
+	if errors.Is(err, wallet.ErrKeyConflict) {
+		log.Printf("ALERT: withdrawal %s: %v — a nonce may be allocated under its key; not releasing", w.ID, err)
+		return err
 	}
 	if err != nil {
 		return err

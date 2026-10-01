@@ -61,8 +61,10 @@ refunds (3.5) and the Reaper (3.9) are not built yet.
   1. `reserved → signed`: `POST /v1/sign/hot-wallet` with the **Withdrawal Key** `withdrawal:{withdrawal_id}`
      (never the client's key). The signed raw tx, its nonce and chain are stored. wallet-service returns
      the stored tx for a key it already signed (invariant #16), so a lost response or a crash never
-     allocates a second nonce. A refusal (400/409/422: no nonce allocated) Releases the Lock and fails the
-     request (`sign_refused`); anything else (503 during a Nonce Gap, 5xx, timeout) is retried.
+     allocates a second nonce. A refusal (400/422: no nonce allocated) Releases the Lock and fails the
+     request (`sign_refused`); a 409 (the key already signed for a different
+     request, so a nonce exists) is an `ALERT` and never released (withdrawal-flow.md Open Questions #16);
+     anything else (503 during a Nonce Gap, 5xx, timeout) is retried.
   2. `signed → broadcast`: sends exactly the stored raw tx. "Already known", or a tx that is already
      mined, counts as sent. If the node says the nonce is used and our tx is not mined, an `ALERT` is
      logged and the request is left alone (invariant #4: never auto-resolved once a tx exists).

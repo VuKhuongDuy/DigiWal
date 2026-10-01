@@ -46,6 +46,7 @@ type fakeSigner struct {
 	next      uint64
 	keys      []string
 	refuse    bool
+	conflict  bool
 	failNext  int  // transient failures before answering
 	loseReply bool // sign and store, then fail as if the response were lost
 }
@@ -59,6 +60,9 @@ func (s *fakeSigner) SignHotWallet(_ context.Context, r wallet.SignRequest) (str
 	s.keys = append(s.keys, r.IdempotencyKey)
 	if s.refuse {
 		return "", 0, wallet.ErrSignRefused
+	}
+	if s.conflict {
+		return "", 0, wallet.ErrKeyConflict
 	}
 	if s.failNext > 0 {
 		s.failNext--
@@ -458,5 +462,18 @@ func TestHotWalletShort(t *testing.T) {
 		if got := HotWalletShort(msg); got != want {
 			t.Errorf("%q: %v, want %v", msg, got, want)
 		}
+	}
+}
+
+// 409: the key already has a signature (a nonce) for another request — never released.
+func TestKeyConflictIsNeverReleased(t *testing.T) {
+	r := newRig(t)
+	r.reserved("k1")
+	r.signer.conflict = true
+	if err := r.step(); err == nil {
+		t.Fatal("expected an error")
+	}
+	if r.get("k1").Status != store.StatusReserved || len(r.ledger.released) != 0 {
+		t.Fatalf("status %s, released %v", r.get("k1").Status, r.ledger.released)
 	}
 }

@@ -107,11 +107,15 @@ type SignRequest struct {
 	IdempotencyKey string `json:"idempotency_key"` // the Withdrawal Key (invariant #20)
 }
 
-// ErrSignRefused: wallet-service refused the request itself (400/409/422) — it allocated no nonce,
-// so the Lock can be Released. Anything else (503 while a Nonce Gap is open, 5xx, no response) is
+// ErrSignRefused: wallet-service refused the request itself (400/422) — it allocated no nonce, so
+// the Lock can be Released. Anything else (503 while a Nonce Gap is open, 5xx, no response) is
 // transient: the same key is asked again, and wallet-service returns the stored tx if it had
 // already signed (invariant #16), so a lost response can never strand a nonce.
 var ErrSignRefused = errors.New("wallet-service refused to sign")
+
+// ErrKeyConflict: wallet-service answered 409 — the Withdrawal Key already has a signature for a
+// different request. Should be impossible (the key is unique and the request deterministic).
+var ErrKeyConflict = errors.New("wallet-service already signed this key for a different request")
 
 // SignHotWallet is POST /v1/sign/hot-wallet → the signed raw tx and the Hot Wallet nonce it claims.
 func (c *Client) SignHotWallet(ctx context.Context, r SignRequest) (rawTx string, nonce uint64, err error) {
@@ -130,8 +134,12 @@ func (c *Client) SignHotWallet(ctx context.Context, r SignRequest) (rawTx string
 			return "", 0, fmt.Errorf("wallet-service returned an unusable signature: %q", body)
 		}
 		return out.SignedRawTx, out.Nonce, nil
-	case http.StatusBadRequest, http.StatusConflict, http.StatusUnprocessableEntity:
+	case http.StatusBadRequest, http.StatusUnprocessableEntity:
 		return "", 0, fmt.Errorf("%w (%d): %s", ErrSignRefused, code, strings.TrimSpace(string(body)))
+	case http.StatusConflict:
+		// The key was already signed for a DIFFERENT request: a nonce IS allocated under it, so
+		// releasing would strand it. Never a refusal; an operator must look.
+		return "", 0, fmt.Errorf("%w: %s", ErrKeyConflict, strings.TrimSpace(string(body)))
 	default:
 		return "", 0, fmt.Errorf("wallet-service sign answered %d: %s", code, strings.TrimSpace(string(body)))
 	}
