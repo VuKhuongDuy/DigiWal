@@ -89,6 +89,7 @@ func (s *fakeSigner) SignHotWallet(_ context.Context, r wallet.SignRequest) (str
 }
 
 type fakeChain struct {
+	minedNonce   uint64
 	revertReason string
 	head         int64
 	receipts     map[common.Hash]*chain.Receipt
@@ -111,6 +112,10 @@ func (c *fakeChain) Receipt(_ context.Context, h common.Hash) (*chain.Receipt, e
 	return c.receipts[h], nil
 }
 
+func (c *fakeChain) MinedNonce(context.Context, common.Address) (uint64, error) {
+	return c.minedNonce, nil
+}
+
 func (c *fakeChain) RevertReason(context.Context, common.Hash, int64) (string, error) {
 	return c.revertReason, nil
 }
@@ -127,15 +132,24 @@ func (c *fakeChain) mine(success bool) {
 
 type fakeLedger struct {
 	settled, released []string
+	refunds           map[string][]string
 	settleErr         error
 }
 
-func (l *fakeLedger) Settle(_ context.Context, key string) (string, error) {
+func (l *fakeLedger) Refund(_ context.Context, key string, entries []string) error {
+	if l.refunds == nil {
+		l.refunds = map[string][]string{}
+	}
+	l.refunds[key] = entries // keyed like the ledger: a retry overwrites, never adds
+	return nil
+}
+
+func (l *fakeLedger) Settle(_ context.Context, key string) (ledger.Settled, error) {
 	if l.settleErr != nil {
-		return "", l.settleErr
+		return ledger.Settled{}, l.settleErr
 	}
 	l.settled = append(l.settled, key)
-	return "ltx-" + key, nil
+	return ledger.Settled{LedgerTransactionID: "ltx-" + key, EntryIDs: []string{"e1-" + key, "e2-" + key}}, nil
 }
 func (l *fakeLedger) Release(_ context.Context, key string) error {
 	l.released = append(l.released, key)

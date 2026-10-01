@@ -48,7 +48,7 @@ type Store interface {
 }
 
 type Ledger interface {
-	Settle(ctx context.Context, key string) (string, error)
+	Settle(ctx context.Context, key string) (ledger.Settled, error)
 	Release(ctx context.Context, key string) error
 }
 
@@ -218,7 +218,7 @@ func (p *Pipeline) confirm(ctx context.Context, w store.Withdrawal) error {
 		log.Printf("%s %s: tx %s reverted in block %d, revert reason %q — releasing its Lock", level, w.ID, *w.TxHash, r.BlockNumber, reason)
 		return p.releaseAndFail(ctx, w, store.StatusBroadcast, ReasonTxReverted)
 	}
-	ledgerTx, err := p.Ledger.Settle(ctx, w.Key())
+	settled, err := p.Ledger.Settle(ctx, w.Key())
 	if errors.Is(err, ledger.ErrConflict) || errors.Is(err, ledger.ErrLockNotFound) {
 		// The Lock was released (or never existed) although the tx paid out: the user got the money
 		// and kept the balance. Never paper over it automatically.
@@ -229,7 +229,7 @@ func (p *Pipeline) confirm(ctx context.Context, w store.Withdrawal) error {
 		return err
 	}
 	at := p.now().UTC()
-	_, err = p.Store.MarkConfirmed(ctx, w.ID, r.BlockNumber, ledgerTx, at, func(w store.Withdrawal) (string, []byte, error) {
+	_, err = p.Store.MarkConfirmed(ctx, w.ID, r.BlockNumber, settled.LedgerTransactionID, at, func(w store.Withdrawal) (string, []byte, error) {
 		b, err := events.Encode(events.WithdrawalConfirmed{
 			Version: 1, WithdrawalID: w.ID, IdempotencyKey: w.IdempotencyKey, UserID: w.UserID, AssetID: w.AssetID,
 			Amount: events.Amount(w.Amount.String()), ToAddress: w.ToAddress, ChainID: *w.ChainID,

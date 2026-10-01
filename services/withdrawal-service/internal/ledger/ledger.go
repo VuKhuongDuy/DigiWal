@@ -84,27 +84,58 @@ func (c *Client) Lock(ctx context.Context, key, userID, assetID string, amount *
 	}
 }
 
-// Settle turns the Lock into the real debit and returns the ledger transaction id (withdrawal-flow.md
-// invariant #3: the only point where an Entry is posted).
-func (c *Client) Settle(ctx context.Context, key string) (ledgerTxID string, err error) {
+// Settled is what a Settle posted.
+type Settled struct {
+	LedgerTransactionID string
+	EntryIDs            []string // the debit and the chain-account credit: what a refund corrects
+}
+
+// Settle turns the Lock into the real debit (withdrawal-flow.md invariant #3: the only point where
+// an Entry is posted). Idempotent: a replay returns the same transaction and entries.
+func (c *Client) Settle(ctx context.Context, key string) (Settled, error) {
 	code, body, err := c.call(ctx, "/v1/ledger/locks/"+url.PathEscape(key)+"/settle", nil)
 	switch {
 	case err != nil:
-		return "", err
+		return Settled{}, err
 	case code == http.StatusOK:
 		var out struct {
-			LedgerTransactionID string `json:"ledger_transaction_id"`
+			LedgerTransactionID string   `json:"ledger_transaction_id"`
+			EntryIDs            []string `json:"entry_ids"`
 		}
-		if json.Unmarshal(body, &out) != nil || out.LedgerTransactionID == "" {
-			return "", fmt.Errorf("ledger-service settle returned %q", body)
+		if json.Unmarshal(body, &out) != nil || out.LedgerTransactionID == "" || len(out.EntryIDs) == 0 {
+			return Settled{}, fmt.Errorf("ledger-service settle returned %q", body)
 		}
-		return out.LedgerTransactionID, nil
+		return Settled{LedgerTransactionID: out.LedgerTransactionID, EntryIDs: out.EntryIDs}, nil
 	case code == http.StatusConflict:
-		return "", fmt.Errorf("%w: %s", ErrConflict, strings.TrimSpace(string(body)))
+		return Settled{}, fmt.Errorf("%w: %s", ErrConflict, strings.TrimSpace(string(body)))
 	case code == http.StatusNotFound:
-		return "", ErrLockNotFound
+		return Settled{}, ErrLockNotFound
 	default:
-		return "", unexpected("settle", code, body)
+		return Settled{}, unexpected("settle", code, body)
+	}
+}
+
+// Refund posts the Compensating Entry for a Settled withdrawal whose tx never landed (task 3.5,
+// withdrawal-flow.md invariant #9): a correction of exactly the Settle's entries. withdrawal-service
+// names only which entries; ledger-service derives accounts and amounts as their exact negation
+// (ledger.md invariant #11). Keyed {Withdrawal Key}:refund, so a retry can never refund twice.
+func (c *Client) Refund(ctx context.Context, key string, settleEntryIDs []string) error {
+	entries := make([]map[string]string, 0, len(settleEntryIDs))
+	for _, id := range settleEntryIDs {
+		entries = append(entries, map[string]string{"corrects_entry_id": id})
+	}
+	code, body, err := c.call(ctx, "/v1/ledger/transactions", map[string]any{
+		"idempotency_key": key + ":refund", "source_type": "correction", "entries": entries,
+	})
+	switch {
+	case err != nil:
+		return err
+	case code == http.StatusOK, code == http.StatusCreated:
+		return nil
+	case code == http.StatusConflict:
+		return fmt.Errorf("%w: %s", ErrConflict, strings.TrimSpace(string(body)))
+	default:
+		return unexpected("refund", code, body)
 	}
 }
 

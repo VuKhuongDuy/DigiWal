@@ -31,6 +31,22 @@ type Chain interface {
 	// RevertReason replays a reverted tx (eth_call against the state before its block) and
 	// returns the node's revert message. Best effort: "" when it cannot be recovered.
 	RevertReason(ctx context.Context, hash common.Hash, block int64) (string, error)
+	// MinedNonce is the account's nonce in the latest block: how many of its txs are mined. Never
+	// the `pending` nonce, which counts our own tx still in the mempool.
+	MinedNonce(ctx context.Context, addr common.Address) (uint64, error)
+}
+
+// Sender recovers who signed a raw tx (for a withdrawal: the Hot Wallet).
+func Sender(rawTx string) (common.Address, error) {
+	b, err := hexutil.Decode(rawTx)
+	if err != nil {
+		return common.Address{}, err
+	}
+	var tx types.Transaction
+	if err := tx.UnmarshalBinary(b); err != nil {
+		return common.Address{}, err
+	}
+	return types.Sender(types.LatestSignerForChainID(tx.ChainId()), &tx)
 }
 
 // TxHash is the hash of a signed raw tx, known before (and independent of) broadcasting it.
@@ -90,6 +106,10 @@ func (e *Eth) Broadcast(ctx context.Context, rawTx string) error {
 func isAlreadyKnown(err error) bool {
 	m := strings.ToLower(err.Error())
 	return strings.Contains(m, "already known") || strings.Contains(m, "already imported") || strings.Contains(m, "known transaction")
+}
+
+func (e *Eth) MinedNonce(ctx context.Context, addr common.Address) (uint64, error) {
+	return e.c.NonceAt(ctx, addr, nil)
 }
 
 func (e *Eth) RevertReason(ctx context.Context, hash common.Hash, block int64) (string, error) {

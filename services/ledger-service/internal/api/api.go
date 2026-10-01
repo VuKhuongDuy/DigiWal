@@ -129,7 +129,8 @@ func (s *Server) handleSettle(w http.ResponseWriter, r *http.Request) {
 		writeLedgerErr(w, "settle", key, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"idempotency_key": res.IdempotencyKey, "status": "settled", "ledger_transaction_id": res.LedgerTransactionID})
+	writeJSON(w, http.StatusOK, map[string]any{"idempotency_key": res.IdempotencyKey, "status": "settled",
+		"ledger_transaction_id": res.LedgerTransactionID, "entry_ids": res.EntryIDs})
 }
 
 func (s *Server) handleRelease(w http.ResponseWriter, r *http.Request) {

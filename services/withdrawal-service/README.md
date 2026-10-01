@@ -1,9 +1,10 @@
 # withdrawal-service
 
-Orchestrates withdrawals (`docs/design/withdrawal-flow.md`). **Tasks 3.1-3.4, 3.6, 3.10 and the
+Orchestrates withdrawals (`docs/design/withdrawal-flow.md`). **Tasks 3.1-3.6, 3.10 and the
 withdrawal-service part of 3.11 so far:** a request is recorded idempotently, validated, Reserved on the
 ledger, then signed, broadcast, confirmed and Settled in the background; confirmed txs are watched for
-Nonce Gaps. Refunds (3.5), the Reaper (3.9) and the never-strand-a-nonce work (3.13) are not built yet.
+Nonce Gaps; an operator can abandon a disputed request (refund or Release, 3.5). The Reaper (3.9) and the
+never-strand-a-nonce work (3.13) are not built yet.
 
 ## What works
 
@@ -103,11 +104,17 @@ Nonce Gaps. Refunds (3.5), the Reaper (3.9) and the never-strand-a-nonce work (3
      the confirmation depth, then put the request back where it was:
      `UPDATE withdrawal_requests SET status = disputed_from, disputed_from = NULL, disputed_at = NULL, updated_at = now() WHERE withdrawal_id = '<id>' AND status = 'disputed';`
      (a `broadcast`/`signed` one then continues through the pipeline; a `confirmed` one had already Settled).
-  2. *Abandon* (the tx can never land): clear nonce N with a Nonce Filler (task 3.13), then — if
-     `disputed_from = 'confirmed'` — a refund is needed (task 3.5); otherwise Release the Lock
-     (`POST /v1/ledger/locks/withdrawal:<id>/release`) and set `status = 'failed'`.
+  2. *Abandon* (the tx can never land, task 3.5): first clear nonce N with a Nonce Filler (the CLI is task
+     3.13), then run
+     `docker compose exec withdrawal-service service -abandon <withdrawal_id>`.
+     It refuses unless the chain proves the tx is dead — the tx is not mined **and** the Hot Wallet's mined
+     (`latest`) nonce is past N. Then, if it had Settled (`disputed_from = confirmed`), it posts the
+     **Compensating Entry**: a ledger correction of exactly the Settle's two entries (ledger-service returns
+     them from the Settle), keyed `withdrawal:<id>:refund`, amounts derived by the ledger — the user gets
+     back exactly what was debited, at most once. Otherwise it Releases the Lock. Either way the request
+     becomes `failed` (`abandoned_refunded` / `abandoned`). Safe to re-run after a crash.
   3. When no request is `disputed` any more, lift the freeze in wallet-service's database (its README).
-  The nonce-filler and refund steps are not built yet (tasks 3.13, 3.5).
+  The Nonce Filler is not built yet (task 3.13); until then a filler has to be sent by hand.
 - **Destination checks** (task 3.10, invariant #18), on both `POST /v1/withdrawals` and
   `POST /v1/whitelist`:
   - Hot and Warm come from wallet-service's `GET /v1/wallet/system-addresses`, asked **once at

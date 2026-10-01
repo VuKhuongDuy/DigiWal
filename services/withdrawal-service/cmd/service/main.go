@@ -11,6 +11,7 @@ package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"log"
 	"net/http"
@@ -35,8 +36,16 @@ import (
 )
 
 func main() {
+	abandonID := flag.String("abandon", "", "operator action (withdrawal-flow.md invariant #9): abandon this disputed withdrawal_id — refund it if it had Settled, else Release it — once the chain proves its tx can never land; then exit")
+	flag.Parse()
+
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	if *abandonID != "" {
+		runAbandon(ctx, *abandonID)
+		return
+	}
 
 	st, err := store.Connect(ctx, requireEnv("POSTGRES_DSN"))
 	if err != nil {
@@ -120,6 +129,30 @@ func main() {
 	if err := plain.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatal(err)
 	}
+}
+
+// runAbandon is the operator's way to resolve a disputed request (task 3.5); it serves nothing.
+func runAbandon(ctx context.Context, id string) {
+	st, err := store.Connect(ctx, requireEnv("POSTGRES_DSN"))
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer st.Close()
+	clientTLS, err := wallet.ClientTLSConfig(requireEnv("TLS_CERT_FILE"), requireEnv("TLS_KEY_FILE"), requireEnv("TLS_CA_FILE"))
+	if err != nil {
+		log.Fatal(err)
+	}
+	lg := &ledger.Client{BaseURL: requireEnv("LEDGER_SERVICE_URL"),
+		HTTP: &http.Client{Timeout: 10 * time.Second, Transport: &http.Transport{TLSClientConfig: clientTLS}}}
+	rpc, err := chain.Dial(ctx, requireEnv("RPC_URL"))
+	if err != nil {
+		log.Fatal(err)
+	}
+	w, err := pipeline.Abandon(ctx, st, lg, rpc, id)
+	if err != nil {
+		log.Fatalf("not abandoned: %v", err)
+	}
+	fmt.Printf("withdrawal %s is now %s (%s)\n", w.ID, w.Status, *w.RejectReason)
 }
 
 func fetchSystemAddresses(ctx context.Context, c *wallet.Client) (wallet.SystemAddresses, error) {

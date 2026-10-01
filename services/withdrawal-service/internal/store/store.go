@@ -160,6 +160,11 @@ func (s *Store) Transition(ctx context.Context, id, from, to string, reason *str
 		RETURNING `+columns, id, from, to, reason)))
 }
 
+// GetByID reads a request by its withdrawal_id (operator tooling; never exposed to clients).
+func (s *Store) GetByID(ctx context.Context, id string) (Withdrawal, error) {
+	return scan(s.pool.QueryRow(ctx, `SELECT `+columns+` FROM withdrawal_requests WHERE withdrawal_id = $1`, id))
+}
+
 // Get returns the user's own request for that key (invariant #20: never another user's).
 func (s *Store) Get(ctx context.Context, userID, idempotencyKey string) (Withdrawal, error) {
 	return scan(s.pool.QueryRow(ctx,
