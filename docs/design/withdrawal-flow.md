@@ -177,6 +177,23 @@ Question #7).
   cooldown`), not by a background job flipping status — a missed or
   delayed job would otherwise silently widen the window.
 
+- **Fee Bump** — **PROPOSED (invariant #21).** A replacement of a
+  stuck Hot Wallet tx: same nonce, same destination/amount/data, higher
+  fees, signed by `wallet-service`. Any version may be mined, never more
+  than one.
+- **Signature Void** — **PROPOSED (invariant #22).** `wallet-service`'s
+  atomic promise that a Hot Wallet key it has not signed will never be
+  signed; the only safe basis for Releasing a `reserved` request.
+- **Nonce Filler** — **PROPOSED (invariant #23).** An operator-issued
+  0-value Hot Wallet self-transfer at a stuck tx's nonce, signed by
+  `wallet-service` via its CLI, that consumes the nonce so the original
+  tx can never land.
+- **Fail reasons** (`failed` rows; `sign_refused` and `tx_reverted`
+  Decided, the rest PROPOSED; carried as `reason` on `withdrawals.failed`):
+  `sign_refused`, `tx_reverted`, `stale_request`, `stale_reservation`,
+  `replaced_or_dropped`, `destination_not_whitelisted` /
+  `destination_on_screening_list` (pre-sign re-check, #23).
+
 Withdrawal Request states: a row exists first (invariant #11), then
 moves `requested → validated → reserved → signed → broadcast →
 confirmed`, with `confirmed` the only transition that Settles the Lock
@@ -204,12 +221,51 @@ Questions #3 for the one remaining unresolved failure mode.
    internally (`ledger.md`'s Lock definition). Only on success does
    `withdrawal-service` set status = `reserved`. On "insufficient
    available funds," it sets `rejected` — never a partial lock.
-2. **A Withdrawal Request can be signed at most once.** Guarded the same
-   way as ledger idempotency: `UPDATE withdrawal_requests SET
-   status='signing' WHERE status='reserved'`, zero rows affected means
-   a duplicate/retry, skip. Prevents a retried event from asking
-   `wallet-service` to sign (and therefore spend) the same withdrawal
-   twice.
+2. **A Withdrawal Request can be signed at most once.** **Revised —
+   Decided (Tech Lead), implemented in task 3.3: there is no `signing`
+   intermediate state.** The guarantee comes from
+   two things together: `wallet-service` signs at most once per
+   Withdrawal Key and replays the stored tx on any retry (invariant
+   #16), and the pipeline's `reserved → signed` transition is a guarded
+   `UPDATE ... WHERE status='reserved'` that stores the returned raw tx,
+   nonce and hash. A crash or a lost response simply leaves the row
+   `reserved`; the next pass calls sign again with the same key and gets
+   the same tx back, never a second nonce. (The original text used
+   `UPDATE ... SET status='signing' WHERE status='reserved'`; a `signing`
+   row would have needed its own recovery rule for exactly the same
+   "did `wallet-service` sign or not?" question, so it added nothing.)
+   **After signing, a request only ever moves forward** — a signed tx
+   holds Hot Wallet nonce N, and abandoning it would strand N and block
+   every later Hot Wallet tx (invariants #16, #17).
+   Outcomes (task 3.3):
+   - **Refused signature → Release + `failed` / `sign_refused`
+     (Decided, Tech Lead)** — `wallet-service` `400`/`409`/`422`, on the
+     premise that no nonce was allocated; `503`/5xx/timeouts are retried
+     with the same key. **Flagged, not overridden (Open Questions #16):
+     the premise is false for `409`** — `409` means "this key was
+     already signed for a *different* request", so a nonce *is*
+     allocated for the key and Releasing strands it. Proposed: `409` →
+     ALERT, leave for an operator. Awaiting the Tech Lead.
+   - **Tx mined but reverted (`receipt.status = 0`) → Decided (Tech
+     Lead):** wait until the receipt is Withdrawal Confirmation Depth
+     (64 blocks) deep first — a reorg can change it — then ledger
+     Release (no Entry was posted), `broadcast → failed` with reason
+     `tx_reverted`, **no automatic retry**. The **revert reason** is
+     recorded (replayed with `eth_call` at the parent block, or a trace
+     if the node supports it) in the logs and on the `withdrawals.failed`
+     event (invariant #24); the state machine is unchanged. The nonce is
+     consumed on-chain, so nothing is stranded. If the cause is the Hot
+     Wallet lacking the token or ETH (our operational fault, not the
+     user's), ops get an `ALERT`; a later retry may be allowed — not
+     designed yet (Open Questions #21). (The implementation in task 3.3
+     Releases as soon as the receipt is reverted; it must wait for the
+     depth and record the reason — task 3.14.)
+   - **Broadcast answered "nonce too low" while our tx is not mined →
+     ALERT, left for an operator (Decided)** — another tx used nonce N;
+     invariant #4 forbids auto-resolution here, the Reaper's proof rule
+     (#17) decides later.
+   - **Settle conflict (the Lock was already released) → ALERT, left
+     (Decided).**
 3. **A Withdrawal Request that fails before it Settles is reversed by
    Releasing its Lock, never by a Compensating Entry.** Since the
    Reservation (`ledger.md`'s Lock) never posts an Entry, a failure
@@ -230,7 +286,10 @@ Questions #3 for the one remaining unresolved failure mode.
    tx that later lands on-chain would let a Settle attempt run against
    capacity that's already been given back to the user. Anything with a
    tx hash needs positive proof it didn't land before any Lock
-   resolution — see Open Questions #3.
+   resolution — see Open Questions #3. **Extended (PROPOSED, invariant
+   #17 rewrite):** the same holds for `signed` — a signed tx can still
+   reach the chain, so a `signed` request is never released on a timeout
+   either, only on positive proof.
 5. **`wallet-service` signs for the Hot Wallet only, and the caller
    specifies *what* to send, never *which key* nor *how the transaction
    is built*.** The signing request carries `{to_address, asset_id,
@@ -388,52 +447,76 @@ Questions #3 for the one remaining unresolved failure mode.
     `deposit-flow.md`) — which have no pre-existing per-request key the
     way a Withdrawal Request does; see those docs for their **PROPOSED**
     key-minting schemes.
-17. **A Lock does not stay `active` forever.** Without this, a
-    Withdrawal Request that crashes mid-flight (before broadcast) or
-    whose broadcast tx never lands leaves its Lock's reserved capacity
-    permanently unavailable to the user — the Available Balance
-    invariant (`ledger.md` #1) would technically hold, but the user's
-    funds would be frozen with no path back. A periodic **Reaper** loop
-    in `withdrawal-service` reclaims stuck requests, but only ones it can
-    *prove* are safe to reclaim — resolves Open Questions #3:
-    - `requested` for longer than the **Stuck Request Timeout**
-      (**Decided (Tech Lead, Open Questions #9b): 5 minutes**, the same
-      value as the Stuck Reservation Timeout): no
-      Lock was ever created, so the Reaper only marks the row `failed`
-      (terminal, guarded `WHERE status='requested'`), no ledger call. The
-      client must use a new `idempotency_key` (invariant #11).
-    - `validated` for longer than the Stuck Reservation Timeout
-      (**Decided (Tech Lead), Open Questions #14**): a crash between
-      `lock()` succeeding and the `validated -> reserved` transition
-      leaves an active Lock behind a `validated` row that no rule above
-      covered. Treated like `reserved`: Release (idempotent; a `404`
-      "never locked" is fine) then `failed`.
-    - `reserved` or `signed` for longer than the **Stuck Reservation
-      Timeout** (**Decided (Tech Lead): 5 minutes** — Open
-      Questions #3): no `tx_hash` exists yet in either state, so nothing
-      was ever broadcast — always safe to Release. The Reaper Releases
-      the Lock (`ledger.md`) and marks the request `failed` terminally,
-      so a `signed`-but-never-broadcast raw tx can never be broadcast by
-      any later code path after its Lock is gone.
-    - `broadcast` for longer than the **Stuck Broadcast Timeout**
-      (**Decided (Tech Lead): 128 blocks**, ~25.6 min on Sepolia —
-      Open Questions #3) **and** a live
-      `eth_getTransactionCount(hot_wallet, "pending")` read shows the Hot
-      Wallet's on-chain nonce has already advanced past this tx's nonce
-      — positive proof some *other* transaction consumed that nonce, so
-      this exact tx was replaced or dropped and can never land. Safe to
-      Release, same as above. This is the same proof technique the Nonce
-      Gap design already relies on (nonce comparison against the live
-      chain), applied to "never confirmed" instead of "confirmed then
-      reorged out."
-    - `broadcast` past the Stuck Broadcast Timeout but the on-chain nonce
-      has **not** advanced past it: the tx could still be sitting in
-      mempool, or the network could be stuck — the Reaper has no proof
-      it's dead, so it only raises an operator alert (identical posture
-      to invariant #9's Nonce Gap resolution: never auto-resolve what
-      can't be proven). An operator can then submit a nonce-filler (same
-      mechanism as Nonce Gap recovery) to force it dead, after which the
-      Reaper's second case above fires and Releases it.
+17. **A Lock does not stay `active` forever — but the Reaper never
+    strands a Hot Wallet nonce.** A periodic **Reaper** in
+    `withdrawal-service` reclaims stuck requests, only when it can
+    *prove* nothing can still reach the chain *and* no Hot Wallet nonce
+    is left allocated-but-unused. **Rewritten — PROPOSED (Solution
+    Architect, direction approved by the Tech Lead); timeout values
+    unchanged and Decided.** The earlier text Released `reserved` and
+    `signed` rows on a timeout alone because "nothing was broadcast";
+    that is safe for the user's balance but, if `wallet-service` had
+    already signed, nonce N stays allocated and unused, and every later
+    Hot Wallet tx (every user's withdrawal, every Gas Top-Up, Treasury
+    Sweeps) queues behind it forever — the failure invariant #16 exists
+    to prevent. Rules, per state (every write a guarded `UPDATE ... WHERE
+    status = <expected>`):
+    - **`requested`** past the **Stuck Request Timeout** (**Decided: 5
+      minutes**): mark `failed` / `stale_request`. No Lock and no
+      Withdrawal Key has ever left the service. Unchanged.
+    - **`validated`** past the **Stuck Reservation Timeout** (**Decided:
+      5 minutes**; Open Questions #14, Decided): Release (idempotent; a
+      `404` "never locked" is fine), then `failed` / `stale_reservation`.
+      Unchanged, and **confirmed safe**: the Lock is placed by the
+      request handler, and signing is only ever attempted by the
+      pipeline from `reserved`, so a `validated` row's Withdrawal Key has
+      never been sent to `wallet-service` and no nonce can exist.
+    - **`reserved`** past the Stuck Reservation Timeout: a sign call may
+      have succeeded with the response lost, so a nonce may exist.
+      Released **only** when `wallet-service` positively guarantees the
+      key is not signed and never will be: the Reaper calls `POST
+      /v1/sign/hot-wallet/{key}/void` (invariant #22). `voided` →
+      Release, `failed` / `stale_reservation`. `already_signed` → store
+      the returned tx and move the row to `signed` (it is a normal
+      signed request from then on). `wallet-service` unreachable or
+      frozen → ALERT, retry next pass. Race-free: void and sign take the
+      same `wallet-service` lock, so either the sign landed first
+      (`already_signed`) or any later sign for that key gets `410` and
+      allocates nothing (the pipeline treats `410` as "row already
+      reaped" — the guarded `UPDATE` finds it `failed`). **Until invariant #22 is built:
+      ALERT only, never Release.** (A read-only lookup alone is not
+      enough to Release safely — a sign call already in flight can land
+      after the lookup said "not signed"; see invariant #22.)
+    - **`signed`** past the Stuck Reservation Timeout: **never Released
+      on a timeout.** The pipeline keeps re-broadcasting the stored
+      (latest) raw tx. The Reaper raises an ALERT naming the likely
+      cause, from live reads: **underpriced** (the tx's `maxFeePerGas` is
+      below the current base fee, or the node answered "underpriced" /
+      "fee too low") → a Fee Bump is the fix (invariant #21, automatic
+      once built); **Hot Wallet lacks ETH** (balance < value + max gas
+      cost) → operator replenishes Hot (`wallet-tiering.md`);
+      **nonce used by another tx** (mined nonce > N and none of this
+      request's tx hashes is mined) → the proof case below.
+    - **`signed` or `broadcast`, nonce consumed by another tx** —
+      `eth_getTransactionCount(hot_wallet, "latest")` > N (**`latest`,
+      i.e. mined, not `pending`**: the earlier text said `pending`,
+      which counts our own still-in-mempool tx and would "prove" a live
+      tx dead) **and** no receipt exists for **any** tx hash this request
+      has (original and every Fee Bump replacement, invariant #21). Then
+      nonce N is consumed on-chain, so nothing is stranded, and none of
+      our versions can ever land: Release, `failed` /
+      `replaced_or_dropped`. For `broadcast` this additionally waits for
+      the **Stuck Broadcast Timeout** (**Decided: 128 blocks**) as
+      before, so the Reaper never races a slow confirmation; for
+      `signed` it applies as soon as it is observed. This is also how a
+      Nonce Filler (invariant #23) completes.
+    - **`broadcast`, past the Stuck Broadcast Timeout, nonce not
+      consumed** (the tx may still be in a mempool, or the network is
+      stuck): ALERT only, as before — plus an automatic Fee Bump if the
+      tx is underpriced (invariant #21). **Checked against the stranding
+      argument:** this rule never Releases while nonce N is unconsumed,
+      and the proof rule above Releases only once N is consumed on-chain
+      by something, so the `broadcast` rules never strand a nonce.
 18. **A Withdrawal Request's `to_address` must not be one of our own
     addresses: a user deposit address, the Hot Wallet, or the Warm
     Wallet.** **Decided (Tech Lead):** the deposit-address rule (option
@@ -580,6 +663,125 @@ Questions #3 for the one remaining unresolved failure mode.
       and use it as the Kafka message key and the consumer dedup key
       (`history-service` currently keys its document on
       `withdrawal:<idempotency_key>` — a code change, plan task 3.11).
+21. **A stuck Hot Wallet tx is unblocked by re-signing the same nonce
+    with a higher fee (Fee Bump), never by abandoning it.** **PROPOSED
+    (Solution Architect), task 3.13.** `wallet-service` today replays
+    the stored tx for a key (invariant #16), which is right for retries
+    but means an underpriced tx can never be fixed. New explicit path:
+    `POST /v1/sign/hot-wallet/{key}/replace` `{"replacement_seq",
+    "max_gas_price"?}` → `{"signed_raw_tx","tx_hash","nonce",
+    "replacement_seq","max_fee_per_gas","max_priority_fee_per_gas"}`.
+    - **Same tx, new fee only.** `wallet-service` rebuilds the
+      replacement from the *stored* original (same nonce, `to`, value,
+      data, chain) — the request has no field that could change
+      destination or amount, so a replacement can never redirect funds.
+      Fees = max(current network fees, previous version's fees × 1.125,
+      rounded up) on both `maxFeePerGas` and `maxPriorityFeePerGas`
+      (nodes require ≥10% on both to accept a replacement), capped by
+      the caller's optional `max_gas_price` and by a hard ceiling in
+      `wallet-service`'s own config; above the cap → `422`, nothing
+      signed.
+    - **Keyed and persisted:** new table `hot_wallet_replacements(key,
+      replacement_seq, nonce, signed_raw_tx, tx_hash, fees, created_at)`,
+      PK `(key, replacement_seq)` (the original stays in
+      `hot_wallet_signatures`, whose `UNIQUE(chain_id, nonce)` is why
+      replacements need their own table). The caller sends
+      `replacement_seq` = last + 1: the same seq replays the stored
+      replacement (idempotent), any other gap → `409`. Allocates no new
+      nonce. Refused with `503` while a Nonce Gap freeze covers N
+      (invariant #19); `404` if the key was never signed; `409` if the
+      key belongs to another caller CN (invariant #22).
+    - **Who calls it:** `CN=withdrawal-service` only (its own keys).
+      The pipeline bumps automatically when the node refuses a broadcast
+      as underpriced, or when a `broadcast` tx is not mined after
+      **20 blocks** and is underpriced against the current base fee; at
+      most **5** bumps per request, then ALERT (values PROPOSED).
+    - **Which tx is tracked:** every version is stored on the request
+      (new `withdrawal_txs(withdrawal_id, replacement_seq, tx_hash,
+      raw_tx)`); the pipeline re-broadcasts only the latest. Any of them
+      can be mined, never more than one (same nonce). Confirmation,
+      Settle and `withdrawals.confirmed` use whichever hash has a
+      receipt, and the row's `tx_hash` is updated to it — so
+      `withdrawals.confirmed.tx_hash` can differ from the earlier
+      `withdrawals.broadcast.tx_hash` (`history-service` must take the
+      confirmed one). The Reaper's proof rule (#17) checks all of them.
+22. **`wallet-service` can say whether it signed a Hot Wallet key — and
+    can atomically promise it never will.** **PROPOSED (Solution
+    Architect), task 3.13.** Needed by the Reaper's `reserved` rule
+    (#17). Two endpoints, because a read alone is racy:
+    - `GET /v1/sign/hot-wallet/{key}` → `200 {"nonce","signed_raw_tx",
+      "tx_hash","replacements":[...]}` or `404` (not signed). Read-only,
+      for diagnostics and the Reaper's ALERT detail. **Not sufficient to
+      Release:** a sign call already in flight (or a second
+      `withdrawal-service` instance) can sign after the `404`.
+    - `POST /v1/sign/hot-wallet/{key}/void` → `200 {"status":"voided"}`
+      or `200 {"status":"already_signed", "nonce", "signed_raw_tx",
+      "tx_hash"}`. Under the same `hot_wallet_nonces` row lock signing
+      takes, it either finds the signature and returns it, or inserts a
+      **void tombstone** for the key; any later `POST
+      /v1/sign/hot-wallet` with a voided key is refused (`410`) and
+      allocates nothing. Idempotent (a second void returns `voided`).
+      This makes "Release a `reserved` row" safe by construction.
+    - **Key scoping per caller:** `hot_wallet_signatures` (and the
+      tombstones and replacements) gain a `caller_cn` column, set from
+      the verified client certificate at sign time. Lookup, void and
+      replace act only on rows whose `caller_cn` equals the caller's CN;
+      another caller's key reads as `404` (GET) or `409` (void,
+      replace). Keys stay globally unique (the existing PK, and every
+      caller already namespaces its keys: `withdrawal:…`, `gas-topup:…`),
+      so `sweeper` and `withdrawal-service` cannot collide, and neither
+      can inspect or void the other's signatures. Rows signed before the
+      migration have `caller_cn` NULL → treated as not the caller's.
+    - **Allow-list:** `CN=withdrawal-service` only for all three new
+      endpoints (`sweeper` has no Reaper and no stuck-request rule today;
+      see Open Questions #17).
+23. **A request is re-checked against its whitelist entry and the
+    Screening List immediately before signing; after signing it is never
+    silently blocked, only cancelled by an operator Nonce Filler.**
+    **PROPOSED (Solution Architect), task 3.13.**
+    - **Before sign (`reserved → signed`):** re-check that the Whitelist
+      Entry is still `active` and the address is not on the Screening
+      List (both local). Failure → Release, `failed` with
+      `destination_not_whitelisted` / `destination_on_screening_list`.
+      No nonce exists yet, so this is free. A request normally reaches
+      this step seconds after validation, but a request stuck in
+      `reserved` (e.g. a Nonce Gap freeze) can sit there long enough for
+      a user to remove the entry.
+    - **After sign:** blocking broadcast would strand nonce N, so the
+      pipeline does **not** re-check on its own. If a request has been
+      `signed` but not broadcast for longer than the Stuck Reservation
+      Timeout **and** the re-check now fails, the Reaper raises an
+      ALERT; the operator decides whether to let it go out or cancel it.
+    - **Nonce Filler (operator, cancels a signed tx):** a 0-value
+      Hot Wallet → Hot Wallet tx at the same nonce N with a higher fee
+      (the same replacement mechanics as invariant #21), so N is
+      consumed and the withdrawal can never land. Signed by
+      `wallet-service` itself — the Hot key never leaves it — through an
+      **operator CLI subcommand of the `wallet-service` binary** (`service
+      hot-wallet cancel --key withdrawal:{id}`), run inside the
+      `wallet-service` container like the existing seed-init command; it
+      records the filler as a replacement (kind `cancel`) and broadcasts
+      it. **No network endpoint**, so no service certificate can cancel
+      a payout. Once the filler is mined, the Reaper's proof rule
+      (#17: nonce consumed, none of our hashes mined) Releases the Lock
+      and fails the request `replaced_or_dropped`. Because the filler
+      reuses nonce N inside `wallet-service`, `next_nonce` needs no reset
+      afterwards — this answers Open Questions #12's two sub-questions
+      for this case (PROPOSED). The same subcommand fills a nonce for
+      Nonce Gap recovery (invariant #9).
+24. **Every transition to `failed` publishes `withdrawals.failed`.**
+    **Decided (Tech Lead) as a requirement; payload PROPOSED
+    (`integration-contracts.md` §1).** So `history-service` (and future
+    notifications) can tell the user a withdrawal will not happen and
+    their funds are available again. Written to the same outbox, in the
+    same transaction as the guarded `→ failed` UPDATE, published after
+    the broker acks (same at-least-once pattern as the other withdrawal
+    events), Kafka key `withdrawal_id`. Carries `reason` (the fail
+    reasons above) and, for `tx_reverted`, the `revert_reason`.
+    **`rejected` does not publish it — PROPOSED, Open Questions #23:** a
+    rejection happens synchronously inside `POST /v1/withdrawals`, the
+    client already got the `422` with its `reject_reason`, no funds were
+    ever held, and the request never appeared in history.
 
 ## Diagram
 
@@ -679,6 +881,24 @@ sequenceDiagram
     Op->>Wallet: manual SQL on wallet-service Postgres:<br/>SET frozen_from_nonce = NULL (no endpoint)
 ```
 
+Reaper decisions per stuck state (invariant #17, rewritten — **PROPOSED**):
+
+```mermaid
+flowchart TD
+    R[Reaper pass: row past its timeout] --> S{status}
+    S -->|requested| F1[failed: stale_request<br/>no Lock, no key ever sent]
+    S -->|validated| V1[Release, failed: stale_reservation<br/>signing only starts from reserved]
+    S -->|reserved| V2{POST .../void}
+    V2 -->|voided| V3[Release, failed: stale_reservation]
+    V2 -->|already_signed| V4[store tx, move to signed]
+    V2 -->|unreachable / not built| V5[ALERT, retry next pass]
+    S -->|signed / broadcast| P{latest nonce > N<br/>and none of our hashes mined?}
+    P -->|yes, and broadcast waited 128 blocks| P1[Release, failed: replaced_or_dropped]
+    P -->|no| P2{underpriced?}
+    P2 -->|yes| P3[Fee Bump, invariant #21]
+    P2 -->|no| P4[ALERT with cause:<br/>Hot lacks ETH / network stuck]
+```
+
 Whitelist Entry lifecycle (invariants #12–13, #15; creation also refuses a deposit / Hot / Warm address, #18):
 
 ```mermaid
@@ -697,6 +917,20 @@ sequenceDiagram
 ```
 
 ## Alternatives considered
+
+- **(Reaper rewrite) Keep releasing `reserved`/`signed` on a timeout,
+  and accept the occasional stranded nonce.** Rejected: one stranded
+  nonce blocks every later Hot Wallet tx for all users until an
+  operator fills it — a system-wide outage traded for one user's
+  temporarily locked funds.
+- **(Reaper rewrite) Release `reserved` after a read-only lookup says
+  "not signed".** Rejected: racy — a sign call in flight can complete
+  after the lookup. The atomic Signature Void (#22) closes the race at
+  the one place that allocates nonces.
+- **(Nonce Filler) A filler endpoint on `wallet-service`'s mTLS
+  listener for a new `CN=operator`.** Rejected for now: puts a "cancel
+  any payout" capability on the network; a CLI inside the container has
+  the same power with no remote surface.
 
 - **Pay out from each user's own derived deposit address (no Hot
   Wallet / no sweep).** Rejected: every user address would need its own
@@ -971,7 +1205,9 @@ sequenceDiagram
     signed outside `wallet-service`, `next_nonce` can be behind the
     chain. And how nonce-fillers are signed at all (the Hot key is only
     in `wallet-service`) is not designed. Both belong to invariant #9's
-    operator procedure.
+    operator procedure. **PROPOSED answer: invariant #23 / Open Questions
+    #20** — fillers are signed inside `wallet-service` (CLI subcommand)
+    at the stuck nonce, so `next_nonce` needs no reset.
 13. **Open, minor: should `withdrawal-service` refuse new withdrawals
     while a Nonce Gap is open,** instead of reserving funds that the
     Reaper then Releases 5 minutes later (`failed`)? Safe either way;
@@ -985,3 +1221,67 @@ sequenceDiagram
     backup**, so a Nonce Gap freeze on one does not stop all
     withdrawals. Out of scope here; tracked in `IMPLEMENTATION_PLAN.md`
     Backlog and `wallet-tiering.md` Open Questions #8.
+16. **Open — conflict with a Decided rule, flagged for the Tech Lead.**
+    The invariant #2 outcomes are now Decided (no `signing` state;
+    `sign_refused` for `400`/`409`/`422`; `tx_reverted` after depth). But
+    the pipeline, as decided, treats `wallet-service`'s `409` as
+    "refused, no nonce" and Releases. `409`
+    means the key was already signed for a *different* request (its
+    `request_hash` differs), so a nonce **is** allocated. It should ALERT
+    and leave the row, not Release. Reachable only if the request sent
+    for a key ever changes (e.g. `chain_id` config change between
+    attempts), but the wrong branch strands a nonce. Proposed fix (task
+    3.13), only if you agree: `409` → ALERT, leave the row.
+17. **Open: stuck Gas Top-Ups.** A `sweeper` Gas Top-Up also holds a Hot
+    Wallet nonce; if it is underpriced, it blocks withdrawals too.
+    `sweeper` re-signs with the same key (gets the same tx back) and
+    gives up after `MAX_ATTEMPTS`, leaving the nonce stuck. Options:
+    give `sweeper` the replace endpoint for its own keys (caller scoping
+    makes that safe), or have the operator Nonce Filler / a manual bump
+    handle it. Not designed here.
+18. **PROPOSED values: Fee Bump trigger 20 blocks, factor ×1.125, max 5
+    bumps, and a hard fee ceiling in `wallet-service` config** (number
+    to be set — the Tech Lead's risk call, same as `max_gas_price`).
+19. **Nuance to confirm: `signed` rows are never Released on a timeout,
+    but are Released on the on-chain proof** (nonce consumed, none of
+    our hashes mined) — needed so a Nonce Filler can finish the request.
+    The direction said "never Released by the Reaper"; this is the one
+    exception, and it never strands a nonce.
+20. **PROPOSED: the Nonce Filler is a `wallet-service` CLI subcommand,
+    not an endpoint** (invariant #23) — this also answers Open
+    Questions #12's sub-questions (fillers are signed inside
+    `wallet-service` at the stuck nonce, so `next_nonce` needs no
+    reset). Confirm.
+21. **Open (Tech Lead asked for it as a question, not a design yet):
+    retrying a withdrawal that reverted through our own fault** (Hot
+    Wallet lacked the token or ETH). Today `tx_reverted` is terminal and
+    the user must submit a new request. A retry would need a new
+    Withdrawal Key (the old nonce is consumed), a fresh Lock, and a rule
+    for telling "our fault" from "recipient rejected it" from the revert
+    reason. Not designed.
+22. **Open: who pays the gas of a withdrawal tx?** The Hot Wallet pays
+    gas for every withdrawal (and for a reverted one, which moved nothing
+    and Released the user in full), and nothing records it. Options:
+    (a) operational expense outside the ledger, tracked like a Treasury
+    Movement (`wallet-tiering.md` invariant #5) for reconciliation;
+    (b) a system expense account in `ledger.md`, posted at Settle /
+    revert; (c) charge the user a fee (a product decision). Note the
+    ledger's Chain Account reconciliation against the Hot Wallet's real
+    balance (`ledger.md`) drifts by every gas payment until this is
+    decided.
+23. **PROPOSED: `withdrawals.failed` is not published for `rejected`**
+    (invariant #24) — confirm.
+24. **PROPOSED (interpreting the Tech Lead's "blocking this address
+    should be tied to the whitelist, task 3.7"): a destination that made
+    a withdrawal revert can be blocked through the whitelist.** Rule:
+    when a withdrawal fails `tx_reverted` and the revert reason is not
+    our fault (not Hot Wallet balance — e.g. a contract recipient that
+    rejects the transfer), `withdrawal-service` marks that user's
+    Whitelist Entry `blocked` (new state, beside `pending`/`active`).
+    Validation treats `blocked` like "not active" (`reject_reason`
+    `destination_not_whitelisted`), so no further withdrawal to it can
+    burn gas; `GET /v1/whitelist` shows `blocked` (task 3.7's listing);
+    the only way back is for the user to delete and re-add the entry,
+    which restarts the 24h cooldown. Alternative: delete the entry
+    outright (simpler, but the user loses the explanation). Confirm the
+    rule, the state name, and whether an operator can also block.

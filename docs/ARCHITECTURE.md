@@ -39,7 +39,7 @@ you instead of letting you fake them:
 | `api-gateway` | User-facing REST API: get deposit address, request withdrawal, request internal transfer, get balance/history. Sole authentication point — resolves every request's `user_id` from `Authorization: Bearer <api_key>` (`docs/design/identity-auth.md`), never trusts a client-supplied one. | Postgres (`users`, `api_keys` — own tables, `identity-auth.md` invariant #1, previously flagged as a tracked follow-up here and never applied), all of the above |
 
 Event bus (Kafka topics): `deposits.detected`, `deposits.confirmed`,
-`withdrawals.broadcast`, `withdrawals.confirmed`, `transfers.internal`.
+`withdrawals.broadcast`, `withdrawals.confirmed`, `withdrawals.failed` (new, `integration-contracts.md` §1), `transfers.internal`.
 
 ## System diagram
 
