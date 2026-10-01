@@ -298,3 +298,36 @@ func (c *Client) ReplaceHotWallet(ctx context.Context, key string, seq int) (Rep
 		return Replacement{}, fmt.Errorf("wallet-service replace answered %d: %s", code, strings.TrimSpace(string(body)))
 	}
 }
+
+// CancelHashes is the tx hashes of the Nonce Fillers wallet-service signed for a key (kind `cancel`
+// in GET /v1/sign/hot-wallet/{key}); empty when the key has none. The Reaper asks for them to see
+// whether a filler was mined (its gas is ours to record, ledger.md invariant #12).
+func (c *Client) CancelHashes(ctx context.Context, key string) ([]string, error) {
+	code, body, err := c.get(ctx, "/v1/sign/hot-wallet/"+url.PathEscape(key))
+	if err != nil {
+		return nil, err
+	}
+	switch code {
+	case http.StatusOK:
+		var out struct {
+			Replacements []struct {
+				Kind   string `json:"kind"`
+				TxHash string `json:"tx_hash"`
+			} `json:"replacements"`
+		}
+		if err := json.Unmarshal(body, &out); err != nil {
+			return nil, fmt.Errorf("wallet-service returned an unusable key view: %q", body)
+		}
+		var hashes []string
+		for _, r := range out.Replacements {
+			if r.Kind == "cancel" {
+				hashes = append(hashes, strings.ToLower(r.TxHash))
+			}
+		}
+		return hashes, nil
+	case http.StatusNotFound:
+		return nil, nil
+	default:
+		return nil, fmt.Errorf("wallet-service key lookup answered %d: %s", code, strings.TrimSpace(string(body)))
+	}
+}

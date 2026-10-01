@@ -199,3 +199,25 @@ func TestSignOfAVoidedKeyIsErrKeyVoided(t *testing.T) {
 		t.Fatalf("%v", err)
 	}
 }
+
+func TestCancelHashes(t *testing.T) {
+	c := serve(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/sign/hot-wallet/withdrawal:abc" || r.Method != "GET" {
+			t.Errorf("%s %s", r.Method, r.URL.Path)
+		}
+		_, _ = w.Write([]byte(`{"nonce":3,"replacements":[{"kind":"fee_bump","tx_hash":"0x01"},{"kind":"cancel","tx_hash":"0xAB"}]}`))
+	})
+	got, err := c.CancelHashes(context.Background(), "withdrawal:abc")
+	if err != nil || len(got) != 1 || got[0] != "0xab" {
+		t.Fatalf("%v %v", got, err)
+	}
+	// 404 = never signed = no filler; any other failure is an error (the Reaper must not guess).
+	c = serve(t, func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(404) })
+	if got, err := c.CancelHashes(context.Background(), "k"); err != nil || len(got) != 0 {
+		t.Fatalf("%v %v", got, err)
+	}
+	c = serve(t, func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(503) })
+	if _, err := c.CancelHashes(context.Background(), "k"); err == nil {
+		t.Fatal("a 503 must not read as 'no filler'")
+	}
+}

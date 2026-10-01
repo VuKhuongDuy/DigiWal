@@ -27,7 +27,7 @@ const (
 type ReaperStore interface {
 	ListOlderThan(ctx context.Context, status string, before time.Time, limit int) ([]store.Withdrawal, error)
 	ListByStatus(ctx context.Context, status string, limit int) ([]store.Withdrawal, error)
-	MarkFailed(ctx context.Context, id, from, reason, blockAddress string, event func(store.Withdrawal) (string, []byte, error)) (store.Withdrawal, error)
+	MarkFailed(ctx context.Context, id, from, reason, blockAddress string, gas *store.GasRecord, event func(store.Withdrawal) (string, []byte, error)) (store.Withdrawal, error)
 	MarkSigned(ctx context.Context, id string, chainID int64, nonce uint64, rawTx string) (store.Withdrawal, error)
 	StampBroadcastHead(ctx context.Context, id string, head int64) error
 	ListTxs(ctx context.Context, id string) ([]store.Tx, error)
@@ -57,6 +57,9 @@ type Reaper struct {
 	Ledger Ledger
 	Chain  chain.Chain
 	Voider Voider // nil until task 3.13
+	// Fillers finds the Nonce Fillers wallet-service signed for a key, so the gas of a mined one is recorded
+	// when its request is Released (task 3.15). nil = not recorded.
+	Fillers Fillers
 	// ChainID is recorded when a voided-too-late key turns out to be signed already.
 	ChainID int64
 
@@ -314,7 +317,13 @@ func txHashes(ctx context.Context, st interface {
 }
 
 func (r *Reaper) releaseDead(ctx context.Context, w store.Withdrawal, from string, mined uint64) error {
-	err := releaseAndFail(ctx, r.Store, r.Ledger, w, from, failure{reason: ReasonReplacedOrDropped}, r.ChainID, r.now())
+	// If the tx that consumed the nonce is our own Nonce Filler, its gas is ours (ledger.md invariant
+	// #12). A failed lookup delays the Release rather than lose that gas: the proof still holds next pass.
+	gas, err := fillerGas(ctx, r.Fillers, r.Chain, w.Key())
+	if err != nil {
+		return fmt.Errorf("looking for a mined Nonce Filler: %w", err)
+	}
+	err = releaseAndFail(ctx, r.Store, r.Ledger, w, from, failure{reason: ReasonReplacedOrDropped, gas: gas}, r.ChainID, r.now())
 	if err == nil {
 		log.Printf("withdrawal %s: nonce %d consumed by another tx (mined nonce %d), none of ours mined; Lock released, failed (%s)",
 			w.ID, *w.Nonce, mined, ReasonReplacedOrDropped)
@@ -350,4 +359,31 @@ func (r *Reaper) diagnose(ctx context.Context, w store.Withdrawal, hot common.Ad
 // alert reports a stuck request an operator must look at, at most once per AlertEvery per kind.
 func (r *Reaper) alert(w store.Withdrawal, kind, msg string) {
 	r.alerts.raise(r.now(), r.AlertEvery, r.Alert, w, kind, msg)
+}
+
+// Fillers is wallet-service's list of the Nonce Fillers it signed for a key (task 3.13).
+type Fillers interface {
+	CancelHashes(ctx context.Context, key string) ([]string, error)
+}
+
+// fillerGas is the gas of the key's Nonce Filler if one was mined, nil if none was (the nonce was
+// consumed by something else, or no filler exists) or f is nil.
+func fillerGas(ctx context.Context, f Fillers, ch chain.Chain, key string) (*store.GasRecord, error) {
+	if f == nil {
+		return nil, nil
+	}
+	hashes, err := f.CancelHashes(ctx, key)
+	if err != nil {
+		return nil, err
+	}
+	for _, h := range hashes {
+		rc, err := ch.Receipt(ctx, common.HexToHash(h))
+		if err != nil {
+			return nil, err
+		}
+		if rc != nil {
+			return gasRecord(h, rc, "nonce_filler"), nil
+		}
+	}
+	return nil, nil
 }

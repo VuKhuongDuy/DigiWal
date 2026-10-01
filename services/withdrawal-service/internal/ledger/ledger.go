@@ -154,3 +154,36 @@ func (c *Client) Release(ctx context.Context, key string) error {
 		return unexpected("release", code, body)
 	}
 }
+
+// ErrGasFeeRefused: ledger-service will never accept this Gas Fee as sent (400, or 409: the same tx
+// was reported with different values). Not retried: an operator must look.
+var ErrGasFeeRefused = errors.New("ledger-service refused the Gas Fee")
+
+// GasFee is a mined tx's gas as its receipt reports it. ledger-service computes the fee from the two
+// numbers and derives both accounts itself.
+type GasFee struct {
+	ChainID  int64
+	TxHash   string
+	GasUsed  uint64
+	GasPrice *big.Int // effective gas price, wei
+	Purpose  string   // withdrawal | withdrawal_reverted | nonce_filler
+}
+
+// PostGasFee is POST /v1/ledger/gas-fees (ledger.md invariant #12). Idempotent on the tx hash, so it
+// is retried until it succeeds; anything but 200 / a permanent refusal is transient.
+func (c *Client) PostGasFee(ctx context.Context, g GasFee) error {
+	code, body, err := c.call(ctx, "/v1/ledger/gas-fees", map[string]any{
+		"chain_id": g.ChainID, "tx_hash": g.TxHash, "gas_used": g.GasUsed,
+		"effective_gas_price": g.GasPrice.String(), "purpose": g.Purpose,
+	})
+	switch {
+	case err != nil:
+		return err
+	case code == http.StatusOK:
+		return nil
+	case code == http.StatusConflict, code == http.StatusBadRequest:
+		return fmt.Errorf("%w (%d): %s", ErrGasFeeRefused, code, strings.TrimSpace(string(body)))
+	default:
+		return unexpected("gas-fees", code, body)
+	}
+}

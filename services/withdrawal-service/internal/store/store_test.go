@@ -259,12 +259,12 @@ func TestMarkFailedWritesTheEventOnceAndTransitionRefusesFailed(t *testing.T) {
 	ev := func(u Withdrawal) (string, []byte, error) {
 		return "withdrawals.failed", []byte(`{"id":"` + u.ID + `"}`), nil
 	}
-	got, err := s.MarkFailed(ctx, w.ID, StatusRequested, "stale_request", "", ev)
+	got, err := s.MarkFailed(ctx, w.ID, StatusRequested, "stale_request", "", nil, ev)
 	if err != nil || got.Status != StatusFailed || *got.RejectReason != "stale_request" {
 		t.Fatalf("%+v %v", got, err)
 	}
 	// A second writer loses, and no second event appears.
-	if _, err := s.MarkFailed(ctx, w.ID, StatusRequested, "stale_request", "", ev); !errors.Is(err, ErrStateChanged) {
+	if _, err := s.MarkFailed(ctx, w.ID, StatusRequested, "stale_request", "", nil, ev); !errors.Is(err, ErrStateChanged) {
 		t.Fatalf("second writer: %v, want ErrStateChanged", err)
 	}
 	evs, _ := s.UnpublishedEvents(ctx, 10)
@@ -273,7 +273,7 @@ func TestMarkFailedWritesTheEventOnceAndTransitionRefusesFailed(t *testing.T) {
 	}
 	// An event that cannot be built fails the whole transition: nothing half-done.
 	w2, _, _ := s.Create(ctx, req("alice", "f2"))
-	if _, err := s.MarkFailed(ctx, w2.ID, StatusRequested, "x", "", func(Withdrawal) (string, []byte, error) { return "", nil, errors.New("boom") }); err == nil {
+	if _, err := s.MarkFailed(ctx, w2.ID, StatusRequested, "x", "", nil, func(Withdrawal) (string, []byte, error) { return "", nil, errors.New("boom") }); err == nil {
 		t.Fatal("expected the event error")
 	}
 	if again, _ := s.GetByID(ctx, w2.ID); again.Status != StatusRequested {
@@ -296,7 +296,7 @@ func TestMarkFailedCanBlockTheWhitelistEntry(t *testing.T) {
 		t.Fatalf("setup: %s", st)
 	}
 	w, _, _ := s.Create(ctx, req("alice", "f1"))
-	if _, err := s.MarkFailed(ctx, w.ID, StatusRequested, "tx_reverted", addr, func(Withdrawal) (string, []byte, error) { return "t", []byte("{}"), nil }); err != nil {
+	if _, err := s.MarkFailed(ctx, w.ID, StatusRequested, "tx_reverted", addr, nil, func(Withdrawal) (string, []byte, error) { return "t", []byte("{}"), nil }); err != nil {
 		t.Fatal(err)
 	}
 	if st, _, _ := s.WhitelistStatus(ctx, "alice", addr, 24*time.Hour); st != WhitelistBlocked {

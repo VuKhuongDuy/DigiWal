@@ -117,7 +117,7 @@ func main() {
 	// A stuck `reserved` row is Released only once wallet-service has voided its key (task 3.13,
 	// invariant #22); if the void fails it is ALERTed and retried.
 	reaper := &pipeline.Reaper{Store: st, Ledger: ledgerClient, Chain: rpc, ChainID: system.ChainID,
-		Voider: walletClient, Recheck: validator.Recheck,
+		Voider: walletClient, Fillers: walletClient, Recheck: validator.Recheck,
 		StuckRequestTimeout:     envDuration("STUCK_REQUEST_TIMEOUT", 5*time.Minute),
 		StuckReservationTimeout: envDuration("STUCK_RESERVATION_TIMEOUT", 5*time.Minute),
 		StuckBroadcastBlocks:    envInt("STUCK_BROADCAST_BLOCKS", 128)}
@@ -165,7 +165,9 @@ func runAbandon(ctx context.Context, id string) {
 	if err != nil {
 		log.Fatal(err)
 	}
-	w, err := pipeline.Abandon(ctx, st, lg, rpc, id)
+	wc := &wallet.Client{BaseURL: requireEnv("WALLET_SERVICE_URL"),
+		HTTP: &http.Client{Timeout: 10 * time.Second, Transport: &http.Transport{TLSClientConfig: clientTLS}}}
+	w, err := pipeline.Abandon(ctx, st, lg, rpc, wc, id)
 	if err != nil {
 		log.Fatalf("not abandoned: %v", err)
 	}

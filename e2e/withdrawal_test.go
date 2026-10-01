@@ -174,6 +174,19 @@ func TestWithdrawals(t *testing.T) {
 		if want := new(big.Int).Sub(eth1(2), amount).String(); b.total != want || b.locked != "0" || b.available != want {
 			t.Errorf("alice's ledger balance = %+v, want total/available %s and nothing locked", b, want)
 		}
+		// The gas of the mined tx is in the ledger, once: gas_used × effective_gas_price from its receipt,
+		// {gas_expense −fee, chain +fee}, and not charged to alice (checked above: only `amount` left her balance).
+		rc, err := eth.TransactionReceipt(ctx, common.HexToHash(nativeTx))
+		if err != nil {
+			t.Fatal(err)
+		}
+		fee := new(big.Int).Mul(new(big.Int).SetUint64(rc.GasUsed), rc.EffectiveGasPrice)
+		waitFor(t, 60*time.Second, "the withdrawal's Gas Fee in the ledger", func() (bool, string) {
+			row := psql(t, "ledger", fmt.Sprintf(`SELECT count(*) || '|' || coalesce(sum(e.amount) FILTER (WHERE a.kind = 'gas_expense'), 0) || '|' || coalesce(max(l.purpose), '')
+				FROM ledger_transactions l JOIN entries e ON e.ledger_transaction_id = l.id JOIN accounts a ON a.id = e.account_id
+				WHERE l.idempotency_key = 'gas:31337:%s'`, strings.ToLower(nativeTx)))
+			return row == "2|-"+fee.String()+"|withdrawal", row
+		})
 		// Only one payout, ever.
 		time.Sleep(3 * time.Second)
 		if got := balance(ctx, t, eth, destA); got.Cmp(amount) != 0 {

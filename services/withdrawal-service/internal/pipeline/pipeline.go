@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math/big"
 	"strings"
 	"time"
 
@@ -41,13 +42,15 @@ const (
 
 type Store interface {
 	ListByStatus(ctx context.Context, status string, limit int) ([]store.Withdrawal, error)
-	MarkFailed(ctx context.Context, id, from, reason, blockAddress string, event func(store.Withdrawal) (string, []byte, error)) (store.Withdrawal, error)
+	MarkFailed(ctx context.Context, id, from, reason, blockAddress string, gas *store.GasRecord, event func(store.Withdrawal) (string, []byte, error)) (store.Withdrawal, error)
 	MarkSigned(ctx context.Context, id string, chainID int64, nonce uint64, rawTx string) (store.Withdrawal, error)
 	MarkBroadcast(ctx context.Context, id, txHash string, at time.Time, head int64, event func(store.Withdrawal) (string, []byte, error)) (store.Withdrawal, error)
-	MarkConfirmed(ctx context.Context, id, txHash string, block int64, ledgerTxID string, at time.Time, event func(store.Withdrawal) (string, []byte, error)) (store.Withdrawal, error)
+	MarkConfirmed(ctx context.Context, id, txHash string, block int64, ledgerTxID string, at time.Time, gas *store.GasRecord, event func(store.Withdrawal) (string, []byte, error)) (store.Withdrawal, error)
 	ListTxs(ctx context.Context, id string) ([]store.Tx, error)
 	AddReplacement(ctx context.Context, id string, seq int, hash, raw string) error
 	MarkSent(ctx context.Context, id string, head int64) error
+	ListGasPending(ctx context.Context, limit int) ([]store.GasPending, error)
+	MarkGasPosted(ctx context.Context, id string) error
 	UnpublishedEvents(ctx context.Context, limit int) ([]store.OutboxEvent, error)
 	MarkPublished(ctx context.Context, id int64) error
 }
@@ -55,6 +58,8 @@ type Store interface {
 type Ledger interface {
 	Settle(ctx context.Context, key string) (ledger.Settled, error)
 	Release(ctx context.Context, key string) error
+	// PostGasFee records the gas a mined tx of ours spent (ledger.md invariant #12); idempotent on the tx hash.
+	PostGasFee(ctx context.Context, g ledger.GasFee) error
 }
 
 type Signer interface {
@@ -123,6 +128,7 @@ func (p *Pipeline) Step(ctx context.Context) error {
 		p.each(ctx, store.StatusSigned, p.broadcast),
 		p.each(ctx, store.StatusBroadcast, p.confirm),
 		p.each(ctx, store.StatusBroadcast, p.feeBump),
+		p.postGas(ctx),
 		p.publish(ctx),
 		p.watchGaps(ctx),
 	)
@@ -357,7 +363,8 @@ func (p *Pipeline) confirm(ctx context.Context, w store.Withdrawal) error {
 		}
 		log.Printf("%s %s: tx %s reverted in block %d, revert reason %q — releasing its Lock", level, w.ID, txHash, r.BlockNumber, reason)
 		return p.releaseAndFail(ctx, w, store.StatusBroadcast, failure{
-			reason: ReasonTxReverted, revertReason: revertText(reason), txHash: txHash, blockDest: destinationToBlame(reason)})
+			reason: ReasonTxReverted, revertReason: revertText(reason), txHash: txHash, blockDest: destinationToBlame(reason),
+			gas: gasRecord(txHash, r, "withdrawal_reverted")})
 	}
 	settled, err := p.Ledger.Settle(ctx, w.Key())
 	if errors.Is(err, ledger.ErrConflict) || errors.Is(err, ledger.ErrLockNotFound) {
@@ -370,7 +377,7 @@ func (p *Pipeline) confirm(ctx context.Context, w store.Withdrawal) error {
 		return err
 	}
 	at := p.now().UTC()
-	_, err = p.Store.MarkConfirmed(ctx, w.ID, txHash, r.BlockNumber, settled.LedgerTransactionID, at, func(w store.Withdrawal) (string, []byte, error) {
+	_, err = p.Store.MarkConfirmed(ctx, w.ID, txHash, r.BlockNumber, settled.LedgerTransactionID, at, gasRecord(txHash, r, "withdrawal"), func(w store.Withdrawal) (string, []byte, error) {
 		b, err := events.Encode(events.WithdrawalConfirmed{
 			Version: 1, WithdrawalID: w.ID, IdempotencyKey: w.IdempotencyKey, UserID: w.UserID, AssetID: w.AssetID,
 			Amount: events.Amount(w.Amount.String()), ToAddress: w.ToAddress, ChainID: *w.ChainID,
@@ -485,6 +492,9 @@ type failure struct {
 	revertReason string // tx_reverted only
 	txHash       string // the mined (reverted) tx; "" = the latest known one, if the request was ever signed
 	blockDest    bool   // block the user's Whitelist Entry for the destination (invariant #25)
+	// gas is the gas of a mined tx this failure makes final (a reverted tx, a Nonce Filler), recorded in
+	// the same transaction and posted to the ledger afterwards (task 3.15).
+	gas *store.GasRecord
 }
 
 // revertText is the revert reason worth publishing: "" when it could not be recovered.
@@ -510,7 +520,7 @@ func (p *Pipeline) releaseAndFail(ctx context.Context, w store.Withdrawal, from 
 // failer is what failing a request needs: the guarded transition-with-event, and the tx versions
 // (to name the latest known tx in the event).
 type failer interface {
-	MarkFailed(ctx context.Context, id, from, reason, blockAddress string, event func(store.Withdrawal) (string, []byte, error)) (store.Withdrawal, error)
+	MarkFailed(ctx context.Context, id, from, reason, blockAddress string, gas *store.GasRecord, event func(store.Withdrawal) (string, []byte, error)) (store.Withdrawal, error)
 	ListTxs(ctx context.Context, id string) ([]store.Tx, error)
 }
 
@@ -535,7 +545,7 @@ func failWith(ctx context.Context, st failer, w store.Withdrawal, from string, f
 	if f.blockDest {
 		blockAddr = common.HexToAddress(w.ToAddress).Hex()
 	}
-	_, err := st.MarkFailed(ctx, w.ID, from, f.reason, blockAddr, func(u store.Withdrawal) (string, []byte, error) {
+	_, err := st.MarkFailed(ctx, w.ID, from, f.reason, blockAddr, f.gas, func(u store.Withdrawal) (string, []byte, error) {
 		ev := events.WithdrawalFailed{
 			Version: 1, WithdrawalID: u.ID, IdempotencyKey: u.IdempotencyKey, UserID: u.UserID, AssetID: u.AssetID,
 			Amount: events.Amount(u.Amount.String()), ToAddress: u.ToAddress, ChainID: chainID,
@@ -629,4 +639,43 @@ func sameTx(origRaw, repRaw string, nonce int64) error {
 		return errors.New("max fee did not go up")
 	}
 	return nil
+}
+
+// gasRecord is what the ledger needs to post a mined tx's Gas Fee.
+func gasRecord(txHash string, r *chain.Receipt, purpose string) *store.GasRecord {
+	price := r.EffectiveGasPrice
+	if price == nil {
+		price = new(big.Int)
+	}
+	return &store.GasRecord{TxHash: strings.ToLower(txHash), GasUsed: r.GasUsed, GasPrice: price, Purpose: purpose}
+}
+
+// postGas posts every recorded-but-unposted Gas Fee to the ledger (ledger.md invariant #12; task 3.15).
+// The numbers were written in the transaction that made the tx final, so nothing is lost by a crash; this
+// retries until ledger-service answers 200 (it is idempotent on the tx hash). A permanent refusal is an
+// ALERT, not a retry loop.
+func (p *Pipeline) postGas(ctx context.Context) error {
+	pend, err := p.Store.ListGasPending(ctx, p.batch())
+	if err != nil {
+		return fmt.Errorf("listing pending gas: %w", err)
+	}
+	var errs []error
+	for _, g := range pend {
+		chainID := g.ChainID
+		if chainID == 0 {
+			chainID = p.ChainID
+		}
+		err := p.Ledger.PostGasFee(ctx, ledger.GasFee{ChainID: chainID, TxHash: g.TxHash, GasUsed: g.GasUsed, GasPrice: g.GasPrice, Purpose: g.Purpose})
+		switch {
+		case errors.Is(err, ledger.ErrGasFeeRefused):
+			p.alert(store.Withdrawal{ID: g.ID}, "gas-refused", fmt.Sprintf("the ledger refused the %s Gas Fee of tx %s: %v — an operator must look", g.Purpose, g.TxHash, err))
+		case err != nil:
+			errs = append(errs, fmt.Errorf("gas of %s: %w", g.ID, err))
+		default:
+			if err := p.Store.MarkGasPosted(ctx, g.ID); err != nil {
+				errs = append(errs, err)
+			}
+		}
+	}
+	return errors.Join(errs...)
 }
