@@ -35,6 +35,10 @@ var (
 	// Wallet's own address (deposit-flow.md, Hot Wallet Address Discovery). chain-watcher reads it
 	// only to skip Hot Wallet Outflow (invariant #17); it still cannot reach either /v1/sign/*.
 	HotAddressReaders = []string{CNWithdrawalService, CNSweeper, CNChainWatcher}
+	// SystemAddressReaders may call GET /v1/wallet/system-addresses ({hot, warm}): withdrawal-service
+	// only, to refuse withdrawals and whitelist entries to the Hot/Warm Wallet (withdrawal-flow.md
+	// invariant #18) and, later, as its Treasury Sweep destination (wallet-tiering.md invariant #9).
+	SystemAddressReaders = []string{CNWithdrawalService}
 	// AddressLookupCallers may call GET /v1/addresses/{address}: chain-watcher only, and
 	// from day one (service-auth-mtls.md matrix) — it cannot resolve a deposit's user_id without it.
 	AddressLookupCallers = []string{CNChainWatcher}

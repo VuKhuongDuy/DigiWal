@@ -33,6 +33,7 @@ POST /v1/sign/hot-wallet                  # CN: withdrawal-service, sweeper
 POST /v1/sign/user-address                # CN: sweeper only (Sweep: user key -> Hot Wallet)
 GET  /v1/addresses/{address}              # CN: chain-watcher only -> {user_id, chain} or 404
 GET  /v1/wallet/hot-address               # CN: withdrawal-service, sweeper, chain-watcher -> {address}; 503 without a hot_wallet seed
+GET  /v1/wallet/system-addresses          # CN: withdrawal-service only -> {chain_id, hot, warm}; 503 until the Hot Wallet is configured
 ```
 
 `POST /v1/sign/hot-wallet` `{to_address, asset_id, amount, chain_id, idempotency_key, max_gas_price?}`
@@ -55,6 +56,17 @@ are simply not in the hash and resolve through the endpoint.
 (`deposit-flow.md`, Hot Wallet Address Discovery, invariants #15 and #17). Callers ask once at startup and
 cache it rather than configure it. chain-watcher uses it only to skip Hot Wallet Outflow and still cannot
 reach either `/v1/sign/*` endpoint.
+
+`GET /v1/wallet/system-addresses` adds the **Warm** Wallet address (`wallet-tiering.md` invariant #9).
+The Warm seed is never in this service, so the address comes from the operator's Treasury file,
+`infra/treasury.yaml` (`TREASURY_FILE`, mounted into wallet-service only): `chains: [{chain_id,
+warm_address}]`. The file is **required** in server mode: wallet-service refuses to start if it is
+missing or unparseable, lists no chains, has a non-positive or duplicate chain id, or a malformed or
+zero address; and, once the Hot Wallet is configured, if there is no entry for its chain or the Warm
+address equals the Hot Wallet's. withdrawal-service uses it to refuse withdrawals to the Hot/Warm
+Wallet (`withdrawal-flow.md` #18) and later as its Treasury Sweep destination. It sits beside
+`hot-address`, which is unchanged. To change the Warm address: edit the file, restart wallet-service,
+then withdrawal-service.
 
 `POST /v1/sign/user-address` `{user_id, to_address, asset_id, amount, chain_id}` → `{signed_raw_tx}`.
 The caller picks whose key signs but never the destination: `to_address` must equal the Hot

@@ -19,9 +19,11 @@ services:
       TLS_CA_FILE: /certs/ca-cert.pem
       RPC_URL: http://anvil:8545
       ASSETS_FILE: /config/assets.yaml
+      TREASURY_FILE: /config/treasury.yaml   # wallet-service only, never mounted elsewhere
     volumes:
       - ../infra/pki/out/wallet-service:/certs:ro
       - ./assets.yaml:/config/assets.yaml:ro
+      - ../infra/treasury.yaml:/config/treasury.yaml:ro
     ports: ["8080:8080", "8443:8443"]
     depends_on:
       postgres: {condition: service_healthy}

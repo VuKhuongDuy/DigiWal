@@ -240,3 +240,43 @@ func TestHotAddress(t *testing.T) {
 		t.Fatalf("unconfigured = %d %s", rec.Code, rec.Body)
 	}
 }
+
+func TestSystemAddresses(t *testing.T) {
+	get := func(srv *Server, cn string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest("GET", "/v1/wallet/system-addresses", nil)
+		if cn != "" {
+			req = withPeer(req, cn)
+		}
+		rec := httptest.NewRecorder()
+		srv.MTLSRoutes().ServeHTTP(rec, req)
+		return rec
+	}
+	srv := (&Server{hotSigner: &fakeHot{}}).WithSystemAddresses(SystemAddresses{
+		ChainID: 31337,
+		Hot:     common.HexToAddress("0x3d0290A916B57AE48a2840E7d3547fA317F976c3"),
+		Warm:    common.HexToAddress("0xa0Ee7A142d267C1f36714E4a8F75612F20a79720"),
+	})
+	// withdrawal-service only: the hot-address readers (sweeper, chain-watcher) get no new grant.
+	for cn, want := range map[string]int{"withdrawal-service": 200, "sweeper": 403, "chain-watcher": 403, "api-gateway": 403, "ledger-service": 403, "": 403} {
+		if got := get(srv, cn).Code; got != want {
+			t.Errorf("CN=%q: %d, want %d", cn, got, want)
+		}
+	}
+	rec := get(srv, "withdrawal-service")
+	if strings.TrimSpace(rec.Body.String()) != `{"chain_id":31337,"hot":"0x3d0290A916B57AE48a2840E7d3547fA317F976c3","warm":"0xa0Ee7A142d267C1f36714E4a8F75612F20a79720"}` {
+		t.Fatalf("body = %s", rec.Body)
+	}
+	// Not configured yet: 503, never a zero/partial answer.
+	if rec := get(&Server{}, "withdrawal-service"); rec.Code != 503 || strings.Contains(rec.Body.String(), "0x") {
+		t.Fatalf("unconfigured = %d %s", rec.Code, rec.Body)
+	}
+	// hot-address is unchanged for its existing callers.
+	for _, cn := range []string{"sweeper", "chain-watcher", "withdrawal-service"} {
+		req := withPeer(httptest.NewRequest("GET", "/v1/wallet/hot-address", nil), cn)
+		rec := httptest.NewRecorder()
+		srv.MTLSRoutes().ServeHTTP(rec, req)
+		if rec.Code != 200 {
+			t.Errorf("hot-address as CN=%q: %d", cn, rec.Code)
+		}
+	}
+}

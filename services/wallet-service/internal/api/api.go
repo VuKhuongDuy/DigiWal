@@ -42,6 +42,14 @@ type UserSigner interface {
 	Sign(ctx context.Context, req signing.UserRequest) (signing.UserResponse, error)
 }
 
+// SystemAddresses are the treasury addresses withdrawal-service must know: the Hot Wallet (derived
+// here) and the Warm Wallet (declared by the operator in the treasury file).
+type SystemAddresses struct {
+	ChainID int64
+	Hot     common.Address
+	Warm    common.Address
+}
+
 type Server struct {
 	store     *storage.Store
 	cache     *storage.Cache
@@ -49,6 +57,13 @@ type Server struct {
 	hotSigner HotSigner  // nil until the hot_wallet seed, RPC and assets are configured
 	userSign  UserSigner // nil until both seeds, RPC and assets are configured
 	addresses AddressLookup
+	system    *SystemAddresses // nil until the Hot Wallet is configured (then 503)
+}
+
+// WithSystemAddresses enables GET /v1/wallet/system-addresses.
+func (s *Server) WithSystemAddresses(a SystemAddresses) *Server {
+	s.system = &a
+	return s
 }
 
 func NewServer(store *storage.Store, cache *storage.Cache, signer Signer, hotSigner HotSigner, userSign UserSigner) *Server {
@@ -75,6 +90,7 @@ func (s *Server) MTLSRoutes() http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("POST /v1/sign/hot-wallet", authz.Require(authz.HotWalletSigners, http.HandlerFunc(s.handleSignHotWallet)))
 	mux.Handle("GET /v1/wallet/hot-address", authz.Require(authz.HotAddressReaders, http.HandlerFunc(s.handleHotAddress)))
+	mux.Handle("GET /v1/wallet/system-addresses", authz.Require(authz.SystemAddressReaders, http.HandlerFunc(s.handleSystemAddresses)))
 	mux.Handle("GET /v1/addresses/{address}", authz.Require(authz.AddressLookupCallers, http.HandlerFunc(s.handleAddressOwner)))
 	mux.Handle("POST /v1/sign/user-address", authz.Require(authz.UserAddressSigners, http.HandlerFunc(s.handleSignUserAddress)))
 	return mux
@@ -88,6 +104,18 @@ func (s *Server) handleHotAddress(w http.ResponseWriter, _ *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"address": s.hotSigner.HotWalletAddress().Hex()})
+}
+
+// handleSystemAddresses is GET /v1/wallet/system-addresses: {chain_id, hot, warm}. 503 until the
+// Hot Wallet (and so the chain) is configured — never a partial or zero address.
+func (s *Server) handleSystemAddresses(w http.ResponseWriter, _ *http.Request) {
+	if s.system == nil {
+		writeErr(w, http.StatusServiceUnavailable, "hot wallet not configured")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"chain_id": s.system.ChainID, "hot": s.system.Hot.Hex(), "warm": s.system.Warm.Hex(),
+	})
 }
 
 // handleAddressOwner is chain-watcher's cache-miss fallback (deposit-flow.md, Address
