@@ -295,3 +295,13 @@ sequenceDiagram
    (invariant #2). `withdrawal-service` now needs it too, to reject
    withdrawals to it. Recommendation and alternatives:
    `withdrawal-flow.md` Open Questions #10.
+8. **Open, backlog (Tech Lead, raised during M3 design): run several Hot
+   Wallets as backup,** so a Nonce Gap freeze on one does not halt all
+   withdrawals. Not designed and not scheduled. It would change this
+   doc's one-address-per-tier rule (invariant #7) for Hot, and touch:
+   separate nonce sequences and freeze flags per Hot Wallet; wallet
+   selection/failover on the signing endpoint; Floor/Ceiling math (per
+   wallet or aggregate); `sweeper`'s Sweep destination and Gas Top-Up
+   source, and the Treasury Sweep's source; and every consumer of
+   `GET /v1/wallet/hot-address` (including `chain-watcher`'s Hot Wallet
+   Outflow check). Tracked in `IMPLEMENTATION_PLAN.md`'s Backlog.

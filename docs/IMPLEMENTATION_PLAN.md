@@ -228,7 +228,7 @@ see their balance update after 32 blocks — first real demo. Estimated
 | 3.1 | `withdrawal-service` | `withdrawal-flow.md` invariant #11 | Schema (state machine `requested→validated→reserved→signed→broadcast→confirmed`), `POST /withdrawals` idempotent creation (`INSERT...ON CONFLICT DO NOTHING` first, before anything else). **Key scope per `withdrawal-flow.md` invariant #20 (Decided, Open Questions #11): `withdrawal_id` UUID PK + `UNIQUE(user_id, idempotency_key)`.** A duplicate `POST` only reads the row back, never re-validates (invariant #11, Decided option B) | 0.1 |
 | 3.2 | `withdrawal-service` | invariant #10, whitelist (below), `compliance-screening.md` | Asset Registry loader (same static-config pattern as task 1.2 — fixes a gap found on Tech Lead review: `withdrawal-service` needs `min_withdrawal_amount` for this task's own check, `ledger.md`'s Bounded context(s)). Validation: min-withdrawal-amount, whitelist-active check, blacklist check, **and the own-deposit-address check (`withdrawal-flow.md` invariant #18, task 3.10)** — all before any ledger reservation | 3.1, 3.6 |
 | 3.3 | `withdrawal-service` | invariants #1–#6, #16 | Reserve (via `ledger-service`'s `POST /v1/ledger/locks` — `lock(idempotency_key, user_id, asset_id, amount)`, never `account_id`) → sign (via `wallet-service /v1/sign/hot-wallet`, passing the Withdrawal Request's own `idempotency_key`, using `withdrawal-service`'s own leaf certificate from task 0.6) → broadcast → poll to Withdrawal Confirmation Depth = 64 blocks → **Settle** (`.../{key}/settle`) at the `confirmed` transition, posting the real debit for the first time. Any failure before `confirmed` (signing failure, broadcast failure, abandonment) calls **Release** (`.../{key}/release`) instead — no Entry ever existed to compensate (`withdrawal-flow.md`'s revised invariant #3). **Publishes `withdrawals.broadcast` at the `broadcast` transition and `withdrawals.confirmed` at `confirmed`** (payloads `integration-contracts.md` §1, `pkg/events`), recorded-then-published with a `published_at`-style marker so a crash can't drop one (same at-least-once pattern as `chain-watcher`). Lock/sign keys are the Withdrawal Key `withdrawal:{withdrawal_id}` (invariant #20, Decided; task 3.11) | 3.2, 0.3, 0.4, 0.6, 1.7 |
-| 3.4 | `withdrawal-service` | invariants #7–#9 | Nonce Gap detection, `disputed` state, freeze via `wallet-service`, operator-resolution stub (manual DB action, no UI yet). **Freeze interface: `withdrawal-flow.md` invariant #19 (PROPOSED, Open Questions #12 — approve first).** (1) `wallet-service`: `POST /v1/wallet/nonce-gap {chain_id, from_nonce}` on the mTLS listener, new `authz.NonceGapReporters = {CNWithdrawalService}`, handler over the existing `storage.FreezeNonceGap` (returns the effective `frozen_from_nonce`/`frozen_at`; `404` no nonce row; `422` if `from_nonce >= next_nonce`); tests: LEAST semantics, repeat is a no-op, `CN=sweeper`/others `403`, sign endpoint `503` afterwards while an already-signed key still replays. **No unfreeze endpoint** — document the operator SQL in `wallet-service`'s README. (2) `withdrawal-service`: mark requests with nonce ≥ N `disputed`, then call the endpoint, retrying until `200` | 3.3, 0.4 |
+| 3.4 | `withdrawal-service` | invariants #7–#9 | Nonce Gap detection, `disputed` state, freeze via `wallet-service`, operator-resolution stub (manual DB action, no UI yet). **Freeze interface: `withdrawal-flow.md` invariant #19 (Decided by the Tech Lead, Open Questions #12).** Still open, not blocking this task: `next_nonce` reset after an operator resolves a gap, and how nonce-fillers are signed (#12 sub-questions); refusing new withdrawals while frozen (#13). (1) `wallet-service`: `POST /v1/wallet/nonce-gap {chain_id, from_nonce}` on the mTLS listener, new `authz.NonceGapReporters = {CNWithdrawalService}`, handler over the existing `storage.FreezeNonceGap` (returns the effective `frozen_from_nonce`/`frozen_at`; `404` no nonce row; `422` if `from_nonce >= next_nonce`); tests: LEAST semantics, repeat is a no-op, `CN=sweeper`/others `403`, sign endpoint `503` afterwards while an already-signed key still replays. **No unfreeze endpoint** — document the operator SQL in `wallet-service`'s README. (2) `withdrawal-service`: mark requests with nonce ≥ N `disputed`, then call the endpoint, retrying until `200` | 3.3, 0.4 |
 | 3.5 | `withdrawal-service` | invariant #9 (revised scope — see `withdrawal-flow.md`'s Compensating Entry definition) | Compensating Entry — **only** reached from `disputed` → abandoned (post-Settle reorg case; the ordinary pre-confirm failure path is task 3.3's Release, not this) — via `ledger-service`'s `POST /v1/ledger/transactions` with `source_type='correction'`, the deterministic `{idempotency_key}:refund` key, and `corrects_entry_id` set on every entry (`ledger.md` invariant #11 — the endpoint recomputes the amount server-side, `withdrawal-service` never gets to assert it) | 3.4 |
 | 3.6 | `withdrawal-service` | new Withdrawal Whitelist section | Add (pending → active after 24h cooldown) / remove (instant) whitelist entries; **creation also refuses an own-deposit-address (invariant #18, task 3.10)** | 3.1 |
 | 3.7 | `api-gateway` | — | `POST /withdrawals`, `GET /withdrawals/{idempotency_key}` (returns only the caller's own request — `404` otherwise, invariant #20 Decided), `POST /whitelist`, `DELETE /whitelist/:id` — all behind task 0.7's auth middleware, forwarded to `withdrawal-service` over **mTLS as `CN=api-gateway`** (Decided, `service-auth-mtls.md` Open Questions #4, this hop) | 3.2, 3.6, 0.7 |
@@ -261,6 +261,26 @@ Estimated 3 PRs.
 | 5.2 | `ledger-service` | `compliance-screening.md` Screening Resolution | Operator resolution of a Flagged Deposit (`approved` replays original idempotency key through `apply()`; `rejected` stays terminal) | 1.5, 5.1 |
 
 (Withdrawal-side blacklist check already shipped in 3.2.) Estimated 2 PRs.
+
+## Backlog (unscheduled)
+
+Raised, deliberately not in any milestone yet. Each needs a design note
+before work starts.
+
+- **Several Hot Wallets as backup** (Tech Lead, raised during M3 design)
+  so that one Hot Wallet frozen by a Nonce Gap (`withdrawal-flow.md`
+  invariant #19) does not stop all withdrawals. Would touch:
+  separate Hot Wallet seeds/addresses and **separate nonce sequences and
+  freeze flags** per Hot Wallet (`wallet-service`'s
+  `hot_wallet_nonces`, today keyed by `chain_id` only); **wallet
+  selection and failover** for `POST /v1/sign/hot-wallet` (who picks,
+  and the endpoint's "no caller-chosen key" rule); **Hot Floor/Ceiling
+  math** per wallet vs. in aggregate (`wallet-tiering.md`); **`sweeper`
+  Sweep and Gas Top-Up** (which Hot Wallet a Sweep goes to and a top-up
+  comes from — `deposit-flow.md` invariants #7, #15, #17) and **Treasury
+  Sweep** sources; `GET /v1/wallet/hot-address` becoming a list, and
+  `chain-watcher`'s Hot Wallet Outflow check covering every Hot Wallet.
+  Open question: `wallet-tiering.md` Open Questions #8.
 
 ## Rough timeline
 

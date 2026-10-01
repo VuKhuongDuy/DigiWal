@@ -476,8 +476,8 @@ Questions #3 for the one remaining unresolved failure mode.
       that predate this rule must still be caught.
 19. **`withdrawal-service` tells `wallet-service` about a Nonce Gap
     through one endpoint, and only an operator can lift the freeze.**
-    **PROPOSED (Solution Architect, M3 task 3.4) — pending Tech Lead
-    approval, Open Questions #12.** Closes a real gap: invariants #7-#8
+    **Decided (Tech Lead), Open Questions #12 (main question resolved;
+    two operator-procedure sub-questions still open).** Closes a real gap: invariants #7-#8
     require the freeze to be central in `wallet-service`, and
     `wallet-service` already stores it (`hot_wallet_nonces.frozen_from_nonce`,
     `LEAST` semantics, `storage.FreezeNonceGap`; `POST
@@ -628,7 +628,7 @@ sequenceDiagram
     end
 ```
 
-Nonce Gap freeze and operator unfreeze (invariant #19, **PROPOSED**):
+Nonce Gap freeze and operator unfreeze (invariant #19, **Decided**):
 
 ```mermaid
 sequenceDiagram
@@ -918,9 +918,10 @@ sequenceDiagram
     `history-service` (key on it). Needs approval before M3 starts,
     since task 3.1's schema depends on it.~~ **Decided (Tech Lead):
     approved as proposed.**
-12. **PROPOSED: Nonce Gap freeze endpoint `POST /v1/wallet/nonce-gap`
+12. ~~**PROPOSED: Nonce Gap freeze endpoint `POST /v1/wallet/nonce-gap`
     (invariant #19), `CN=withdrawal-service` only, no unfreeze
-    endpoint.** Also open underneath it: after an operator resolves a
+    endpoint.**~~ **Decided (Tech Lead): approved as proposed** — manual
+    operator SQL to unfreeze. **Still open** underneath it: after an operator resolves a
     gap, does `wallet-service`'s `next_nonce` need resetting (e.g. to the
     chain's pending nonce)? `storage.ResolveNonceGap` deliberately leaves
     it alone because no doc says; if the operator used nonce-fillers
@@ -937,3 +938,7 @@ sequenceDiagram
     #17) — a crash after `lock()` succeeded but before `reserved` left
     an active Lock no rule covered. Confirm.~~ **Decided (Tech Lead):
     yes.** Also Decided: Stuck Request Timeout = 5 minutes.
+15. **Backlog, not M3 (raised by the Tech Lead): several Hot Wallets as
+    backup**, so a Nonce Gap freeze on one does not stop all
+    withdrawals. Out of scope here; tracked in `IMPLEMENTATION_PLAN.md`
+    Backlog and `wallet-tiering.md` Open Questions #8.

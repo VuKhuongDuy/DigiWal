@@ -437,7 +437,7 @@ concrete Confirmation Depth and Gas Top-Up numbers below.
     given up on, so that consumer must keep retrying rather than ever
     skip-and-ALERT a message — see `integration-contracts.md` §5 for the
     consolidated policy across every consumer. **While a Nonce Gap freeze
-    is open** (`withdrawal-flow.md` invariant #19, PROPOSED), every Gas
+    is open** (`withdrawal-flow.md` invariant #19, Decided), every Gas
     Top-Up gets `503` and ends in this skip path; native Sweeps are
     unaffected. Re-drive the skipped records after the operator lifts
     the freeze.
