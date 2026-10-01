@@ -11,6 +11,9 @@ import (
 	"math/big"
 	"net/http"
 	"regexp"
+	"time"
+
+	"github.com/ethereum/go-ethereum/common"
 
 	"digiwal/services/withdrawal-service/internal/authz"
 	"digiwal/services/withdrawal-service/internal/store"
@@ -22,9 +25,37 @@ type Requests interface {
 	Get(ctx context.Context, userID, idempotencyKey string) (store.Withdrawal, error)
 }
 
-type Server struct{ requests Requests }
+// Whitelist is the slice of store.Store the whitelist endpoints need.
+type Whitelist interface {
+	AddWhitelistEntry(ctx context.Context, userID, address string) (store.WhitelistEntry, bool, error)
+	RemoveWhitelistEntry(ctx context.Context, userID, id string) error
+	Now(ctx context.Context) (time.Time, error)
+}
 
-func NewServer(r Requests) *Server { return &Server{requests: r} }
+// Destinations refuses addresses that may never be a withdrawal destination: our own deposit
+// addresses and the Hot/Warm Wallet (invariant #18, task 3.10). reason is the 422 error code,
+// "" when the address is allowed; err means the check could not be completed (fail closed, 503).
+type Destinations interface {
+	Refuse(ctx context.Context, address common.Address) (reason string, err error)
+}
+
+type Server struct {
+	requests  Requests
+	whitelist Whitelist
+	// Cooldown is the Whitelist Cooldown (Decided: 24h). Configurable only so e2e tests need not wait.
+	cooldown time.Duration
+	// destinations is nil until task 3.10 wires the wallet-service checks.
+	destinations Destinations
+}
+
+type Config struct {
+	WhitelistCooldown time.Duration
+	Destinations      Destinations
+}
+
+func NewServer(r Requests, wl Whitelist, cfg Config) *Server {
+	return &Server{requests: r, whitelist: wl, cooldown: cfg.WhitelistCooldown, destinations: cfg.Destinations}
+}
 
 // Routes is the plain listener: /healthz only (service-auth-mtls.md invariant #8).
 func (s *Server) Routes() http.Handler {
@@ -42,6 +73,8 @@ func (s *Server) MTLSRoutes() http.Handler {
 	gw := func(h http.HandlerFunc) http.Handler { return authz.Require(authz.GatewayCallers, h) }
 	mux.Handle("POST /v1/withdrawals", gw(s.handleCreate))
 	mux.Handle("GET /v1/withdrawals/{idempotency_key}", gw(s.handleGet))
+	mux.Handle("POST /v1/whitelist", gw(s.handleAddWhitelist))
+	mux.Handle("DELETE /v1/whitelist/{id}", gw(s.handleRemoveWhitelist))
 	return mux
 }
 
@@ -137,6 +170,97 @@ func (s *Server) handleGet(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeJSON(w, http.StatusOK, response(wd))
 	}
+}
+
+var (
+	hexAddressRe = regexp.MustCompile(`^0x[0-9a-fA-F]{40}$`)
+	uuidRe       = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
+)
+
+type whitelistResponse struct {
+	ID      string    `json:"id"`
+	UserID  string    `json:"user_id"`
+	Address string    `json:"address"`
+	Status  string    `json:"status"`
+	AddedAt time.Time `json:"added_at"`
+}
+
+// handleAddWhitelist is POST /v1/whitelist {user_id, address}. New entries start `pending`
+// (invariant #13); re-adding returns the existing entry with its original added_at (#15).
+// 201 for a new entry, 200 for an existing one.
+func (s *Server) handleAddWhitelist(w http.ResponseWriter, r *http.Request) {
+	var b struct {
+		UserID  string `json:"user_id"` // injected by api-gateway
+		Address string `json:"address"`
+	}
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<12))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&b); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	if b.UserID == "" {
+		writeErr(w, http.StatusBadRequest, "user_id is required")
+		return
+	}
+	if !hexAddressRe.MatchString(b.Address) {
+		writeErr(w, http.StatusBadRequest, "address must be a 0x-prefixed 20-byte hex address")
+		return
+	}
+	addr := common.HexToAddress(b.Address)
+	if addr == (common.Address{}) {
+		writeErr(w, http.StatusBadRequest, "the zero address cannot be whitelisted")
+		return
+	}
+	// Invariant #18: refused up front so the user doesn't wait out the cooldown for an entry
+	// that can never be used. UX only — validation (task 3.2) checks again at request time.
+	if s.destinations != nil {
+		reason, err := s.destinations.Refuse(r.Context(), addr)
+		if err != nil {
+			log.Printf("checking whitelist destination %s: %v", addr.Hex(), err)
+			writeErr(w, http.StatusServiceUnavailable, "destination check unavailable, retry later")
+			return
+		}
+		if reason != "" {
+			writeErr(w, http.StatusUnprocessableEntity, reason)
+			return
+		}
+	}
+	e, created, err := s.whitelist.AddWhitelistEntry(r.Context(), b.UserID, addr.Hex())
+	if err != nil {
+		log.Printf("adding whitelist entry: %v", err)
+		writeErr(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	now, err := s.whitelist.Now(r.Context())
+	if err != nil {
+		log.Printf("reading clock: %v", err)
+		writeErr(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	code := http.StatusOK
+	if created {
+		code = http.StatusCreated
+	}
+	writeJSON(w, code, whitelistResponse{ID: e.ID, UserID: e.UserID, Address: e.Address, Status: e.Status(now, s.cooldown), AddedAt: e.AddedAt})
+}
+
+// handleRemoveWhitelist is DELETE /v1/whitelist/{id}?user_id=: immediate (invariant #13) and
+// idempotent — an unknown id, or another user's, is a 204 no-op too, so ids can't be probed.
+func (s *Server) handleRemoveWhitelist(w http.ResponseWriter, r *http.Request) {
+	userID := r.URL.Query().Get("user_id")
+	if userID == "" {
+		writeErr(w, http.StatusBadRequest, "user_id is required")
+		return
+	}
+	if id := r.PathValue("id"); uuidRe.MatchString(id) {
+		if err := s.whitelist.RemoveWhitelistEntry(r.Context(), userID, id); err != nil {
+			log.Printf("removing whitelist entry: %v", err)
+			writeErr(w, http.StatusInternalServerError, "internal error")
+			return
+		}
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {

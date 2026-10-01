@@ -1,7 +1,7 @@
 // Command withdrawal-service orchestrates withdrawals (docs/design/withdrawal-flow.md).
 //
-// Today (task 3.1): apply migrations, then serve /healthz on a plain listener and the
-// withdrawal endpoints on an mTLS listener restricted to CN=api-gateway. A request is
+// Today (tasks 3.1, 3.6): apply migrations, then serve /healthz on a plain listener and the
+// withdrawal and whitelist endpoints on an mTLS listener restricted to CN=api-gateway. A request is
 // recorded idempotently and stays `requested`; validation, Reservation and signing are
 // tasks 3.2-3.3. Without TLS certs the mTLS listener does not start.
 package main
@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"digiwal/services/withdrawal-service/internal/api"
 	"digiwal/services/withdrawal-service/internal/authz"
@@ -29,7 +30,8 @@ func main() {
 	}
 	defer st.Close()
 
-	server := api.NewServer(st)
+	// Whitelist Cooldown is Decided at 24h (withdrawal-flow.md); override only for e2e tests.
+	server := api.NewServer(st, st, api.Config{WhitelistCooldown: envDuration("WHITELIST_COOLDOWN", 24*time.Hour)})
 
 	if certFile := os.Getenv("TLS_CERT_FILE"); certFile != "" {
 		tlsCfg, err := authz.ServerTLSConfig(certFile, requireEnv("TLS_KEY_FILE"), requireEnv("TLS_CA_FILE"))
@@ -64,6 +66,21 @@ func requireEnv(key string) string {
 		log.Fatalf("required env var %s is not set", key)
 	}
 	return v
+}
+
+func envDuration(key string, def time.Duration) time.Duration {
+	v := os.Getenv(key)
+	if v == "" {
+		return def
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil || d < 0 {
+		log.Fatalf("%s=%q is not a duration", key, v)
+	}
+	if d != def {
+		log.Printf("WARNING: %s=%s overrides the decided default %s", key, d, def)
+	}
+	return d
 }
 
 func envOr(key, def string) string {

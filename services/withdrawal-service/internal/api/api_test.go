@@ -55,7 +55,7 @@ func do(t *testing.T, f *fakeRequests, cn, method, path, body string) *httptest.
 	t.Helper()
 	req := withPeer(httptest.NewRequest(method, path, strings.NewReader(body)), cn)
 	rec := httptest.NewRecorder()
-	NewServer(f).MTLSRoutes().ServeHTTP(rec, req)
+	NewServer(f, nil, Config{}).MTLSRoutes().ServeHTTP(rec, req)
 	return rec
 }
 
