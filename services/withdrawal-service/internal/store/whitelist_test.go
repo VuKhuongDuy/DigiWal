@@ -110,3 +110,22 @@ func TestWhitelistSchemaRejectsMalformedAddresses(t *testing.T) {
 		}
 	}
 }
+
+func TestListWhitelistIsOwnNewestFirst(t *testing.T) {
+	s := newStore(t)
+	ctx := context.Background()
+	const addrB = "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC"
+	if got, err := s.ListWhitelist(ctx, "alice"); err != nil || len(got) != 0 {
+		t.Fatalf("empty: %v %v", got, err)
+	}
+	old, _, _ := s.AddWhitelistEntry(ctx, "alice", addrA)
+	if _, err := s.pool.Exec(ctx, `UPDATE whitelist_entries SET added_at = added_at - interval '1 day'`); err != nil {
+		t.Fatal(err)
+	}
+	newer, _, _ := s.AddWhitelistEntry(ctx, "alice", addrB)
+	_, _, _ = s.AddWhitelistEntry(ctx, "bob", addrA)
+	got, err := s.ListWhitelist(ctx, "alice")
+	if err != nil || len(got) != 2 || got[0].ID != newer.ID || got[1].ID != old.ID {
+		t.Fatalf("alice's list = %+v (%v), want [%s, %s]", got, err, newer.ID, old.ID)
+	}
+}

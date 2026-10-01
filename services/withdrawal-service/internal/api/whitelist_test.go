@@ -46,6 +46,17 @@ func (f *fakeWhitelist) RemoveWhitelistEntry(_ context.Context, userID, id strin
 	return nil
 }
 
+func (f *fakeWhitelist) ListWhitelist(_ context.Context, userID string) ([]store.WhitelistEntry, error) {
+	f.calls++
+	var out []store.WhitelistEntry
+	for _, e := range f.entries {
+		if e.UserID == userID {
+			out = append(out, e)
+		}
+	}
+	return out, nil
+}
+
 func (f *fakeWhitelist) Now(context.Context) (time.Time, error) { return f.now, nil }
 
 type fakeDest struct {
@@ -70,6 +81,9 @@ func TestWhitelistOnlyTheGatewayMayCall(t *testing.T) {
 		wl := newFakeWL()
 		if rec := doWL(t, wl, Config{}, cn, "POST", "/v1/whitelist", `{"user_id":"alice","address":"`+checksummed+`"}`); rec.Code != 403 || wl.calls != 0 {
 			t.Errorf("POST as CN=%q: %d", cn, rec.Code)
+		}
+		if rec := doWL(t, wl, Config{}, cn, "GET", "/v1/whitelist?user_id=alice", ""); rec.Code != 403 || wl.calls != 0 {
+			t.Errorf("GET as CN=%q: %d", cn, rec.Code)
 		}
 		if rec := doWL(t, wl, Config{}, cn, "DELETE", "/v1/whitelist/x?user_id=alice", ""); rec.Code != 403 || wl.calls != 0 {
 			t.Errorf("DELETE as CN=%q: %d", cn, rec.Code)
@@ -160,5 +174,26 @@ func TestWhitelistRemove(t *testing.T) {
 	}
 	if rec := doWL(t, wl, Config{}, "api-gateway", "DELETE", "/v1/whitelist/"+id, ""); rec.Code != 400 {
 		t.Fatalf("no user_id: %d, want 400", rec.Code)
+	}
+}
+
+func TestWhitelistList(t *testing.T) {
+	wl := newFakeWL()
+	cfg := Config{WhitelistCooldown: 24 * time.Hour}
+	if rec := doWL(t, wl, cfg, "api-gateway", "GET", "/v1/whitelist?user_id=alice", ""); rec.Code != 200 || strings.TrimSpace(rec.Body.String()) != "[]" {
+		t.Fatalf("empty list: %d %q, want 200 []", rec.Code, rec.Body)
+	}
+	doWL(t, wl, cfg, "api-gateway", "POST", "/v1/whitelist", `{"user_id":"alice","address":"`+checksummed+`"}`)
+	doWL(t, wl, cfg, "api-gateway", "POST", "/v1/whitelist", `{"user_id":"bob","address":"`+checksummed+`"}`)
+	rec := doWL(t, wl, cfg, "api-gateway", "GET", "/v1/whitelist?user_id=alice", "")
+	var items []whitelistItem
+	if err := json.Unmarshal(rec.Body.Bytes(), &items); err != nil || len(items) != 1 || items[0].Address != checksummed || items[0].Status != "pending" {
+		t.Fatalf("alice's list: %s (%v)", rec.Body, err)
+	}
+	if strings.Contains(rec.Body.String(), "user_id") {
+		t.Fatalf("list repeats user_id: %s", rec.Body)
+	}
+	if rec := doWL(t, wl, cfg, "api-gateway", "GET", "/v1/whitelist", ""); rec.Code != 400 {
+		t.Fatalf("no user_id: %d", rec.Code)
 	}
 }

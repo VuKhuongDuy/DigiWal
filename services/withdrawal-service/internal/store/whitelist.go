@@ -51,6 +51,22 @@ func (s *Store) AddWhitelistEntry(ctx context.Context, userID, address string) (
 	return e, false, err
 }
 
+// ListWhitelist returns the user's own entries, newest first, so a user can spot an entry they
+// did not add while it is still pending (the reason the cooldown exists).
+func (s *Store) ListWhitelist(ctx context.Context, userID string) ([]WhitelistEntry, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT id, user_id, address, added_at FROM whitelist_entries
+		WHERE user_id = $1 ORDER BY added_at DESC, id`, userID)
+	if err != nil {
+		return nil, err
+	}
+	return pgx.CollectRows(rows, func(r pgx.CollectableRow) (WhitelistEntry, error) {
+		var e WhitelistEntry
+		err := r.Scan(&e.ID, &e.UserID, &e.Address, &e.AddedAt)
+		return e, err
+	})
+}
+
 // RemoveWhitelistEntry deletes the user's own entry, effective immediately (invariant #13).
 // Idempotent: an id that does not exist, or belongs to another user, is a no-op.
 func (s *Store) RemoveWhitelistEntry(ctx context.Context, userID, id string) error {

@@ -29,6 +29,7 @@ type Requests interface {
 type Whitelist interface {
 	AddWhitelistEntry(ctx context.Context, userID, address string) (store.WhitelistEntry, bool, error)
 	RemoveWhitelistEntry(ctx context.Context, userID, id string) error
+	ListWhitelist(ctx context.Context, userID string) ([]store.WhitelistEntry, error)
 	Now(ctx context.Context) (time.Time, error)
 }
 
@@ -75,6 +76,7 @@ func (s *Server) MTLSRoutes() http.Handler {
 	mux.Handle("GET /v1/withdrawals/{idempotency_key}", gw(s.handleGet))
 	mux.Handle("POST /v1/whitelist", gw(s.handleAddWhitelist))
 	mux.Handle("DELETE /v1/whitelist/{id}", gw(s.handleRemoveWhitelist))
+	mux.Handle("GET /v1/whitelist", gw(s.handleListWhitelist))
 	return mux
 }
 
@@ -243,6 +245,37 @@ func (s *Server) handleAddWhitelist(w http.ResponseWriter, r *http.Request) {
 		code = http.StatusCreated
 	}
 	writeJSON(w, code, whitelistResponse{ID: e.ID, UserID: e.UserID, Address: e.Address, Status: e.Status(now, s.cooldown), AddedAt: e.AddedAt})
+}
+
+type whitelistItem struct {
+	ID      string    `json:"id"`
+	Address string    `json:"address"`
+	Status  string    `json:"status"`
+	AddedAt time.Time `json:"added_at"`
+}
+
+// handleListWhitelist is GET /v1/whitelist?user_id=: the caller's own entries, newest first,
+// each with its status computed now. Always a JSON array, [] when there are none.
+func (s *Server) handleListWhitelist(w http.ResponseWriter, r *http.Request) {
+	userID := r.URL.Query().Get("user_id")
+	if userID == "" {
+		writeErr(w, http.StatusBadRequest, "user_id is required")
+		return
+	}
+	entries, err := s.whitelist.ListWhitelist(r.Context(), userID)
+	if err == nil {
+		var now time.Time
+		if now, err = s.whitelist.Now(r.Context()); err == nil {
+			out := make([]whitelistItem, 0, len(entries))
+			for _, e := range entries {
+				out = append(out, whitelistItem{ID: e.ID, Address: e.Address, Status: e.Status(now, s.cooldown), AddedAt: e.AddedAt})
+			}
+			writeJSON(w, http.StatusOK, out)
+			return
+		}
+	}
+	log.Printf("listing whitelist: %v", err)
+	writeErr(w, http.StatusInternalServerError, "internal error")
 }
 
 // handleRemoveWhitelist is DELETE /v1/whitelist/{id}?user_id=: immediate (invariant #13) and

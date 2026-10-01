@@ -40,6 +40,9 @@ destination checks (3.10) and the Reaper (3.9) are not built yet.
   - `status` is `active` once the Whitelist Cooldown (24h, decided) has passed since `added_at`. It is
     computed on read against the database clock; nothing flips it in the background.
     `WHITELIST_COOLDOWN` overrides it for e2e tests only (startup logs a warning).
+  - `GET /v1/whitelist?user_id=` → `[{id, address, status, added_at}]`, the caller's own entries, newest
+    first (`[]` when none). Lets a user spot a `pending` entry they did not add while the cooldown still
+    protects them (approved by the Tech Lead; `withdrawal-flow.md` Open Questions #6).
   - `DELETE /v1/whitelist/{id}?user_id=` → `204`, immediate. Idempotent, and an unknown id or another
     user's entry is the same `204` no-op, so ids can't be probed.
   - `store.WhitelistStatus` is what validation (3.2) will use: only `active` lets a withdrawal through.
@@ -56,8 +59,6 @@ make test               # store tests on a real Postgres (testcontainers or TEST
 ## Not built / to know
 
 - Not in `e2e/` yet, and api-gateway does not route to it yet (task 3.7).
-- No endpoint lists a user's whitelist entries: none is designed. Without one a user cannot see a
-  `pending` entry an attacker added (`withdrawal-flow.md` Open Questions #6).
 - No `pkg/events` dependency yet: the withdrawal events come with task 3.3, keyed on `withdrawal_id`
   (task 3.11).
 - `internal/authz` is a copy of wallet-service's, as in ledger-service (a shared package needs a
