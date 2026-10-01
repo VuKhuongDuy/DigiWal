@@ -70,6 +70,29 @@ func TestUnderpricedBroadcastIsFeeBumped(t *testing.T) {
 	}
 }
 
+// Each node words "your max fee is too low" differently; all of them are a Fee Bump's cue.
+func TestEveryUnderpricedWordingTriggersAFeeBump(t *testing.T) {
+	for _, msg := range []string{
+		"replacement transaction underpriced", "transaction underpriced", "fee too low",
+		"server returned an error response: error code -32003: max fee per gas less than block base fee",
+	} {
+		r := newRig(t)
+		r.reserved("k")
+		r.chain.broadcastErr = errors.New(msg)
+		_ = r.step()
+		if got := r.get("k"); got.Status != store.StatusSigned || len(r.txs(got)) != 1 {
+			t.Errorf("%q: status %s, %d Fee Bumps stored, want signed and 1", msg, got.Status, len(r.txs(got)))
+		}
+	}
+	r := newRig(t)
+	r.reserved("k")
+	r.chain.broadcastErr = errors.New("connection refused")
+	_ = r.step()
+	if len(r.signer.replaceCalls) != 0 {
+		t.Fatalf("a connection error triggered a Fee Bump: %v", r.signer.replaceCalls)
+	}
+}
+
 // Not mined 20 blocks after it was sent AND underpriced → bump; at most 5; then an ALERT.
 func TestStuckUnderpricedTxIsBumpedAfter20BlocksUpToFiveTimes(t *testing.T) {
 	r := newRig(t)

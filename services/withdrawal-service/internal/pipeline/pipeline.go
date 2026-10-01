@@ -272,10 +272,13 @@ func (p *Pipeline) mined(ctx context.Context, vs []version) (*version, *chain.Re
 	return nil, nil, nil
 }
 
-// underpriced: the node's refusal that a Fee Bump fixes.
+// underpriced: the node's refusal that a Fee Bump fixes. Geth says "transaction underpriced" (or
+// "replacement transaction underpriced" when a dearer version is already pooled); Anvil, and geth's
+// state transition, say "max fee per gas less than block base fee" when the base fee rose past the
+// tx's cap between signing and broadcasting (found by the e2e test).
 func underpriced(err error) bool {
 	m := strings.ToLower(err.Error())
-	return strings.Contains(m, "underpriced") || strings.Contains(m, "fee too low")
+	return strings.Contains(m, "underpriced") || strings.Contains(m, "fee too low") || strings.Contains(m, "less than block base fee")
 }
 
 // broadcast: signed → broadcast. Sends the latest stored version (never a newly built one). A node

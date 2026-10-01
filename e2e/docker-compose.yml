@@ -148,6 +148,10 @@ services:
       KAFKA_BROKERS: kafka:9092
       WITHDRAWAL_CONFIRMATION_DEPTH: "2"   # 64 on Sepolia (decided)
       POLL_INTERVAL: 1s
+      # The Reaper's decided timeouts are 5 minutes; the nonce-gap test cannot wait that long.
+      STUCK_REQUEST_TIMEOUT: 20s
+      STUCK_RESERVATION_TIMEOUT: 20s
+      REAPER_INTERVAL: 2s
       # 24h is the decided Whitelist Cooldown; the tests cannot wait that long.
       WHITELIST_COOLDOWN: ${WHITELIST_COOLDOWN:-2s}
       TLS_CERT_FILE: /certs/cert.pem
