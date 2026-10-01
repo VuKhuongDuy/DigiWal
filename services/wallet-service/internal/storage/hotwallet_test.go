@@ -43,7 +43,7 @@ func TestSignHotWallet_ConcurrentDistinctKeysGetDenseUniqueNonces(t *testing.T) 
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			sig, err := s.SignHotWallet(ctx, chain, fmt.Sprintf("k%d", i), "h", seedFn, raw)
+			sig, err := s.SignHotWallet(ctx, chain, "sweeper", fmt.Sprintf("k%d", i), "h", seedFn, raw)
 			if err != nil {
 				t.Error(err)
 				return
@@ -80,7 +80,7 @@ func TestSignHotWallet_SameKeyConcurrentlyClaimsOneNonce(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			sig, err := s.SignHotWallet(ctx, chain, "same", "h", seed(0), raw)
+			sig, err := s.SignHotWallet(ctx, chain, "sweeper", "same", "h", seed(0), raw)
 			if err != nil {
 				t.Error(err)
 				return
@@ -95,7 +95,7 @@ func TestSignHotWallet_SameKeyConcurrentlyClaimsOneNonce(t *testing.T) {
 		}
 	}
 	// and the next key gets nonce 1, i.e. exactly one nonce was consumed
-	next, err := s.SignHotWallet(ctx, chain, "other", "h", seed(0), raw)
+	next, err := s.SignHotWallet(ctx, chain, "sweeper", "other", "h", seed(0), raw)
 	if err != nil || next.Nonce != 1 {
 		t.Fatalf("next nonce = %d (err %v), want 1", next.Nonce, err)
 	}
@@ -104,16 +104,16 @@ func TestSignHotWallet_SameKeyConcurrentlyClaimsOneNonce(t *testing.T) {
 func TestSignHotWallet_KeyReuseWithDifferentRequestIsRejected(t *testing.T) {
 	s := newStore(t)
 	ctx := context.Background()
-	if _, err := s.SignHotWallet(ctx, chain, "k", "hash-A", seed(0), raw); err != nil {
+	if _, err := s.SignHotWallet(ctx, chain, "sweeper", "k", "hash-A", seed(0), raw); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.SignHotWallet(ctx, chain, "k", "hash-B", seed(0), raw); !errors.Is(err, ErrIdempotencyKeyReused) {
+	if _, err := s.SignHotWallet(ctx, chain, "sweeper", "k", "hash-B", seed(0), raw); !errors.Is(err, ErrIdempotencyKeyReused) {
 		t.Fatalf("want ErrIdempotencyKeyReused, got %v", err)
 	}
-	if _, err := s.LookupHotSignature(ctx, "k", "hash-B"); !errors.Is(err, ErrIdempotencyKeyReused) {
+	if _, err := s.LookupHotSignature(ctx, "sweeper", "k", "hash-B"); !errors.Is(err, ErrIdempotencyKeyReused) {
 		t.Fatalf("lookup: want ErrIdempotencyKeyReused, got %v", err)
 	}
-	if _, err := s.LookupHotSignature(ctx, "missing", "x"); !errors.Is(err, ErrNotFound) {
+	if _, err := s.LookupHotSignature(ctx, "sweeper", "missing", "x"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("lookup missing: want ErrNotFound, got %v", err)
 	}
 }
@@ -122,10 +122,10 @@ func TestSignHotWallet_FailedSigningConsumesNoNonce(t *testing.T) {
 	s := newStore(t)
 	ctx := context.Background()
 	boom := errors.New("boom")
-	if _, err := s.SignHotWallet(ctx, chain, "k1", "h", seed(7), func(uint64) ([]byte, error) { return nil, boom }); !errors.Is(err, boom) {
+	if _, err := s.SignHotWallet(ctx, chain, "sweeper", "k1", "h", seed(7), func(uint64) ([]byte, error) { return nil, boom }); !errors.Is(err, boom) {
 		t.Fatalf("want boom, got %v", err)
 	}
-	sig, err := s.SignHotWallet(ctx, chain, "k2", "h", seed(7), raw)
+	sig, err := s.SignHotWallet(ctx, chain, "sweeper", "k2", "h", seed(7), raw)
 	if err != nil || sig.Nonce != 7 {
 		t.Fatalf("nonce = %d (err %v), want 7: a failed signature must not burn a nonce", sig.Nonce, err)
 	}
@@ -138,7 +138,7 @@ func TestNonceGapFreeze_RefusesNewAllocationButAllowsReplay(t *testing.T) {
 		t.Fatalf("freeze before first use: want ErrNotFound, got %v", err)
 	}
 	for i := 0; i < 3; i++ {
-		if _, err := s.SignHotWallet(ctx, chain, fmt.Sprintf("k%d", i), "h", seed(0), raw); err != nil {
+		if _, err := s.SignHotWallet(ctx, chain, "sweeper", fmt.Sprintf("k%d", i), "h", seed(0), raw); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -164,18 +164,18 @@ func TestNonceGapFreeze_RefusesNewAllocationButAllowsReplay(t *testing.T) {
 	}
 
 	// new key: refused, whoever asks (invariant #7)
-	if _, err := s.SignHotWallet(ctx, chain, "new", "h", seed(0), raw); !errors.Is(err, ErrNonceGapOpen) {
+	if _, err := s.SignHotWallet(ctx, chain, "sweeper", "new", "h", seed(0), raw); !errors.Is(err, ErrNonceGapOpen) {
 		t.Fatalf("want ErrNonceGapOpen, got %v", err)
 	}
 	// already-stored key: replay is fine, it allocates nothing
-	if sig, err := s.SignHotWallet(ctx, chain, "k1", "h", seed(0), raw); err != nil || sig.Nonce != 1 {
+	if sig, err := s.SignHotWallet(ctx, chain, "sweeper", "k1", "h", seed(0), raw); err != nil || sig.Nonce != 1 {
 		t.Fatalf("replay during freeze: %+v %v", sig, err)
 	}
 
 	if err := s.ResolveNonceGap(ctx, chain); err != nil {
 		t.Fatal(err)
 	}
-	if sig, err := s.SignHotWallet(ctx, chain, "new", "h", seed(0), raw); err != nil || sig.Nonce != 3 {
+	if sig, err := s.SignHotWallet(ctx, chain, "sweeper", "new", "h", seed(0), raw); err != nil || sig.Nonce != 3 {
 		t.Fatalf("after resolve: %+v %v (want nonce 3)", sig, err)
 	}
 }

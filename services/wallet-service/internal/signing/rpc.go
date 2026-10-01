@@ -4,9 +4,11 @@ import (
 	"context"
 	"fmt"
 	"math/big"
+	"strings"
 
 	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/ethclient"
 )
 
@@ -48,4 +50,21 @@ func (r *RPCChain) FeeQuote(ctx context.Context) (*big.Int, *big.Int, error) {
 
 func (r *RPCChain) EstimateGas(ctx context.Context, from, to common.Address, value *big.Int, data []byte) (uint64, error) {
 	return r.c.EstimateGas(ctx, ethereum.CallMsg{From: from, To: &to, Value: value, Data: data})
+}
+
+// Broadcast sends a signed raw tx (the operator CLI's Nonce Filler). A node that already has it is
+// not an error, so re-running the command just re-sends.
+func (r *RPCChain) Broadcast(ctx context.Context, raw []byte) error {
+	var tx types.Transaction
+	if err := tx.UnmarshalBinary(raw); err != nil {
+		return err
+	}
+	err := r.c.SendTransaction(ctx, &tx)
+	if err != nil {
+		m := strings.ToLower(err.Error())
+		if strings.Contains(m, "already known") || strings.Contains(m, "already imported") || strings.Contains(m, "known transaction") {
+			return nil
+		}
+	}
+	return err
 }

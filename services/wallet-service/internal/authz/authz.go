@@ -7,6 +7,7 @@
 package authz
 
 import (
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
@@ -28,6 +29,15 @@ const (
 var (
 	// HotWalletSigners may call POST /v1/sign/hot-wallet.
 	HotWalletSigners = []string{CNWithdrawalService, CNSweeper}
+	// HotWalletKeyReaders may call GET /v1/sign/hot-wallet/{key} and POST .../replace
+	// (withdrawal-flow.md invariants #21, #22): each caller only ever reaches its own keys
+	// (wallet-service scopes them by the verified CN). sweeper has no database, so it reads its
+	// Gas Top-Up keys' replacements from here.
+	HotWalletKeyReaders = []string{CNWithdrawalService, CNSweeper}
+	// HotWalletVoiders may call POST /v1/sign/hot-wallet/{key}/void: withdrawal-service only —
+	// sweeper never releases anything (invariant #22). There is no endpoint that cancels a signed
+	// tx (the Nonce Filler is an operator CLI), so no service certificate can cancel a payout.
+	HotWalletVoiders = []string{CNWithdrawalService}
 	// UserAddressSigners may call POST /v1/sign/user-address — sweeper only
 	// (invariant #4): withdrawal-service's cert can never pick a user key.
 	UserAddressSigners = []string{CNSweeper}
@@ -66,8 +76,17 @@ func Require(allowed []string, next http.Handler) http.Handler {
 			_ = json.NewEncoder(w).Encode(map[string]string{"error": "forbidden"})
 			return
 		}
-		next.ServeHTTP(w, r)
+		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), cnKey{}, cn)))
 	})
+}
+
+type cnKey struct{}
+
+// CallerCN is the verified certificate CN Require stored on the request: the identity wallet-service
+// scopes Hot Wallet keys by. "" outside a request that passed Require.
+func CallerCN(ctx context.Context) string {
+	cn, _ := ctx.Value(cnKey{}).(string)
+	return cn
 }
 
 // peerCN returns the CN of the verified client certificate. It reads

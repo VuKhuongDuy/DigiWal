@@ -13,42 +13,45 @@ var (
 	// ErrNonceGapOpen: a Nonce Gap is open, so no new Hot Wallet nonce may be
 	// allocated, regardless of caller (withdrawal-flow.md invariant #7).
 	ErrNonceGapOpen = errors.New("nonce gap open")
-	// ErrIdempotencyKeyReused: the key was already used for a different request.
+	// ErrIdempotencyKeyReused: the key was already used for a different request (or by another caller).
 	ErrIdempotencyKeyReused = errors.New("idempotency key already used for a different request")
+	// ErrKeyVoided: the key was voided (invariant #22): it is never signed, and allocates no nonce.
+	ErrKeyVoided = errors.New("idempotency key was voided")
 )
 
 // HotSignature is a stored Hot Wallet signature: what a replay returns.
 type HotSignature struct {
 	Nonce       uint64
 	SignedRawTx []byte
+	CallerCN    *string // nil for a row signed before caller scoping existed
 }
 
-// LookupHotSignature returns the stored signature for an idempotency key,
-// ErrNotFound if none, or ErrIdempotencyKeyReused if requestHash differs.
-func (s *Store) LookupHotSignature(ctx context.Context, key, requestHash string) (HotSignature, error) {
-	return lookupHotSignature(ctx, s.pool, key, requestHash)
+// LookupHotSignature returns the stored signature for an idempotency key, ErrNotFound if none, or
+// ErrIdempotencyKeyReused if requestHash differs or the key was signed for a different caller.
+func (s *Store) LookupHotSignature(ctx context.Context, caller, key, requestHash string) (HotSignature, error) {
+	return lookupHotSignature(ctx, s.pool, caller, key, requestHash)
 }
 
 type queryRower interface {
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 }
 
-func lookupHotSignature(ctx context.Context, q queryRower, key, requestHash string) (HotSignature, error) {
+func lookupHotSignature(ctx context.Context, q queryRower, caller, key, requestHash string) (HotSignature, error) {
 	var (
 		sig  HotSignature
 		hash string
 		n    int64
 	)
 	err := q.QueryRow(ctx,
-		`SELECT nonce, signed_raw_tx, request_hash FROM hot_wallet_signatures WHERE idempotency_key = $1`, key).
-		Scan(&n, &sig.SignedRawTx, &hash)
+		`SELECT nonce, signed_raw_tx, request_hash, caller_cn FROM hot_wallet_signatures WHERE idempotency_key = $1`, key).
+		Scan(&n, &sig.SignedRawTx, &hash, &sig.CallerCN)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return HotSignature{}, ErrNotFound
 	}
 	if err != nil {
 		return HotSignature{}, fmt.Errorf("reading hot wallet signature: %w", err)
 	}
-	if hash != requestHash {
+	if hash != requestHash || (sig.CallerCN != nil && *sig.CallerCN != caller) {
 		return HotSignature{}, ErrIdempotencyKeyReused
 	}
 	sig.Nonce = uint64(n)
@@ -68,7 +71,7 @@ func lookupHotSignature(ctx context.Context, q queryRower, key, requestHash stri
 //   - An open Nonce Gap refuses new allocation (ErrNonceGapOpen) but still lets
 //     an already-stored key replay.
 func (s *Store) SignHotWallet(
-	ctx context.Context, chainID int64, key, requestHash string,
+	ctx context.Context, chainID int64, caller, key, requestHash string,
 	seedNonce func(context.Context) (uint64, error),
 	sign func(nonce uint64) ([]byte, error),
 ) (HotSignature, error) {
@@ -78,34 +81,25 @@ func (s *Store) SignHotWallet(
 	}
 	defer tx.Rollback(ctx)
 
-	var next int64
-	var frozen *int64
-	lock := func() error {
-		return tx.QueryRow(ctx,
-			`SELECT next_nonce, frozen_from_nonce FROM hot_wallet_nonces WHERE chain_id = $1 FOR UPDATE`, chainID).
-			Scan(&next, &frozen)
-	}
-	err = lock()
-	if errors.Is(err, pgx.ErrNoRows) {
-		seed, serr := seedNonce(ctx)
-		if serr != nil {
-			return HotSignature{}, fmt.Errorf("seeding hot wallet nonce: %w", serr)
-		}
-		if _, err := tx.Exec(ctx,
-			`INSERT INTO hot_wallet_nonces (chain_id, next_nonce) VALUES ($1, $2) ON CONFLICT (chain_id) DO NOTHING`,
-			chainID, int64(seed)); err != nil {
-			return HotSignature{}, fmt.Errorf("creating nonce row: %w", err)
-		}
-		err = lock()
-	}
+	next, frozen, err := lockNonceRow(ctx, tx, chainID, seedNonce)
 	if err != nil {
-		return HotSignature{}, fmt.Errorf("locking nonce row: %w", err)
+		return HotSignature{}, err
 	}
 
-	if existing, err := lookupHotSignature(ctx, tx, key, requestHash); err == nil {
+	if existing, err := lookupHotSignature(ctx, tx, caller, key, requestHash); err == nil {
 		return existing, nil
 	} else if !errors.Is(err, ErrNotFound) {
 		return HotSignature{}, err
+	}
+
+	// Under the nonce-row lock a void cannot race this: either it committed first (refused here,
+	// allocating nothing) or it will find the signature this call commits (invariant #22).
+	var voided bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM hot_wallet_voids WHERE idempotency_key = $1)`, key).Scan(&voided); err != nil {
+		return HotSignature{}, fmt.Errorf("reading void tombstone: %w", err)
+	}
+	if voided {
+		return HotSignature{}, ErrKeyVoided
 	}
 
 	if frozen != nil {
@@ -117,8 +111,8 @@ func (s *Store) SignHotWallet(
 		return HotSignature{}, err
 	}
 	if _, err := tx.Exec(ctx,
-		`INSERT INTO hot_wallet_signatures (idempotency_key, chain_id, nonce, request_hash, signed_raw_tx)
-		 VALUES ($1, $2, $3, $4, $5)`, key, chainID, next, requestHash, raw); err != nil {
+		`INSERT INTO hot_wallet_signatures (idempotency_key, chain_id, nonce, request_hash, signed_raw_tx, caller_cn)
+		 VALUES ($1, $2, $3, $4, $5, $6)`, key, chainID, next, requestHash, raw, caller); err != nil {
 		return HotSignature{}, fmt.Errorf("storing signature: %w", err)
 	}
 	if _, err := tx.Exec(ctx,
@@ -128,7 +122,7 @@ func (s *Store) SignHotWallet(
 	if err := tx.Commit(ctx); err != nil {
 		return HotSignature{}, fmt.Errorf("committing tx: %w", err)
 	}
-	return HotSignature{Nonce: uint64(next), SignedRawTx: raw}, nil
+	return HotSignature{Nonce: uint64(next), SignedRawTx: raw, CallerCN: &caller}, nil
 }
 
 // ErrNonceNotAllocated: a Nonce Gap was reported at a nonce this chain never allocated — a
@@ -185,4 +179,34 @@ func (s *Store) ResolveNonceGap(ctx context.Context, chainID int64) error {
 		return ErrNotFound
 	}
 	return nil
+}
+
+// lockNonceRow locks the chain's nonce row FOR UPDATE — the one lock every signer, voider and
+// replacer of that chain serialises on — creating it from seedNonce the first time the chain is used.
+func lockNonceRow(ctx context.Context, tx pgx.Tx, chainID int64, seedNonce func(context.Context) (uint64, error)) (next int64, frozen *int64, err error) {
+	lock := func() error {
+		return tx.QueryRow(ctx,
+			`SELECT next_nonce, frozen_from_nonce FROM hot_wallet_nonces WHERE chain_id = $1 FOR UPDATE`, chainID).
+			Scan(&next, &frozen)
+	}
+	err = lock()
+	if errors.Is(err, pgx.ErrNoRows) {
+		if seedNonce == nil {
+			return 0, nil, ErrNotFound
+		}
+		seed, serr := seedNonce(ctx)
+		if serr != nil {
+			return 0, nil, fmt.Errorf("seeding hot wallet nonce: %w", serr)
+		}
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO hot_wallet_nonces (chain_id, next_nonce) VALUES ($1, $2) ON CONFLICT (chain_id) DO NOTHING`,
+			chainID, int64(seed)); err != nil {
+			return 0, nil, fmt.Errorf("creating nonce row: %w", err)
+		}
+		err = lock()
+	}
+	if err != nil {
+		return 0, nil, fmt.Errorf("locking nonce row: %w", err)
+	}
+	return next, frozen, nil
 }
