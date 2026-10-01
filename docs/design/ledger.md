@@ -139,7 +139,7 @@ implementing `wallet-service`'s side of this.
 - **Lock** — a hold placed against an Account's Available Balance,
   created idempotently keyed on the same `idempotency_key` the
   Withdrawal Request already carries (`withdrawal-flow.md`'s
-  Reservation is exactly this). (**PROPOSED, `withdrawal-flow.md`
+  Reservation is exactly this). (**Decided (Tech Lead), `withdrawal-flow.md`
   invariant #20:** that key becomes the server-minted Withdrawal Key
   `withdrawal:{withdrawal_id}`, never the client's string, which is only
   unique per user. No `ledger-service` change: it accepts any key up to

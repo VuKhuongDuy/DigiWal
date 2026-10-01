@@ -42,15 +42,14 @@ Question #7).
   invariant #11). **This same `idempotency_key` is also reused, unchanged,
   as the idempotency key on the `POST /v1/sign/hot-wallet` call this
   request eventually makes** — see invariant #16.
-  **PROPOSED revision (invariant #20, Open Questions #11) — pending Tech
-  Lead approval:** the key is client-supplied (the client sends it in the
+  **Revised — Decided (Tech Lead), invariant #20, Open Questions #11:** the key is client-supplied (the client sends it in the
   `POST /v1/withdrawals` body; `api-gateway` forwards it, it does not mint
   it — the "minted by `api-gateway`" wording above contradicts
   `integration-contracts.md` §2/§4 and is superseded). It is unique **per
   user**, `UNIQUE(user_id, idempotency_key)`, and it is **never** used
   outside `withdrawal-service`: every downstream key is the Withdrawal
   Key below.
-- **Withdrawal Key** — **PROPOSED, new (invariant #20).**
+- **Withdrawal Key** — **Decided (Tech Lead), new (invariant #20).**
   `withdrawal:{withdrawal_id}`, where `withdrawal_id` is a UUID
   `withdrawal-service` mints when it inserts the Withdrawal Request row.
   Globally unique by construction, never chosen by a client. It is the
@@ -108,7 +107,7 @@ Question #7).
   (that's already taken by the Settle-time debit, and
   `ledger_transactions.idempotency_key` is unique). A retried
   compensation attempt hits the same `{idempotency_key}:refund` key
-  (**PROPOSED, invariant #20: `{Withdrawal Key}:refund`, i.e.
+  (**Decided, invariant #20: `{Withdrawal Key}:refund`, i.e.
   `withdrawal:{withdrawal_id}:refund`**) and
   no-ops via `ledger.md`'s own idempotent-apply mechanism, so a crash
   between posting the refund and marking the Withdrawal Request
@@ -351,7 +350,7 @@ Questions #3 for the one remaining unresolved failure mode.
     `{nonce, signed_raw_tx}` instead of allocating anything new or
     signing again. The `idempotency_key` used here is the *same* key the
     Withdrawal Request already carries throughout its lifecycle
-    (**PROPOSED, invariant #20: the Withdrawal Key
+    (**Decided, invariant #20: the Withdrawal Key
     `withdrawal:{withdrawal_id}`, not the client's key**)
     (Ubiquitous language > *Withdrawal Request*) — reused as-is on this
     call, never minted fresh per signing attempt. The identical
@@ -370,13 +369,13 @@ Questions #3 for the one remaining unresolved failure mode.
     in `withdrawal-service` reclaims stuck requests, but only ones it can
     *prove* are safe to reclaim — resolves Open Questions #3:
     - `requested` for longer than the **Stuck Request Timeout**
-      (**Decided (Tech Lead, Open Questions #9b) as to the rule; value
-      PROPOSED: 5 minutes**, reusing the Stuck Reservation Timeout): no
+      (**Decided (Tech Lead, Open Questions #9b): 5 minutes**, the same
+      value as the Stuck Reservation Timeout): no
       Lock was ever created, so the Reaper only marks the row `failed`
       (terminal, guarded `WHERE status='requested'`), no ledger call. The
       client must use a new `idempotency_key` (invariant #11).
     - `validated` for longer than the Stuck Reservation Timeout
-      (**PROPOSED addition, Open Questions #14**): a crash between
+      (**Decided (Tech Lead), Open Questions #14**): a crash between
       `lock()` succeeding and the `validated -> reserved` transition
       leaves an active Lock behind a `validated` row that no rule above
       covered. Treated like `reserved`: Release (idempotent; a `404`
@@ -413,8 +412,10 @@ Questions #3 for the one remaining unresolved failure mode.
     (b), `deposit-flow.md` Open Questions #13), the `CN=withdrawal-service`
     grant on the existing `GET /v1/addresses/{address}` (Open Questions
     #9a), the `422 destination_is_deposit_address` code (#9c), and the
-    Hot/Warm rule (#9d). The Hot/Warm error code and the Warm address
-    source are **PROPOSED** / open (below, Open Questions #10). Why: a
+    Hot/Warm rule (#9d) with its `422 destination_is_system_wallet` code.
+    **Cold Wallet addresses are deliberately not rejected** (Decided,
+    Tech Lead). Still open: the Warm address source (Open Questions
+    #10). Why: a
     Hot Wallet Outflow is never a deposit (`deposit-flow.md` invariant
     #17), so a withdrawal into a deposit address would debit the
     requester, credit nobody and strand the funds; a withdrawal to the
@@ -457,8 +458,9 @@ Questions #3 for the one remaining unresolved failure mode.
     - **What the client sees:** the request goes to `rejected` (terminal,
       no Lock) and `POST /v1/withdrawals` returns `422` with reason
       `destination_is_deposit_address` (Decided) or, for Hot/Warm,
-      **`destination_is_system_wallet`** (**PROPOSED** — one code for both
-      tiers, so it does not reveal which treasury address was hit).
+      **`destination_is_system_wallet`** (**Decided** — one code for both
+      tiers, so it does not reveal which treasury address was hit). A
+      Cold Wallet address is not rejected (Decided).
       While the lookup dependency is unavailable the response is `503`
       and the row stays `requested`; per invariant #11 (Decided, option B)
       that `idempotency_key` is spent — a retry with it only reads back
@@ -521,8 +523,8 @@ Questions #3 for the one remaining unresolved failure mode.
       compromised `withdrawal-service`, can ever lift a freeze.
 20. **A client's `idempotency_key` is scoped to that user and never
     leaves `withdrawal-service`; every downstream key is the
-    server-minted Withdrawal Key.** **PROPOSED (Solution Architect) —
-    pending Tech Lead approval, Open Questions #11.** Fixes a design bug:
+    server-minted Withdrawal Key.** **Decided (Tech Lead), Open
+    Questions #11.** Fixes a design bug:
     `UNIQUE(idempotency_key)` was global over a client-supplied value, so
     (a) user B posting a key user A already used read back A's row,
     status and `tx_hash`; (b) `GET /v1/withdrawals/{idempotency_key}`
@@ -857,10 +859,11 @@ sequenceDiagram
 9. **Resolved (Tech Lead) — all four sub-questions decided; invariant
    #18 updated.** (a) reuse `GET /v1/addresses/{address}` and grant
    `CN=withdrawal-service`; (b) option B: invariant #11 unchanged, the
-   Reaper fails stale `requested` rows (timeout value PROPOSED, 5 min),
+   Reaper fails stale `requested` rows (timeout 5 min, Decided),
    client uses a new key; (c) keep `422 destination_is_deposit_address`;
-   (d) also reject the Hot and Warm Wallet addresses (Warm source still
-   open, #10). Original text:
+   (d) also reject the Hot and Warm Wallet addresses with `422
+   destination_is_system_wallet` (Decided); Cold Wallet addresses are
+   not rejected (Decided); Warm source still open, #10. Original text:
    ~~**New (Tech Lead resolved `deposit-flow.md` Open Questions #13 as
    option (b); invariant #18 is the design).** The rule is decided; these
    details are **PROPOSED** for confirmation:
@@ -903,16 +906,18 @@ sequenceDiagram
     then also enforce server-side that a Treasury Sweep's destination is
     Warm. Alternatives: the same file mounted into `withdrawal-service`
     directly, or an env var (rejected by default — drift, per
-    `deposit-flow.md` invariant #15). Also: should Cold be rejected as a
-    withdrawal destination too? (Not asked; same answer would apply.)
-11. **PROPOSED: per-user idempotency keys and a server-minted Withdrawal
+    `deposit-flow.md` invariant #15). Cold: **Decided (Tech Lead) — Cold
+    Wallet addresses are not rejected as withdrawal destinations**, so
+    only the Warm address is needed from this source.
+11. ~~**PROPOSED: per-user idempotency keys and a server-minted Withdrawal
     Key (invariant #20).** Changes `withdrawal-flow.md`,
     `integration-contracts.md` §1/§2/§3/§4 and `ledger.md` (key source
     only — `ledger-service`'s code is unaffected, it takes any string
     up to 256 chars). Touches built code in two places: `pkg/events`
     (add `withdrawal_id` to both withdrawal events) and
     `history-service` (key on it). Needs approval before M3 starts,
-    since task 3.1's schema depends on it.
+    since task 3.1's schema depends on it.~~ **Decided (Tech Lead):
+    approved as proposed.**
 12. **PROPOSED: Nonce Gap freeze endpoint `POST /v1/wallet/nonce-gap`
     (invariant #19), `CN=withdrawal-service` only, no unfreeze
     endpoint.** Also open underneath it: after an operator resolves a
@@ -928,6 +933,7 @@ sequenceDiagram
     Reaper then Releases 5 minutes later (`failed`)? Safe either way;
     refusing up front (`503`) is kinder but needs `withdrawal-service`
     to track its own "frozen" flag. Not designed.
-14. **PROPOSED addition: the Reaper also covers `validated`** (invariant
+14. ~~**PROPOSED addition: the Reaper also covers `validated`** (invariant
     #17) — a crash after `lock()` succeeded but before `reserved` left
-    an active Lock no rule covered. Confirm.
+    an active Lock no rule covered. Confirm.~~ **Decided (Tech Lead):
+    yes.** Also Decided: Stuck Request Timeout = 5 minutes.
