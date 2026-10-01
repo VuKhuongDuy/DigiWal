@@ -302,6 +302,10 @@ Questions #3 for the one remaining unresolved failure mode.
     invariant #12) → Screening List (`destination_on_screening_list`,
     #14) → Hot/Warm (`destination_is_system_wallet`, local, #18) →
     deposit address (`destination_is_deposit_address`, remote, #18).
+    After validation, a ledger Reservation refused for lack of
+    Available Balance (task 3.3) returns the same shape with
+    `reject_reason` `insufficient_funds` (**Decided**, Tech Lead); the row
+    is `rejected` and no Lock exists.
 11. **A Withdrawal Request's own row is created idempotently, before
     anything else runs.** `INSERT INTO withdrawal_requests
     (idempotency_key, ...) ON CONFLICT (idempotency_key) DO NOTHING`,
@@ -600,7 +604,7 @@ sequenceDiagram
         alt insufficient available funds
             Ledger-->>WD: error
             WD->>WD: status = rejected
-            WD-->>Gateway: 422 insufficient funds
+            WD-->>Gateway: 422 {idempotency_key, status: rejected,<br/>reject_reason: insufficient_funds} — no Lock exists
         else locked
             Ledger-->>WD: ok
             WD->>WD: status = reserved
