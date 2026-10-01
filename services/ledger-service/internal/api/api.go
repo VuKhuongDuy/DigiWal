@@ -11,6 +11,7 @@ import (
 	"math/big"
 	"net/http"
 	"regexp"
+	"strings"
 
 	"digiwal/services/ledger-service/internal/authz"
 	"digiwal/services/ledger-service/internal/ledger"
@@ -23,6 +24,7 @@ type Ledger interface {
 	Settle(ctx context.Context, key string) (ledger.SettleResult, error)
 	Release(ctx context.Context, key string) error
 	BalanceSheet(ctx context.Context, userID, assetID string) ([]ledger.AssetBalance, error)
+	PostGasFee(ctx context.Context, g ledger.GasFee) (ledger.GasFeeResult, error)
 }
 
 type Server struct{ ledger Ledger }
@@ -48,6 +50,8 @@ func (s *Server) MTLSRoutes() http.Handler {
 	mux.Handle("POST /v1/ledger/locks", guard(s.handleLock))
 	mux.Handle("POST /v1/ledger/locks/{key}/settle", guard(s.handleSettle))
 	mux.Handle("POST /v1/ledger/locks/{key}/release", guard(s.handleRelease))
+	// Gas Fees (ledger.md invariant #12): its own allow-list, so sweeper can report gas and nothing else.
+	mux.Handle("POST /v1/ledger/gas-fees", authz.Require(authz.GasFeeReporters, http.HandlerFunc(s.handleGasFee)))
 	// Read-only, for api-gateway's GET /v1/balances.
 	mux.Handle("GET /v1/ledger/balances/{user_id}", authz.Require(authz.BalanceReaders, http.HandlerFunc(s.handleBalances)))
 	return mux
@@ -154,6 +158,39 @@ func decode(w http.ResponseWriter, r *http.Request, v any) bool {
 
 // writeLedgerErr maps a ledger error onto the wire contract. A lock that was resolved the
 // other way is a 409, never a 200: the caller must not believe money moved (or didn't).
+type gasFeeRequest struct {
+	ChainID           int64  `json:"chain_id"`
+	TxHash            string `json:"tx_hash"`
+	GasUsed           uint64 `json:"gas_used"`
+	EffectiveGasPrice string `json:"effective_gas_price"` // wei, a decimal string
+	Purpose           string `json:"purpose"`
+}
+
+// handleGasFee records the gas of one mined tx: the caller sends the receipt's two numbers, never a
+// total or an account (ledger.md invariant #12).
+func (s *Server) handleGasFee(w http.ResponseWriter, r *http.Request) {
+	var req gasFeeRequest
+	if !decode(w, r, &req) {
+		return
+	}
+	price, ok := new(big.Int).SetString(req.EffectiveGasPrice, 10)
+	if !ok || strings.HasPrefix(req.EffectiveGasPrice, "+") || strings.HasPrefix(req.EffectiveGasPrice, "-") {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "effective_gas_price must be a decimal string"})
+		return
+	}
+	res, err := s.ledger.PostGasFee(r.Context(), ledger.GasFee{
+		ChainID: req.ChainID, TxHash: req.TxHash, GasUsed: req.GasUsed, EffectiveGasPrice: price, Purpose: req.Purpose})
+	if err != nil {
+		writeLedgerErr(w, "gas-fee", ledger.GasFeeKey(req.ChainID, req.TxHash), err)
+		return
+	}
+	out := map[string]any{"ledger_transaction_id": nil, "amount": res.Amount.String()}
+	if res.TransactionID != "" {
+		out["ledger_transaction_id"] = res.TransactionID
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
 func writeLedgerErr(w http.ResponseWriter, op, key string, err error) {
 	switch {
 	case errors.Is(err, ledger.ErrInsufficientFunds):
