@@ -1,0 +1,20 @@
+# Pulls in ../../infra/docker-compose.yml via `include:` — don't also pass it with -f.
+include:
+  - path: ../../infra/docker-compose.yml
+
+services:
+  withdrawal-service:
+    build: .
+    environment:
+      PORT: "8080"
+      POSTGRES_DSN: postgres://custody:custody@postgres:5432/withdrawal?sslmode=disable
+      # mTLS listener for the client-facing endpoints, CN=api-gateway only (`make certs`).
+      TLS_CERT_FILE: /certs/cert.pem
+      TLS_KEY_FILE: /certs/key.pem
+      TLS_CA_FILE: /certs/ca-cert.pem
+    volumes:
+      - ../../infra/pki/out/withdrawal-service:/certs:ro
+    ports: ["8086:8080", "8446:8443"]
+    depends_on:
+      postgres:
+        condition: service_healthy
