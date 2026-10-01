@@ -162,7 +162,12 @@ Question #7).
 - **Whitelist Entry** — one `(user_id, address)` pair, state `pending`
   (just added) or `active` (usable for withdrawal). `(user_id, address)`
   is unique — see invariant #15. Removal is instant — an entry simply
-  stops existing, no state needed for that direction.
+  stops existing, no state needed for that direction. **Listing —
+  Decided (Tech Lead):** a user can list their own entries (`GET
+  /v1/whitelist` → `[{"id","address","status","added_at"}]`, own entries
+  only, `status` computed on read as for validation, newest `added_at`
+  first, no pagination yet), so a `pending` entry an attacker added is
+  visible during the cooldown and can be removed (Open Questions #6).
 - **Whitelist Cooldown** — **Decided: 24 hours.** The delay between a
   Whitelist Entry's `added_at` and the moment it becomes `active`. This
   is the actual security property, not the whitelist's existence: an
@@ -832,6 +837,11 @@ sequenceDiagram
    whitelist page. Do you want a minimal notification mechanism in
    scope now, or accept this as a known gap until `history-service`/
    notifications exist?
+   **Partly closed — Decided (Tech Lead):** there was not even a way to
+   *see* the whitelist; `GET /v1/whitelist` (Whitelist Entry term,
+   `integration-contracts.md` §2) now lists the caller's entries with
+   their computed `pending`/`active` status. Notifications remain a known
+   gap.
 7. ~~How is "add a Whitelist Entry" itself authenticated?~~ **Decided,
    resolved:** see `identity-auth.md` — every `api-gateway` request
    (whitelist management included) now requires a valid API Key, and
