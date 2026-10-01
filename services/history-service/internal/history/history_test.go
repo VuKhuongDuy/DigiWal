@@ -95,9 +95,9 @@ func TestWithdrawalBroadcastThenConfirmed(t *testing.T) {
 	st := &fakeStore{}
 	p := &Processor{Store: st}
 	at := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
-	b := events.WithdrawalBroadcast{Version: 1, IdempotencyKey: wdKey, UserID: "alice", AssetID: asset, Amount: "5", ToAddress: addrB,
+	b := events.WithdrawalBroadcast{Version: 1, WithdrawalID: wdKey, IdempotencyKey: "client-key", UserID: "alice", AssetID: asset, Amount: "5", ToAddress: addrB,
 		ChainID: 11155111, TxHash: hash1, Nonce: 3, BroadcastAt: at}
-	c := events.WithdrawalConfirmed{Version: 1, IdempotencyKey: wdKey, UserID: "alice", AssetID: asset, Amount: "5", ToAddress: addrB,
+	c := events.WithdrawalConfirmed{Version: 1, WithdrawalID: wdKey, IdempotencyKey: "client-key", UserID: "alice", AssetID: asset, Amount: "5", ToAddress: addrB,
 		ChainID: 11155111, TxHash: hash1, Nonce: 3, BlockNumber: 99, ConfirmedAt: at.Add(time.Hour)}
 	for _, m := range []Message{encode(t, b), encode(t, c)} {
 		if err := p.Handle(context.Background(), m); err != nil {

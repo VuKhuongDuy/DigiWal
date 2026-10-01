@@ -17,7 +17,7 @@ e, err := events.Decode[events.DepositConfirmed](msg.Value) // validates; unknow
 - Every event has `version` (currently 1). Adding an optional field keeps 1; renaming,
   removing or retyping a field bumps it. Decode ignores unknown fields.
 - `Key()` is both the Kafka message key and the idempotency key to dedup on
-  (deposits: `chain_id:tx_hash:log_index`, withdrawals: `idempotency_key`).
+  (deposits: `chain_id:tx_hash:log_index`, withdrawals: `withdrawal_id`, the server-minted id — the client's `idempotency_key` is unique only per user, withdrawal-flow.md invariant #20).
 - `testdata/*.json` pin the exact wire shape. If a golden test fails you changed the contract.
 
 ## Using it from a service
