@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 
@@ -117,6 +118,10 @@ var ErrSignRefused = errors.New("wallet-service refused to sign")
 // different request. Should be impossible (the key is unique and the request deterministic).
 var ErrKeyConflict = errors.New("wallet-service already signed this key for a different request")
 
+// ErrKeyVoided: wallet-service answered 410 — this key was voided (the Reaper's doing), so it is
+// never signed and no nonce was allocated. The request is being (or has been) reaped.
+var ErrKeyVoided = errors.New("wallet-service voided this key")
+
 // SignHotWallet is POST /v1/sign/hot-wallet → the signed raw tx and the Hot Wallet nonce it claims.
 func (c *Client) SignHotWallet(ctx context.Context, r SignRequest) (rawTx string, nonce uint64, err error) {
 	b, _ := json.Marshal(r)
@@ -136,6 +141,8 @@ func (c *Client) SignHotWallet(ctx context.Context, r SignRequest) (rawTx string
 		return out.SignedRawTx, out.Nonce, nil
 	case http.StatusBadRequest, http.StatusUnprocessableEntity:
 		return "", 0, fmt.Errorf("%w (%d): %s", ErrSignRefused, code, strings.TrimSpace(string(body)))
+	case http.StatusGone:
+		return "", 0, fmt.Errorf("%w: %s", ErrKeyVoided, strings.TrimSpace(string(body)))
 	case http.StatusConflict:
 		// The key was already signed for a DIFFERENT request: a nonce IS allocated under it, so
 		// releasing would strand it. Never a refusal; an operator must look.
@@ -204,4 +211,90 @@ func (d *Destinations) Refuse(ctx context.Context, addr common.Address) (string,
 		return validate.DestinationIsDeposit, nil
 	}
 	return "", nil
+}
+
+// VoidResult is wallet-service's answer to a void (invariant #22): the key is now never signed
+// (Voided), or it had already been signed, and this is that signature.
+type VoidResult struct {
+	Voided bool
+	RawTx  string
+	Nonce  uint64
+}
+
+// VoidHotWallet is POST /v1/sign/hot-wallet/{key}/void. Done under the lock signing takes, so either
+// a sign landed first (already_signed) or any later sign of the key is refused and allocates nothing:
+// the only safe basis for Releasing a `reserved` request. Idempotent.
+func (c *Client) VoidHotWallet(ctx context.Context, key string) (VoidResult, error) {
+	code, body, err := c.do(ctx, http.MethodPost, "/v1/sign/hot-wallet/"+url.PathEscape(key)+"/void", []byte("{}"))
+	if err != nil {
+		return VoidResult{}, err
+	}
+	if code != http.StatusOK {
+		return VoidResult{}, fmt.Errorf("wallet-service void answered %d: %s", code, strings.TrimSpace(string(body)))
+	}
+	var out struct {
+		Status      string `json:"status"`
+		Nonce       uint64 `json:"nonce"`
+		SignedRawTx string `json:"signed_raw_tx"`
+	}
+	if err := json.Unmarshal(body, &out); err != nil {
+		return VoidResult{}, fmt.Errorf("wallet-service returned an unusable void answer: %q", body)
+	}
+	switch out.Status {
+	case "voided":
+		return VoidResult{Voided: true}, nil
+	case "already_signed":
+		if !strings.HasPrefix(out.SignedRawTx, "0x") {
+			return VoidResult{}, fmt.Errorf("wallet-service returned an unusable void answer: %q", body)
+		}
+		return VoidResult{RawTx: out.SignedRawTx, Nonce: out.Nonce}, nil
+	}
+	return VoidResult{}, fmt.Errorf("wallet-service returned an unknown void status %q", out.Status)
+}
+
+// Replacement is a Fee Bump version wallet-service signed: the same tx at the same nonce.
+type Replacement struct {
+	RawTx string
+	Hash  string
+	Nonce uint64
+	Seq   int
+}
+
+// Why a replace was refused. Both mean: alert an operator; neither may be retried blindly.
+var (
+	// ErrReplaceCeiling: the bump would need a fee above wallet-service's ceiling (422).
+	ErrReplaceCeiling = errors.New("wallet-service refused the Fee Bump: fee ceiling")
+	// ErrReplaceRefused: 404 (never signed) or 409 (a Nonce Filler is the latest version, a
+	// replacement_seq gap, or not our key).
+	ErrReplaceRefused = errors.New("wallet-service refused the Fee Bump")
+)
+
+// ReplaceHotWallet is POST /v1/sign/hot-wallet/{key}/replace {replacement_seq}: the same tx re-signed
+// at the same nonce with higher fees (invariant #21). The same seq replays the stored replacement, so
+// a retry after a lost answer is safe. 503 (a Nonce Gap freeze) and anything else is transient.
+func (c *Client) ReplaceHotWallet(ctx context.Context, key string, seq int) (Replacement, error) {
+	b, _ := json.Marshal(map[string]any{"replacement_seq": seq})
+	code, body, err := c.do(ctx, http.MethodPost, "/v1/sign/hot-wallet/"+url.PathEscape(key)+"/replace", b)
+	if err != nil {
+		return Replacement{}, err
+	}
+	switch code {
+	case http.StatusOK:
+		var out struct {
+			SignedRawTx    string `json:"signed_raw_tx"`
+			TxHash         string `json:"tx_hash"`
+			Nonce          uint64 `json:"nonce"`
+			ReplacementSeq int    `json:"replacement_seq"`
+		}
+		if err := json.Unmarshal(body, &out); err != nil || !strings.HasPrefix(out.SignedRawTx, "0x") || out.ReplacementSeq != seq {
+			return Replacement{}, fmt.Errorf("wallet-service returned an unusable replacement: %q", body)
+		}
+		return Replacement{RawTx: out.SignedRawTx, Hash: strings.ToLower(out.TxHash), Nonce: out.Nonce, Seq: out.ReplacementSeq}, nil
+	case http.StatusUnprocessableEntity:
+		return Replacement{}, fmt.Errorf("%w: %s", ErrReplaceCeiling, strings.TrimSpace(string(body)))
+	case http.StatusNotFound, http.StatusConflict:
+		return Replacement{}, fmt.Errorf("%w (%d): %s", ErrReplaceRefused, code, strings.TrimSpace(string(body)))
+	default:
+		return Replacement{}, fmt.Errorf("wallet-service replace answered %d: %s", code, strings.TrimSpace(string(body)))
+	}
 }

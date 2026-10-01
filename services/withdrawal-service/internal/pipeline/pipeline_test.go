@@ -50,6 +50,12 @@ type fakeSigner struct {
 	conflict  bool
 	failNext  int  // transient failures before answering
 	loseReply bool // sign and store, then fail as if the response were lost
+	voided    bool // answer 410: the Reaper voided the key
+
+	reps         map[string][]wallet.Replacement // Fee Bumps per key, like wallet-service stores them
+	replaceErr   error
+	replaceCalls []string // "key/seq"
+	corrupt      bool     // build replacements that redirect the funds (must never be accepted)
 }
 
 func newSigner() *fakeSigner {
@@ -59,6 +65,9 @@ func newSigner() *fakeSigner {
 
 func (s *fakeSigner) SignHotWallet(_ context.Context, r wallet.SignRequest) (string, uint64, error) {
 	s.keys = append(s.keys, r.IdempotencyKey)
+	if s.voided {
+		return "", 0, wallet.ErrKeyVoided
+	}
 	if s.refuse {
 		return "", 0, wallet.ErrSignRefused
 	}
@@ -88,6 +97,42 @@ func (s *fakeSigner) SignHotWallet(_ context.Context, r wallet.SignRequest) (str
 	return raw, s.nonces[r.IdempotencyKey], nil
 }
 
+// ReplaceHotWallet behaves like wallet-service: the same tx at the same nonce, fee × 1.125 + 1; the
+// same seq replays; a gap is refused.
+func (s *fakeSigner) ReplaceHotWallet(_ context.Context, key string, seq int) (wallet.Replacement, error) {
+	s.replaceCalls = append(s.replaceCalls, fmt.Sprintf("%s/%d", key, seq))
+	if s.replaceErr != nil {
+		return wallet.Replacement{}, s.replaceErr
+	}
+	if s.reps == nil {
+		s.reps = map[string][]wallet.Replacement{}
+	}
+	if seq >= 1 && seq <= len(s.reps[key]) {
+		return s.reps[key][seq-1], nil
+	}
+	if seq != len(s.reps[key])+1 {
+		return wallet.Replacement{}, wallet.ErrReplaceRefused
+	}
+	latest := s.byKey[key]
+	if n := len(s.reps[key]); n > 0 {
+		latest = s.reps[key][n-1].RawTx
+	}
+	prev, _ := chain.Decode(latest)
+	to := *prev.To()
+	if s.corrupt {
+		to = common.HexToAddress("0x000000000000000000000000000000000000dEaD")
+	}
+	tx, _ := types.SignNewTx(s.key, types.LatestSignerForChainID(prev.ChainId()), &types.DynamicFeeTx{
+		ChainID: prev.ChainId(), Nonce: prev.Nonce(), GasTipCap: new(big.Int).Add(prev.GasTipCap(), big.NewInt(1)),
+		GasFeeCap: new(big.Int).Add(new(big.Int).Div(new(big.Int).Mul(prev.GasFeeCap(), big.NewInt(1125)), big.NewInt(1000)), big.NewInt(1)),
+		Gas:       prev.Gas(), To: &to, Value: prev.Value(), Data: prev.Data(),
+	})
+	b, _ := tx.MarshalBinary()
+	rep := wallet.Replacement{RawTx: hexutil.Encode(b), Hash: strings.ToLower(tx.Hash().Hex()), Nonce: prev.Nonce(), Seq: seq}
+	s.reps[key] = append(s.reps[key], rep)
+	return rep, nil
+}
+
 type fakeChain struct {
 	minedNonce   uint64
 	revertReason string
@@ -95,6 +140,10 @@ type fakeChain struct {
 	receipts     map[common.Hash]*chain.Receipt
 	sent         []string
 	broadcastErr error
+	baseFee      int64
+	balance      *big.Int
+	minFee       *big.Int // the node refuses a tx whose max fee is below this as underpriced
+	pool         map[common.Hash]bool
 }
 
 func newChain() *fakeChain { return &fakeChain{head: 100, receipts: map[common.Hash]*chain.Receipt{}} }
@@ -105,6 +154,11 @@ func (c *fakeChain) Broadcast(_ context.Context, raw string) error {
 	if c.broadcastErr != nil {
 		return c.broadcastErr
 	}
+	if c.minFee != nil {
+		if tx, err := chain.Decode(raw); err == nil && tx.GasFeeCap().Cmp(c.minFee) < 0 {
+			return errors.New("replacement transaction underpriced")
+		}
+	}
 	c.sent = append(c.sent, raw)
 	return nil
 }
@@ -114,6 +168,15 @@ func (c *fakeChain) Receipt(_ context.Context, h common.Hash) (*chain.Receipt, e
 
 func (c *fakeChain) MinedNonce(context.Context, common.Address) (uint64, error) {
 	return c.minedNonce, nil
+}
+
+func (c *fakeChain) BaseFee(context.Context) (*big.Int, error) { return big.NewInt(c.baseFee), nil }
+
+func (c *fakeChain) Balance(context.Context, common.Address) (*big.Int, error) {
+	if c.balance == nil {
+		return new(big.Int).Exp(big.NewInt(10), big.NewInt(21), nil), nil // plenty
+	}
+	return c.balance, nil
 }
 
 func (c *fakeChain) RevertReason(context.Context, common.Hash, int64) (string, error) {

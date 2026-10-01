@@ -34,6 +34,11 @@ type Chain interface {
 	// MinedNonce is the account's nonce in the latest block: how many of its txs are mined. Never
 	// the `pending` nonce, which counts our own tx still in the mempool.
 	MinedNonce(ctx context.Context, addr common.Address) (uint64, error)
+	// BaseFee is the latest block's base fee per gas (0 before London): a tx whose max fee is
+	// below it cannot be mined (the Reaper's "underpriced" diagnosis).
+	BaseFee(ctx context.Context) (*big.Int, error)
+	// Balance is the account's native balance in the latest block.
+	Balance(ctx context.Context, addr common.Address) (*big.Int, error)
 }
 
 // Sender recovers who signed a raw tx (for a withdrawal: the Hot Wallet).
@@ -112,6 +117,21 @@ func (e *Eth) MinedNonce(ctx context.Context, addr common.Address) (uint64, erro
 	return e.c.NonceAt(ctx, addr, nil)
 }
 
+func (e *Eth) BaseFee(ctx context.Context) (*big.Int, error) {
+	h, err := e.c.HeaderByNumber(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	if h.BaseFee == nil {
+		return new(big.Int), nil
+	}
+	return h.BaseFee, nil
+}
+
+func (e *Eth) Balance(ctx context.Context, addr common.Address) (*big.Int, error) {
+	return e.c.BalanceAt(ctx, addr, nil)
+}
+
 func (e *Eth) RevertReason(ctx context.Context, hash common.Hash, block int64) (string, error) {
 	tx, _, err := e.c.TransactionByHash(ctx, hash)
 	if err != nil {
@@ -140,4 +160,17 @@ func (e *Eth) Receipt(ctx context.Context, hash common.Hash) (*Receipt, error) {
 		return nil, err
 	}
 	return &Receipt{BlockNumber: r.BlockNumber.Int64(), Success: r.Status == types.ReceiptStatusSuccessful}, nil
+}
+
+// Decode parses a signed raw tx.
+func Decode(rawTx string) (*types.Transaction, error) {
+	b, err := hexutil.Decode(rawTx)
+	if err != nil {
+		return nil, fmt.Errorf("decoding raw tx: %w", err)
+	}
+	var tx types.Transaction
+	if err := tx.UnmarshalBinary(b); err != nil {
+		return nil, fmt.Errorf("decoding raw tx: %w", err)
+	}
+	return &tx, nil
 }

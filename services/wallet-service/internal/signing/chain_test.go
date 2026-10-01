@@ -69,7 +69,7 @@ func TestSign_TransactionsAreAcceptedAndMinedByARealEVM(t *testing.T) {
 	to := common.HexToAddress(dest)
 	for i, key := range []string{"a", "b", "c"} {
 		req := Request{ToAddress: dest, AssetID: nativeID, Amount: "1000000000000000", ChainID: id.Int64(), IdempotencyKey: key}
-		resp, err := s.Sign(context.Background(), req)
+		resp, err := s.Sign(context.Background(), "withdrawal-service", req)
 		if err != nil {
 			t.Fatal(err)
 		}

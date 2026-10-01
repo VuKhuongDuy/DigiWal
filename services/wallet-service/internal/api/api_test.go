@@ -23,10 +23,12 @@ type fakeHot struct {
 	err  error
 	req  signing.Request
 	n    int
+	cn   string // the caller the handler passed on
 }
 
-func (f *fakeHot) Sign(_ context.Context, req signing.Request) (signing.Response, error) {
+func (f *fakeHot) Sign(_ context.Context, caller string, req signing.Request) (signing.Response, error) {
 	f.n++
+	f.cn = caller
 	f.req = req
 	return f.resp, f.err
 }

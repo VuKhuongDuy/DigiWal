@@ -60,9 +60,13 @@ type Chain interface {
 }
 
 type Store interface {
-	LookupHotSignature(ctx context.Context, key, requestHash string) (storage.HotSignature, error)
-	SignHotWallet(ctx context.Context, chainID int64, key, requestHash string,
+	LookupHotSignature(ctx context.Context, caller, key, requestHash string) (storage.HotSignature, error)
+	SignHotWallet(ctx context.Context, chainID int64, caller, key, requestHash string,
 		seedNonce func(context.Context) (uint64, error), sign func(nonce uint64) ([]byte, error)) (storage.HotSignature, error)
+	GetHotKey(ctx context.Context, caller, key string) (storage.HotKey, error)
+	VoidHotKey(ctx context.Context, chainID int64, caller, key string, seedNonce func(context.Context) (uint64, error)) (storage.VoidResult, error)
+	ReplaceHotKey(ctx context.Context, chainID int64, caller, key string, seq int, kind string,
+		build func(storage.ReplaceInput) (storage.Built, error)) (storage.Replacement, error)
 }
 
 type Signer struct {
@@ -72,6 +76,18 @@ type Signer struct {
 	assets  Assets
 	chainID int64
 	from    common.Address
+	// feeCeiling is the hard cap on max fee per gas of any Fee Bump or Nonce Filler (invariant #21).
+	feeCeiling *big.Int
+}
+
+// DefaultFeeCeiling is 50 gwei (Decided, withdrawal-flow.md Open Questions #18).
+var DefaultFeeCeiling = big.NewInt(50_000_000_000)
+
+// WithFeeCeiling sets the hard ceiling on a replacement's max fee per gas; a replacement above it
+// is refused (ErrGasCeilingExceeded) and nothing is signed.
+func (s *Signer) WithFeeCeiling(wei *big.Int) *Signer {
+	s.feeCeiling = new(big.Int).Set(wei)
+	return s
 }
 
 // New checks that the configured RPC really is the chain we were told it is, and
@@ -85,7 +101,7 @@ func New(ctx context.Context, store Store, hot *hdwallet.Wallet, chain Chain, as
 	if err != nil {
 		return nil, err
 	}
-	return &Signer{store: store, wallet: hot, chain: chain, assets: assets, chainID: id.Int64(), from: common.HexToAddress(addr)}, nil
+	return &Signer{store: store, wallet: hot, chain: chain, assets: assets, chainID: id.Int64(), from: common.HexToAddress(addr), feeCeiling: DefaultFeeCeiling}, nil
 }
 
 // ChainID is the chain this signer signs for (read from the RPC at startup).
@@ -93,7 +109,9 @@ func (s *Signer) ChainID() int64 { return s.chainID }
 
 func (s *Signer) HotWalletAddress() common.Address { return s.from }
 
-func (s *Signer) Sign(ctx context.Context, req Request) (Response, error) {
+// Sign signs a Hot Wallet tx for req.IdempotencyKey on behalf of caller (the verified client
+// certificate CN), who alone can later look up, void or replace the key.
+func (s *Signer) Sign(ctx context.Context, caller string, req Request) (Response, error) {
 	to, amount, maxGas, asset, err := s.validate(req)
 	if err != nil {
 		return Response{}, err
@@ -101,7 +119,7 @@ func (s *Signer) Sign(ctx context.Context, req Request) (Response, error) {
 	hash := requestHash(req)
 
 	// Fast path: a retried key replays the stored signature without any RPC.
-	if sig, err := s.store.LookupHotSignature(ctx, req.IdempotencyKey, hash); err == nil {
+	if sig, err := s.store.LookupHotSignature(ctx, caller, req.IdempotencyKey, hash); err == nil {
 		return toResponse(sig), nil
 	} else if !errors.Is(err, storage.ErrNotFound) {
 		return Response{}, err
@@ -113,7 +131,7 @@ func (s *Signer) Sign(ctx context.Context, req Request) (Response, error) {
 		return Response{}, err
 	}
 
-	sig, err := s.store.SignHotWallet(ctx, s.chainID, req.IdempotencyKey, hash,
+	sig, err := s.store.SignHotWallet(ctx, s.chainID, caller, req.IdempotencyKey, hash,
 		func(ctx context.Context) (uint64, error) { return s.chain.PendingNonceAt(ctx, s.from) },
 		func(nonce uint64) ([]byte, error) {
 			return signTx(s.wallet, hdwallet.HotWalletIndex, s.chainID, nonce, body)

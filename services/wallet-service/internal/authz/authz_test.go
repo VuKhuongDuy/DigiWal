@@ -63,6 +63,8 @@ func newServer(t *testing.T, ca *testCA) *httptest.Server {
 	mux := http.NewServeMux()
 	mux.Handle("POST /v1/sign/hot-wallet", Require(HotWalletSigners, ok))
 	mux.Handle("POST /v1/sign/user-address", Require(UserAddressSigners, ok))
+	mux.Handle("POST /v1/sign/hot-wallet/{key}/void", Require(HotWalletVoiders, ok))
+	mux.Handle("POST /v1/sign/hot-wallet/{key}/replace", Require(HotWalletKeyReaders, ok))
 	srv := httptest.NewUnstartedServer(mux)
 	srv.TLS = &tls.Config{
 		Certificates: []tls.Certificate{ca.leaf(t, "wallet-service")},
@@ -104,6 +106,16 @@ func TestCNAuthorizationMatrix(t *testing.T) {
 		{"withdrawal-service", "/v1/sign/user-address", 403},
 		{"api-gateway", "/v1/sign/hot-wallet", 403},
 		{"api-gateway", "/v1/sign/user-address", 403},
+		// invariants #21, #22: void is withdrawal-service's alone; replace is also sweeper's (its
+		// Gas Top-Ups); nobody else touches either
+		{"withdrawal-service", "/v1/sign/hot-wallet/k/void", 200},
+		{"sweeper", "/v1/sign/hot-wallet/k/void", 403},
+		{"chain-watcher", "/v1/sign/hot-wallet/k/void", 403},
+		{"api-gateway", "/v1/sign/hot-wallet/k/void", 403},
+		{"withdrawal-service", "/v1/sign/hot-wallet/k/replace", 200},
+		{"sweeper", "/v1/sign/hot-wallet/k/replace", 200},
+		{"chain-watcher", "/v1/sign/hot-wallet/k/replace", 403},
+		{"api-gateway", "/v1/sign/hot-wallet/k/replace", 403},
 	}
 	for _, tc := range cases {
 		cert := ca.leaf(t, tc.cn)
