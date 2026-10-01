@@ -17,14 +17,14 @@ import (
 
 // Reject reasons, returned to the client as reject_reason.
 const (
-	AssetNotRegistered    = "asset_not_registered"
-	InvalidToAddress      = "invalid_to_address"
-	AmountTooLarge        = "amount_too_large" // above uint256: can never be paid on-chain
-	BelowMinimum          = "below_minimum_withdrawal_amount"
-	NotWhitelisted        = "destination_not_whitelisted" // no entry, or still pending
-	OnScreeningList       = "destination_on_screening_list"
-	DestinationIsDeposit  = "destination_is_deposit_address" // via Destinations, task 3.10
-	DestinationIsSystemWl = "destination_is_system_wallet"   // via Destinations, task 3.10
+	AssetNotRegistered   = "asset_not_registered"
+	InvalidToAddress     = "invalid_to_address"
+	AmountTooLarge       = "amount_too_large" // above uint256: can never be paid on-chain
+	BelowMinimum         = "below_minimum_withdrawal_amount"
+	NotWhitelisted       = "destination_not_whitelisted" // no entry, or still pending
+	OnScreeningList      = "destination_on_screening_list"
+	DestinationIsDeposit = "destination_is_deposit_address" // via Destinations, task 3.10
+	DestinationIsSystem  = "destination_is_system_wallet"   // via Destinations, task 3.10
 )
 
 // Destinations refuses addresses that may never be a withdrawal destination: our own deposit

@@ -2,3 +2,4 @@
 CREATE DATABASE ledger;
 CREATE DATABASE chain_watcher;
 CREATE DATABASE api_gateway;
+CREATE DATABASE withdrawal;

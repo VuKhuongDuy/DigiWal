@@ -1,9 +1,10 @@
 # withdrawal-service
 
-Orchestrates withdrawals (`docs/design/withdrawal-flow.md`). **Tasks 3.1, 3.2 and 3.6 so far:** the
-service, its schema, idempotent request creation, validation, and the Withdrawal Whitelist. A request
-ends at `validated` or `rejected`; Reservation/signing/broadcast/Settle (3.3), Nonce Gap handling (3.4),
-the destination checks against wallet-service (3.10) and the Reaper (3.9) are not built yet.
+Orchestrates withdrawals (`docs/design/withdrawal-flow.md`). **Tasks 3.1, 3.2, 3.6 and 3.10 so far:**
+the service, its schema, idempotent request creation, validation (including the destination checks
+against wallet-service), and the Withdrawal Whitelist. A request ends at `validated` or `rejected`;
+Reservation/signing/broadcast/Settle (3.3), Nonce Gap handling (3.4) and the Reaper (3.9) are not built
+yet.
 
 ## What works
 
@@ -50,10 +51,20 @@ the destination checks against wallet-service (3.10) and the Reaper (3.9) are no
   | 4 | amount ≥ the asset's `min_withdrawal_amount` | `below_minimum_withdrawal_amount` |
   | 5 | `to_address` is an **active** entry in the user's own whitelist | `destination_not_whitelisted` |
   | 6 | `to_address` is not on the Screening List (`SCREENING_FILE`) | `destination_on_screening_list` |
-  | 7 | not a deposit / Hot / Warm address (task 3.10, hook unset today) | `destination_is_deposit_address`, `destination_is_system_wallet` |
+  | 7 | not the Hot or Warm Wallet (local comparison) | `destination_is_system_wallet` |
+  | 8 | not one of our deposit addresses (wallet-service `GET /v1/addresses/{address}`) | `destination_is_deposit_address` |
 
-  The reason codes for rules 1-6 are not named in the design docs (only #18's are); these are new.
-- **Withdrawal Whitelist** (invariants #12, #13, #15), mTLS, `CN=api-gateway` only:
+  Codes and order are Decided by the Tech Lead (`withdrawal-flow.md` invariant #10).
+- **Destination checks** (task 3.10, invariant #18), on both `POST /v1/withdrawals` and
+  `POST /v1/whitelist`:
+  - Hot and Warm come from wallet-service's `GET /v1/wallet/system-addresses`, asked **once at
+    startup** over mTLS as `CN=withdrawal-service` (30 tries, 4s apart, then exit). The listeners only
+    start after that, so no request is ever served without them. Never an env var.
+  - The deposit-address check is a live `GET /v1/addresses/{address}` on every request, no cache:
+    `200` = ours → `422`, `404` = not ours → continue, anything else fails closed (`503`; a withdrawal
+    stays `requested` and that key is spent).
+  - Cold Wallet addresses are allowed (Decided).
+- **Withdrawal Whitelist** (invariants #12, #13, #15, #18), mTLS, `CN=api-gateway` only:
   - `POST /v1/whitelist {user_id, address}` → `{id, user_id, address, status, added_at}`. A new entry is
     `201` and `pending`; re-adding the same address is `200` with the existing entry, and never restarts
     its cooldown. The address is stored in EIP-55 form, so two spellings are one entry. `400` for a
@@ -67,20 +78,22 @@ the destination checks against wallet-service (3.10) and the Reaper (3.9) are no
   - `DELETE /v1/whitelist/{id}?user_id=` → `204`, immediate. Idempotent, and an unknown id or another
     user's entry is the same `204` no-op, so ids can't be probed.
   - `store.WhitelistStatus` is what validation (3.2) will use: only `active` lets a withdrawal through.
-  - The invariant #18 check at creation (deposit / Hot / Warm address → `422`, check unavailable → `503`)
-    is a hook, `api.Destinations`, unset until task 3.10 wires wallet-service.
+  - Creation runs the same destination checks (deposit / Hot / Warm → `422`, check unavailable →
+    `503`), so a user doesn't wait out the cooldown for an entry that can never be used.
 
 ## Running it
 
 ```bash
 make certs && make up   # Postgres (own database "withdrawal") + withdrawal-service, http://localhost:8086, mTLS :8446
-                        # needs ASSETS_FILE / SCREENING_FILE (infra/assets.yaml, infra/screening.yaml, mounted)
+                        # needs ASSETS_FILE / SCREENING_FILE (mounted) and a reachable wallet-service
+                        # (WALLET_SERVICE_URL); the whole stack runs together in e2e/ (`make -C ../../e2e up`)
 make test               # store tests on a real Postgres (testcontainers or TEST_POSTGRES_DSN)
 ```
 
 ## Not built / to know
 
-- Not in `e2e/` yet, and api-gateway does not route to it yet (task 3.7).
+- In the `e2e/` stack (with `WHITELIST_COOLDOWN=2s`), but no e2e test drives it yet (task 3.8), and
+  api-gateway does not route to it yet (task 3.7).
 - `internal/screening` is a copy of ledger-service's loader (same file, same rules).
 - No `pkg/events` dependency yet: the withdrawal events come with task 3.3, keyed on `withdrawal_id`
   (task 3.11).

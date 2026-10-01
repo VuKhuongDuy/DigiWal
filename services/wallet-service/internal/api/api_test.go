@@ -180,7 +180,7 @@ const someAddr = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
 
 // service-auth-mtls.md matrix: chain-watcher only, from day one.
 func TestAddressLookup_OnlyChainWatcherMayCall(t *testing.T) {
-	for cn, want := range map[string]int{"chain-watcher": 200, "sweeper": 403, "withdrawal-service": 403, "api-gateway": 403, "ledger-service": 403, "": 403} {
+	for cn, want := range map[string]int{"chain-watcher": 200, "withdrawal-service": 200, "sweeper": 403, "api-gateway": 403, "ledger-service": 403, "": 403} {
 		f := &fakeAddresses{user: "alice", chain: "evm"}
 		if got := lookup(t, f, cn, someAddr).Code; got != want {
 			t.Errorf("CN=%q: %d, want %d", cn, got, want)

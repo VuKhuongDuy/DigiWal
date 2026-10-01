@@ -39,9 +39,11 @@ var (
 	// only, to refuse withdrawals and whitelist entries to the Hot/Warm Wallet (withdrawal-flow.md
 	// invariant #18) and, later, as its Treasury Sweep destination (wallet-tiering.md invariant #9).
 	SystemAddressReaders = []string{CNWithdrawalService}
-	// AddressLookupCallers may call GET /v1/addresses/{address}: chain-watcher only, and
-	// from day one (service-auth-mtls.md matrix) — it cannot resolve a deposit's user_id without it.
-	AddressLookupCallers = []string{CNChainWatcher}
+	// AddressLookupCallers may call GET /v1/addresses/{address}: chain-watcher, which cannot
+	// resolve a deposit's user_id without it (service-auth-mtls.md matrix), and withdrawal-service,
+	// which refuses withdrawals and whitelist entries to one of our own deposit addresses
+	// (withdrawal-flow.md invariant #18, Decided). Neither can reach /v1/sign/user-address.
+	AddressLookupCallers = []string{CNChainWatcher, CNWithdrawalService}
 )
 
 // Require wraps next so only clients whose verified certificate CN is in

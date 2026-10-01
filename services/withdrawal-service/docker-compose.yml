@@ -13,6 +13,10 @@ services:
       SCREENING_FILE: /config/screening.yaml
       # Whitelist Cooldown is 24h (decided); set e.g. 2s only for local/e2e testing.
       WHITELIST_COOLDOWN: ${WHITELIST_COOLDOWN:-}
+      # Hot/Warm addresses and the deposit-address lookup, over mTLS as CN=withdrawal-service.
+      # Each service's compose is its own project: point this at a reachable wallet-service, or
+      # use e2e/ (one stack). withdrawal-service does not start until it gets an answer.
+      WALLET_SERVICE_URL: ${WALLET_SERVICE_URL:-https://wallet-service:8443}
       # mTLS listener for the client-facing endpoints, CN=api-gateway only (`make certs`).
       TLS_CERT_FILE: /certs/cert.pem
       TLS_KEY_FILE: /certs/key.pem

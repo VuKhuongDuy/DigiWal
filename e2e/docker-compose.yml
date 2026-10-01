@@ -131,3 +131,26 @@ services:
     ports: ["8084:8080"]
     depends_on:
       postgres: {condition: service_healthy}
+
+  withdrawal-service:
+    build:
+      context: ../services/withdrawal-service
+    environment:
+      PORT: "8080"
+      POSTGRES_DSN: postgres://custody:custody@postgres:5432/withdrawal?sslmode=disable
+      ASSETS_FILE: /config/assets.yaml
+      SCREENING_FILE: /config/screening.yaml
+      WALLET_SERVICE_URL: https://wallet-service:8443
+      # 24h is the decided Whitelist Cooldown; the tests cannot wait that long.
+      WHITELIST_COOLDOWN: ${WHITELIST_COOLDOWN:-2s}
+      TLS_CERT_FILE: /certs/cert.pem
+      TLS_KEY_FILE: /certs/key.pem
+      TLS_CA_FILE: /certs/ca-cert.pem
+    volumes:
+      - ./assets.yaml:/config/assets.yaml:ro
+      - ../infra/screening.yaml:/config/screening.yaml:ro
+      - ../infra/pki/out/withdrawal-service:/certs:ro
+    ports: ["8086:8080", "8446:8443"]
+    depends_on:
+      postgres: {condition: service_healthy}
+      wallet-service: {condition: service_started}  # it retries system-addresses until wallet-service answers
