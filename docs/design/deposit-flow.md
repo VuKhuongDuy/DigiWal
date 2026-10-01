@@ -526,8 +526,8 @@ concrete Confirmation Depth and Gas Top-Up numbers below.
     must have been exhausted and the `ALERT` names the key, so an
     operator can still bump or fill it.
 19. **`sweeper` records the gas of every Gas Top-Up and Sweep it sends
-    in the ledger.** **Gas-in-the-ledger Decided (Tech Lead); the Entry
-    design is PROPOSED — `ledger.md` invariant #12; task 2.8.** Once a
+    in the ledger.** **Decided (Tech Lead), including the Entry design —
+    `ledger.md` invariant #12; task 2.8.** Once a
     Gas Top-Up or Sweep tx is mined (the point `sweeper` already waits
     for), it posts `POST /v1/ledger/gas-fees` `{chain_id, tx_hash,
     gas_used, effective_gas_price, purpose: gas_topup | sweep}` from the
@@ -535,9 +535,10 @@ concrete Confirmation Depth and Gas Top-Up numbers below.
     Sweeps (gas paid out of the deposited ETH, so custody holds
     `deposit − gas` while the user is credited the full deposit) and
     ERC-20 Sweeps (gas paid out of the top-up). The top-up's value
-    itself is an internal custody move and posts nothing. Known gaps
-    (no depth wait; a crash between mined and posted loses the record):
-    `ledger.md` Open Questions #6.
+    itself is an internal custody move and posts nothing. **Known
+    limitation, accepted (Decided, `ledger.md` Open Questions #6):**
+    `sweeper` stays stateless and posts at inclusion, not after a depth,
+    so a crash between mined and posted can lose one record.
 
 ## Diagram
 

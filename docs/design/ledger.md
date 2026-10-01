@@ -103,8 +103,7 @@ implementing `wallet-service`'s side of this.
   reconciled against the real on-chain balance of the hot wallet for
   that asset — a genuine "did we lose or fabricate money" check, not
   just bookkeeping ceremony.
-- **Gas Expense Account** — **new; Decided (Tech Lead) that gas is
-  recorded in the ledger, Entry design PROPOSED (invariant #12).** One
+- **Gas Expense Account** — **new; Decided (Tech Lead), invariant #12.** One
   per chain's native asset (`asset_type = native`), `kind =
   'gas_expense'`, not tied to a user. The double-entry counterparty for
   gas our own transactions burn: every mined tx we sign (withdrawals,
@@ -114,7 +113,7 @@ implementing `wallet-service`'s side of this.
   (cumulative gas spent, negative, same sign convention as the Chain
   Account); `locked_balance` is always 0; never Locked, never checked by
   invariant #1.
-- **Gas Fee** — **PROPOSED.** One Ledger Transaction per mined tx we
+- **Gas Fee** — **Decided (Tech Lead).** One Ledger Transaction per mined tx we
   signed, `source_type = 'gas_fee'`: `{Gas Expense Account −fee, Chain
   Account +fee}` in the native asset, where `fee = gasUsed ×
   effectiveGasPrice` from that tx's receipt. The Chain Account side keeps
@@ -302,10 +301,9 @@ implementing `wallet-service`'s side of this.
     is the one caller expected to post corrections and is exactly the
     caller this invariant has to hold up against if compromised.
 12. **Every mined tx we sign has its gas recorded exactly once, as a
-    Gas Fee, and gas never touches a user's Account.** **PROPOSED
-    (Solution Architect) for the Tech Lead's review — the decision to
-    record gas in the ledger is Decided (`withdrawal-flow.md` Open
-    Questions #22).**
+    Gas Fee, and gas never touches a user's Account.** **Decided (Tech
+    Lead)** — both recording gas in the ledger (`withdrawal-flow.md` Open
+    Questions #22) and this Entry design (Open Questions #5).
     - **Entries:** `{gas_expense(native asset): −fee, chain(native
       asset): +fee}`, sum zero per asset (invariant #2). The user is
       never debited for gas: a confirmed withdrawal debits exactly
@@ -338,12 +336,21 @@ implementing `wallet-service`'s side of this.
       Depth), and for a mined Nonce Filler when the Reaper Releases its
       request (`withdrawal-flow.md` invariant #26). `sweeper`: for each
       Gas Top-Up and Sweep tx once it is mined (`deposit-flow.md`
-      invariant #19 — no extra depth wait; see Open Questions #6).
+      invariant #19 — no extra depth wait). **Known limitation, accepted
+      (Decided, Open Questions #6):** `sweeper` stays stateless, so a
+      crash between a tx being mined and its Gas Fee being posted can
+      lose that one record, and a reorg that changes `gasUsed` after
+      inclusion is not reflected. Both are small drifts the
+      reconciliation would show.
     - **Trust:** `ledger-service` has no chain RPC and cannot verify the
       tx; a compromised caller could post a fake Gas Fee. The damage is
       bounded — no user balance moves, only the system accounts, and the
-      on-chain reconciliation would show the mismatch (Open Questions
-      #7).
+      on-chain reconciliation would show the mismatch.
+    - **Reconciliation scope (Decided, Open Questions #7):**
+      `−ChainAccount.total_balance` per asset = **all custody** — the
+      Hot Wallet plus unswept deposits plus the ETH dust left at user
+      addresses after ERC-20 Sweeps — not the Hot Wallet alone. The
+      reconciliation job itself stays deferred (Open Questions #2).
 
 ## Diagram
 
@@ -369,7 +376,7 @@ erDiagram
     ACCOUNT {
         uuid id
         uuid asset_id
-        string kind "user, chain, gas_expense (PROPOSED)"
+        string kind "user, chain, gas_expense"
         string user_id "null for the Chain and Gas Expense Accounts"
         numeric_78_0 total_balance "minor units, materialized, sum of Entries; negative is normal for the Chain Account"
         numeric_78_0 locked_balance "minor units, materialized, sum of active Locks; always 0 for the Chain Account"
@@ -385,7 +392,7 @@ erDiagram
     }
     LEDGER_TRANSACTION {
         uuid id
-        string source_type "deposit, withdrawal_settle, correction, gas_fee (PROPOSED)"
+        string source_type "deposit, withdrawal_settle, correction, gas_fee"
         string idempotency_key "unique; Settle reuses its Lock's own key unchanged"
         timestamptz created_at
     }
@@ -591,12 +598,13 @@ sequenceDiagram
    display layer). Flag if you want price data in scope now.
 4. No new technology introduced — Postgres only, per the existing
    data-model split.
-5. **PROPOSED: Gas Fee Entries (invariant #12).** Decided by the Tech
+5. ~~**PROPOSED: Gas Fee Entries (invariant #12).** Decided by the Tech
    Lead that gas goes in the ledger; the Entry shape, the new
    `gas_expense` account kind, `source_type = 'gas_fee'`, the
    `gas:{chain_id}:{tx_hash}` key and the new `POST /v1/ledger/gas-fees`
-   endpoint (`CN=withdrawal-service`, `CN=sweeper`) need review.
-6. **Open: `sweeper` posts Gas Fees without durable state.** `sweeper`
+   endpoint (`CN=withdrawal-service`, `CN=sweeper`) need review.~~
+   **Decided (Tech Lead): approved as proposed.**
+6. ~~**Open: `sweeper` posts Gas Fees without durable state.** `sweeper`
    has no database. A crash after a tx is mined but before its Gas Fee
    is posted loses that record: on redelivery the Sweep is already done
    (balance zero) and a Sweep tx has no key to recover its hash from
@@ -604,11 +612,14 @@ sequenceDiagram
    It also posts at inclusion, not after a confirmation depth, so a
    reorg that changes `gasUsed` is not reflected. Both are small drifts
    the reconciliation would show; closing them needs `sweeper` state
-   (or a chain-side scanner of our own txs). Accept for now?
-7. **Open (pre-existing #2, now sharper): reconciliation scope.** With
+   (or a chain-side scanner of our own txs). Accept for now?~~
+   **Decided (Tech Lead): accept the small drift for now; `sweeper`
+   stays stateless.** Recorded as a known limitation in invariant #12.
+7. ~~**Open (pre-existing #2, now sharper): reconciliation scope.** With
    Gas Fees, `−ChainAccount.total_balance` per asset equals all custody,
    which includes not only the Hot Wallet but unswept deposits and the
    ETH dust left at user addresses after an ERC-20 Sweep (Gas Top-Up
    minus the Sweep's gas). A reconciliation job against the Hot Wallet
    alone would always differ by that dust. Still deferred; flagging the
-   definition it will need.
+   definition it will need.~~ **Decided (Tech Lead): scope = all
+   custody as described; the reconciliation job stays deferred.**

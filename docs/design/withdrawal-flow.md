@@ -183,8 +183,8 @@ Question #7).
   stuck Hot Wallet tx: same nonce, same destination/amount/data, higher
   fees, signed by `wallet-service`. Any version may be mined, never more
   than one.
-- **Gas Expense Account** — **PROPOSED (`ledger.md`, invariant #26
-  here).** The ledger's system account that records every wei of gas
+- **Gas Expense Account** — **Decided (`ledger.md` invariant #12,
+  invariant #26 here).** The ledger's system account that records every wei of gas
   our own transactions spend.
 - **Signature Void** — **Decided (invariant #22).** `wallet-service`'s
   atomic promise that a Hot Wallet key it has not signed will never be
@@ -339,7 +339,16 @@ Questions #3 for the one remaining unresolved failure mode.
    nonce ≥ N, not just the one that triggered detection.** Reflects the
    EVM invariant that nonce N+1 can never be canonically confirmed while
    nonce N isn't — treating them independently would be wrong, not just
-   incomplete.
+   incomplete. **Detection and marking — Decided (Tech Lead),
+   implemented in task 3.4:** every pass re-checks the receipts of
+   `confirmed` txs mined in the last `NONCE_GAP_WINDOW` blocks (default
+   256). A receipt missing on **two consecutive passes** (one miss could
+   be a node hiccup) declares a gap at the **lowest** such nonce N. In
+   one transaction `withdrawal-service` records the gap (table
+   `nonce_gaps`) and moves every request on that chain at nonce ≥ N that
+   holds a tx — `signed`, `broadcast` and `confirmed` — to `disputed`,
+   storing its prior status in `disputed_from`. Then it calls `POST
+   /v1/wallet/nonce-gap` (invariant #19), retried until `200`.
 9. **Resolving a `disputed` Withdrawal Request is always an explicit
    operator action, never automatic.** Either rebroadcast the original
    signed raw tx (safe — identical nonce and payload, no new signature,
@@ -617,8 +626,11 @@ Questions #3 for the one remaining unresolved failure mode.
       `COALESCE(frozen_at, now())` make a repeat with the same
       `from_nonce` a no-op, and a lower one only ever widens the freeze
       (invariant #8). Safe to retry until `200`; `withdrawal-service`
-      marks the affected requests `disputed` first (its own DB), then
-      calls this, retrying on failure.
+      marks the affected requests `disputed` first (its own DB, together
+      with the `nonce_gaps` row — invariant #8), then calls this,
+      retrying on failure. **As implemented (Decided):** the response
+      is the effective freeze; `422` for a never-allocated nonce, `404`
+      if the chain never signed.
     - **While frozen:** every *new* Hot Wallet signature is refused
       (`503`) for every caller; an idempotent replay of an
       already-signed key still returns its stored result (the stored
@@ -814,8 +826,8 @@ Questions #3 for the one remaining unresolved failure mode.
     same address.
 26. **Every wei of gas a Hot Wallet withdrawal tx spends is recorded in
     the ledger, once, after it is final.** **Decided (Tech Lead) that it
-    goes in the ledger (Open Questions #22); the Entry design is
-    PROPOSED — `ledger.md` invariant #12.** `withdrawal-service` posts
+    goes in the ledger (Open Questions #22), with the Entry design in
+    `ledger.md` invariant #12 (Decided).** `withdrawal-service` posts
     `POST /v1/ledger/gas-fees` for the mined tx (whichever Fee Bump
     version landed) with its `gasUsed` and `effectiveGasPrice` from the
     receipt: at Settle for a confirmed withdrawal, at the `→ failed`
@@ -1309,8 +1321,7 @@ sequenceDiagram
     reason. Not designed.
 22. **Decided (Tech Lead): gas is recorded in the ledger, in a system
     Gas Expense Account** — invariant #26 here and `ledger.md` invariant
-    #12 (the Entry design itself is PROPOSED, since it changes the
-    ledger; see `ledger.md` Open Questions). Original question: **who
+    #12 (Entry design Decided too, `ledger.md` Open Questions #5). Original question: **who
     pays the gas of a withdrawal tx?** The Hot Wallet pays
     gas for every withdrawal (and for a reverted one, which moved nothing
     and Released the user in full), and nothing records it. Options:
