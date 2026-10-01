@@ -3,6 +3,8 @@ package store
 import (
 	"context"
 	"errors"
+	"fmt"
+	"math/big"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -42,12 +44,74 @@ func (s *Store) MarkBroadcast(ctx context.Context, id, txHash string, at time.Ti
 // MarkConfirmed moves broadcast → confirmed after the Settle, recording the hash that was mined
 // (any version of the tx — it can differ from the one broadcast first), the block and the ledger
 // transaction, and writes withdrawals.confirmed to the outbox in the same transaction.
-func (s *Store) MarkConfirmed(ctx context.Context, id, txHash string, block int64, ledgerTxID string, at time.Time, event func(Withdrawal) (string, []byte, error)) (Withdrawal, error) {
+//
+// gas, when not nil, is written in the same transaction (task 3.15): the numbers the ledger's Gas Fee
+// is computed from, posted afterwards by the pipeline.
+func (s *Store) MarkConfirmed(ctx context.Context, id, txHash string, block int64, ledgerTxID string, at time.Time, gas *GasRecord, event func(Withdrawal) (string, []byte, error)) (Withdrawal, error) {
+	g := gas.args()
 	return s.transitionWithEvent(ctx, event, `
 		UPDATE withdrawal_requests
-		SET status = 'confirmed', tx_hash = $5, confirmed_block = $2, settle_ledger_tx_id = $3, confirmed_at = $4, updated_at = now()
+		SET status = 'confirmed', tx_hash = $5, confirmed_block = $2, settle_ledger_tx_id = $3, confirmed_at = $4, updated_at = now(),
+		    gas_tx_hash = $6, gas_used = $7, gas_price = $8::numeric, gas_purpose = $9
 		WHERE withdrawal_id = $1 AND status = 'broadcast'
-		RETURNING `+columns, id, block, ledgerTxID, at, txHash)
+		RETURNING `+columns, id, block, ledgerTxID, at, txHash, g[0], g[1], g[2], g[3])
+}
+
+// GasRecord is the gas a mined tx of ours spent, as its receipt reports it, waiting to be posted to
+// the ledger as a Gas Fee (ledger.md invariant #12). Purpose is withdrawal, withdrawal_reverted or
+// nonce_filler.
+type GasRecord struct {
+	TxHash   string
+	GasUsed  uint64
+	GasPrice *big.Int // wei
+	Purpose  string
+}
+
+// args are the four SQL parameters (all NULL for no record).
+func (g *GasRecord) args() [4]any {
+	if g == nil {
+		return [4]any{nil, nil, nil, nil}
+	}
+	return [4]any{g.TxHash, int64(g.GasUsed), g.GasPrice.String(), g.Purpose}
+}
+
+// GasPending is a GasRecord still to post.
+type GasPending struct {
+	ID      string
+	ChainID int64
+	GasRecord
+}
+
+// ListGasPending returns up to limit final requests whose gas has not been posted yet, oldest first.
+func (s *Store) ListGasPending(ctx context.Context, limit int) ([]GasPending, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT withdrawal_id, coalesce(chain_id, 0), gas_tx_hash, gas_used, gas_price::text, gas_purpose
+		FROM withdrawal_requests WHERE gas_purpose IS NOT NULL AND gas_posted_at IS NULL
+		ORDER BY updated_at, withdrawal_id LIMIT $1`, limit)
+	if err != nil {
+		return nil, err
+	}
+	return pgx.CollectRows(rows, func(r pgx.CollectableRow) (GasPending, error) {
+		var g GasPending
+		var used int64
+		var price string
+		if err := r.Scan(&g.ID, &g.ChainID, &g.TxHash, &used, &price, &g.Purpose); err != nil {
+			return g, err
+		}
+		g.GasUsed = uint64(used)
+		var ok bool
+		if g.GasPrice, ok = new(big.Int).SetString(price, 10); !ok {
+			return g, fmt.Errorf("unparseable gas price %q", price)
+		}
+		return g, nil
+	})
+}
+
+// MarkGasPosted records that ledger-service accepted the Gas Fee. Idempotent.
+func (s *Store) MarkGasPosted(ctx context.Context, id string) error {
+	_, err := s.pool.Exec(ctx, `UPDATE withdrawal_requests SET gas_posted_at = now()
+		WHERE withdrawal_id = $1 AND gas_posted_at IS NULL`, id)
+	return err
 }
 
 // Tx is one Fee Bump version of a request's tx (replacement_seq >= 1).
@@ -181,4 +245,41 @@ func (s *Store) StampBroadcastHead(ctx context.Context, id string, head int64) e
 	_, err := s.pool.Exec(ctx, `UPDATE withdrawal_requests SET broadcast_head_seen = $2
 		WHERE withdrawal_id = $1 AND status = 'broadcast' AND broadcast_head_seen IS NULL`, id, head)
 	return err
+}
+
+// MarkFailed moves a request from `from` to `failed` (guarded UPDATE), recording why, and in the
+// same transaction writes the withdrawals.failed event to the outbox (invariant #24) — and, when
+// blockAddress is not empty, blocks the request's user's Whitelist Entry for that EIP-55 address
+// (invariant #25), and records gas (a mined Nonce Filler's, a reverted tx's) for posting (task 3.15). The outbox row is unique per (withdrawal, topic), so a request fails — and is
+// reported — at most once. ErrStateChanged if the row is no longer in `from`.
+func (s *Store) MarkFailed(ctx context.Context, id, from, reason, blockAddress string, gas *GasRecord, event func(Withdrawal) (topic string, payload []byte, err error)) (Withdrawal, error) {
+	g := gas.args()
+	var out Withdrawal
+	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+		w, err := guarded(scan(tx.QueryRow(ctx, `
+			UPDATE withdrawal_requests SET status = 'failed', reject_reason = $3, updated_at = now(),
+			    gas_tx_hash = $4, gas_used = $5, gas_price = $6::numeric, gas_purpose = $7
+			WHERE withdrawal_id = $1 AND status = $2
+			RETURNING `+columns, id, from, reason, g[0], g[1], g[2], g[3])))
+		if err != nil {
+			return err
+		}
+		topic, payload, err := event(w)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO withdrawal_outbox (withdrawal_id, topic, payload) VALUES ($1, $2, $3)
+			ON CONFLICT (withdrawal_id, topic) DO NOTHING`, w.ID, topic, payload); err != nil {
+			return err
+		}
+		if blockAddress != "" {
+			if _, err := tx.Exec(ctx, `UPDATE whitelist_entries SET blocked_at = now()
+				WHERE user_id = $1 AND address = $2 AND blocked_at IS NULL`, w.UserID, blockAddress); err != nil {
+				return err
+			}
+		}
+		out = w
+		return nil
+	})
+	return out, err
 }

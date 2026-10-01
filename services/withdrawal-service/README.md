@@ -1,6 +1,6 @@
 # withdrawal-service
 
-Orchestrates withdrawals (`docs/design/withdrawal-flow.md`). **Tasks 3.1-3.6, 3.9, 3.10, 3.13 and the
+Orchestrates withdrawals (`docs/design/withdrawal-flow.md`). **Tasks 3.1-3.6, 3.9, 3.10, 3.13-3.15 and the
 withdrawal-service part of 3.11 so far:** a request is recorded idempotently, validated, Reserved on the
 ledger, then signed, broadcast, confirmed and Settled in the background; confirmed txs are watched for
 Nonce Gaps; an operator can abandon a disputed request (refund or Release, 3.5). A Reaper reclaims stuck
@@ -139,6 +139,35 @@ e2e test (3.8) is not built yet.
     `service hot-wallet cancel --key withdrawal:<id>` (its README). When it is mined the Reaper's proof rule
     Releases the request (`failed` / `replaced_or_dropped`). A sign answered `410` (the key was voided) is
     left to the Reaper.
+- **`withdrawals.failed` and Whitelist `blocked`** (task 3.14, invariants #24, #25):
+  - Every `→ failed` — sign refused, tx reverted, Reaper (`stale_request`, `stale_reservation`,
+    `replaced_or_dropped`), the pre-sign re-check, `-abandon` — goes through one function that commits the
+    guarded `UPDATE` and the `withdrawals.failed` outbox row **in one transaction** (the store refuses a plain
+    `Transition` to `failed`). The outbox row is unique per request, so a request is reported once, however
+    often anything retries; Kafka key `withdrawal_id`. The event carries the reason, the tx hash and nonce when
+    the request was ever signed (the mined tx for a revert, else the latest Fee Bump version), and for
+    `tx_reverted` the revert reason. `rejected` publishes nothing: the client already got the `422`.
+  - A `tx_reverted` that is **not our fault** blocks the user's Whitelist Entry for that destination, in the
+    same transaction: the cause must be known and not the Hot Wallet short of the asset or of ETH (an unknown
+    cause blocks nothing). `blocked` wins over `pending`/`active`, validation treats it as not active
+    (`destination_not_whitelisted`), `GET /v1/whitelist` shows it, and other users' entries for the same address
+    are untouched. Re-adding a blocked entry is a no-op; **delete + re-add** is a new `pending` entry with a new
+    24h cooldown. An operator blocks (or unblocks) by SQL:
+    `UPDATE whitelist_entries SET blocked_at = now() WHERE user_id = '<u>' AND address = '<EIP-55 address>';`
+    (set `blocked_at = NULL` to lift it).
+- **Gas Fees** (task 3.15, invariant #26, `ledger.md` invariant #12): every wei of gas a mined tx of ours
+  spent is posted to the ledger exactly once (`POST /v1/ledger/gas-fees`, keyed on the tx hash, so the ledger
+  also dedupes). The receipt's `gasUsed` and `effectiveGasPrice` are written **in the same transaction as the
+  state change that makes the tx final** — `confirmed` (purpose `withdrawal`, posted after the Settle), `failed`
+  / `tx_reverted` (`withdrawal_reverted`; the user is Released in full), or the Reaper's / `-abandon`'s release
+  after a **mined Nonce Filler** (`nonce_filler`, the filler's hash from wallet-service's `GET
+  /v1/sign/hot-wallet/{key}`) — so a crash cannot lose them. A separate pass then posts every unposted record
+  until ledger-service answers `200` and stamps `gas_posted_at`. Only the version that was mined pays (a Fee
+  Bump's unmined original posts nothing); a request that never mined a tx posts nothing; a permanent refusal
+  (`400`/`409`) is an ALERT, not a retry loop; if wallet-service cannot say which fillers exist, the Reaper's
+  Release waits for the next pass rather than lose a filler's gas. Known gap: a withdrawal confirmed and then
+  reorged out keeps the Gas Fee posted at its confirmation (the design has no correction for it); requests
+  that became final before this migration have none recorded.
 - **Reaper** (task 3.9, invariant #17, `internal/pipeline/reaper.go`), one pass every `REAPER_INTERVAL`
   (30s). It frees stuck requests only when it can *prove* nothing can still reach the chain and no Hot
   Wallet nonce is left allocated but unused. Every write is a guarded `UPDATE ... WHERE status = <expected>`,

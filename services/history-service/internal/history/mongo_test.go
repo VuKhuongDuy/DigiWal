@@ -106,3 +106,56 @@ func TestMongoOutOfOrderAndRedeliveryNeverRegress(t *testing.T) {
 		t.Fatalf("a late/duplicate progress event regressed the entry: %v", d)
 	}
 }
+
+// failed is terminal and may follow confirmed (a Settled withdrawal reorged out and refunded); an
+// older event redelivered afterwards must not bring the entry back, and a failure without a tx must
+// not erase the tx hash the entry already has.
+func TestMongoFailedIsTerminalAndMayFollowConfirmed(t *testing.T) {
+	m := mongoStore(t)
+	ctx := context.Background()
+	at := time.Date(2026, 9, 29, 12, 0, 0, 0, time.UTC)
+	e := withdrawalEntry("w1", "alice", "asset", "100", "0xdest", "0xtx", 1, 50, at)
+
+	if err := m.RecordProgress(ctx, e, StatusBroadcast); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.RecordConfirmed(ctx, e); err != nil {
+		t.Fatal(err)
+	}
+	failed := e
+	failed.TxHash, failed.FailReason = "", "abandoned_refunded"
+	failed.At = at.Add(time.Hour)
+	if err := m.RecordFailed(ctx, failed); err != nil {
+		t.Fatal(err)
+	}
+	d := doc(t, m, e.ID)
+	if d["status"] != StatusFailed || d["fail_reason"] != "abandoned_refunded" || d["tx_hash"] != "0xtx" {
+		t.Fatalf("after confirmed → failed: %v", d)
+	}
+	// Redelivered (or late) older events change nothing.
+	if err := m.RecordConfirmed(ctx, e); err != nil {
+		t.Fatalf("a redelivered confirmed after failed must be a no-op, not an error: %v", err)
+	}
+	if err := m.RecordProgress(ctx, e, StatusBroadcast); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.RecordFailed(ctx, failed); err != nil {
+		t.Fatal(err)
+	}
+	if d := doc(t, m, e.ID); d["status"] != StatusFailed || count(t, m) != 1 {
+		t.Fatalf("failed was undone: %v", d)
+	}
+
+	// Failure first (never broadcast): inserts a failed entry; a late broadcast cannot undo it.
+	never := withdrawalEntry("w2", "bob", "asset", "5", "0xdest", "", 1, 0, at)
+	never.FailReason = "stale_request"
+	if err := m.RecordFailed(ctx, never); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.RecordProgress(ctx, never, StatusBroadcast); err != nil {
+		t.Fatal(err)
+	}
+	if d := doc(t, m, never.ID); d["status"] != StatusFailed || d["tx_hash"] != "" {
+		t.Fatalf("%v", d)
+	}
+}

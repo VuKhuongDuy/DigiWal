@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"time"
 
 	"digiwal/services/withdrawal-service/internal/chain"
 	"digiwal/services/withdrawal-service/internal/store"
@@ -18,7 +19,7 @@ const (
 type AbandonStore interface {
 	GetByID(ctx context.Context, id string) (store.Withdrawal, error)
 	ListTxs(ctx context.Context, id string) ([]store.Tx, error)
-	Transition(ctx context.Context, id, from, to string, reason *string) (store.Withdrawal, error)
+	MarkFailed(ctx context.Context, id, from, reason, blockAddress string, gas *store.GasRecord, event func(store.Withdrawal) (string, []byte, error)) (store.Withdrawal, error)
 }
 
 type AbandonLedger interface {
@@ -36,7 +37,7 @@ type AbandonLedger interface {
 //   - it had not: its Lock is simply Released (no Entry was ever posted).
 //
 // Then `disputed → failed`. Every step is idempotent, so a crash halfway is fixed by running it again.
-func Abandon(ctx context.Context, st AbandonStore, lg AbandonLedger, ch chain.Chain, id string) (store.Withdrawal, error) {
+func Abandon(ctx context.Context, st AbandonStore, lg AbandonLedger, ch chain.Chain, fillers Fillers, id string) (store.Withdrawal, error) {
 	w, err := st.GetByID(ctx, id)
 	if err != nil {
 		return store.Withdrawal{}, err
@@ -84,7 +85,14 @@ func Abandon(ctx context.Context, st AbandonStore, lg AbandonLedger, ch chain.Ch
 	} else if err := lg.Release(ctx, w.Key()); err != nil {
 		return store.Withdrawal{}, fmt.Errorf("releasing: %w", err)
 	}
-	out, err := st.Transition(ctx, w.ID, store.StatusDisputed, store.StatusFailed, &reason)
+	gas, err := fillerGas(ctx, fillers, ch, w.Key()) // the filler that consumed the nonce paid gas too (task 3.15)
+	if err != nil {
+		return store.Withdrawal{}, fmt.Errorf("looking for a mined Nonce Filler: %w", err)
+	}
+	if err := failWith(ctx, st, w, store.StatusDisputed, failure{reason: reason, gas: gas}, 0, time.Now()); err != nil {
+		return store.Withdrawal{}, err
+	}
+	out, err := st.GetByID(ctx, w.ID)
 	if err != nil {
 		return store.Withdrawal{}, err
 	}

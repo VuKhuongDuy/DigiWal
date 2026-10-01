@@ -174,6 +174,19 @@ func TestWithdrawals(t *testing.T) {
 		if want := new(big.Int).Sub(eth1(2), amount).String(); b.total != want || b.locked != "0" || b.available != want {
 			t.Errorf("alice's ledger balance = %+v, want total/available %s and nothing locked", b, want)
 		}
+		// The gas of the mined tx is in the ledger, once: gas_used × effective_gas_price from its receipt,
+		// {gas_expense −fee, chain +fee}, and not charged to alice (checked above: only `amount` left her balance).
+		rc, err := eth.TransactionReceipt(ctx, common.HexToHash(nativeTx))
+		if err != nil {
+			t.Fatal(err)
+		}
+		fee := new(big.Int).Mul(new(big.Int).SetUint64(rc.GasUsed), rc.EffectiveGasPrice)
+		waitFor(t, 60*time.Second, "the withdrawal's Gas Fee in the ledger", func() (bool, string) {
+			row := psql(t, "ledger", fmt.Sprintf(`SELECT count(*) || '|' || coalesce(sum(e.amount) FILTER (WHERE a.kind = 'gas_expense'), 0) || '|' || coalesce(max(l.purpose), '')
+				FROM ledger_transactions l JOIN entries e ON e.ledger_transaction_id = l.id JOIN accounts a ON a.id = e.account_id
+				WHERE l.idempotency_key = 'gas:31337:%s'`, strings.ToLower(nativeTx)))
+			return row == "2|-"+fee.String()+"|withdrawal", row
+		})
 		// Only one payout, ever.
 		time.Sleep(3 * time.Second)
 		if got := balance(ctx, t, eth, destA); got.Cmp(amount) != 0 {
@@ -327,6 +340,14 @@ func TestWithdrawals(t *testing.T) {
 		}
 		if st, _ := carol.status(t, "gap-1"); st != "failed" {
 			t.Errorf("gap-1 is %q after abandon", st)
+		}
+		// withdrawals.failed reached history-service for both failures (invariant #24), and the one that
+		// had Settled went confirmed → failed there.
+		for id, reason := range map[string]string{id: "abandoned_refunded", id2: "stale_reservation"} {
+			waitFor(t, 60*time.Second, "history to record the failure of "+id, func() (bool, string) {
+				d := historyDoc(t, id)
+				return strings.Contains(d, `"status":"failed"`) && strings.Contains(d, `"fail_reason":"`+reason+`"`), d
+			})
 		}
 		if b := carol.ledger(t)[ethAssetID]; b.total != eth1(3).String() || b.locked != "0" || b.available != eth1(3).String() {
 			t.Errorf("carol's balance after the refund = %+v, want her full 3 ETH back", b)
@@ -558,4 +579,11 @@ func revert(ctx context.Context, t *testing.T, c *rpc.Client, id string) {
 	if err := c.CallContext(ctx, &ok, "evm_revert", id); err != nil || !ok {
 		t.Fatalf("evm_revert(%s): %v %v", id, ok, err)
 	}
+}
+
+// historyDoc is history-service's MongoDB document for a withdrawal (the read model has no query API yet).
+func historyDoc(t *testing.T, withdrawalID string) string {
+	t.Helper()
+	return compose(t, "exec", "-T", "mongo", "mongosh", "--quiet", "-u", "custody", "-p", "custody", "--authenticationDatabase", "admin", "history",
+		"--eval", fmt.Sprintf(`JSON.stringify(db.history.findOne({_id: "withdrawal:%s"}) || {})`, withdrawalID))
 }

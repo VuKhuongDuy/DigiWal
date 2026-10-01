@@ -19,6 +19,9 @@ import (
 type Receipt struct {
 	BlockNumber int64
 	Success     bool
+	// GasUsed and EffectiveGasPrice (wei) are what the tx cost: the ledger's Gas Fee is their product.
+	GasUsed           uint64
+	EffectiveGasPrice *big.Int
 }
 
 type Chain interface {
@@ -159,7 +162,12 @@ func (e *Eth) Receipt(ctx context.Context, hash common.Hash) (*Receipt, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Receipt{BlockNumber: r.BlockNumber.Int64(), Success: r.Status == types.ReceiptStatusSuccessful}, nil
+	price := r.EffectiveGasPrice
+	if price == nil {
+		price = new(big.Int)
+	}
+	return &Receipt{BlockNumber: r.BlockNumber.Int64(), Success: r.Status == types.ReceiptStatusSuccessful,
+		GasUsed: r.GasUsed, EffectiveGasPrice: price}, nil
 }
 
 // Decode parses a signed raw tx.

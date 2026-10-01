@@ -127,6 +127,25 @@ func TestDepositCreditsBalanceAndSweepsToHotWallet(t *testing.T) {
 		}
 	})
 
+	// Gas Fees (ledger.md invariant #12, task 2.8): each mined Gas Top-Up and Sweep reported its gas to the
+	// ledger — bob's token sweep needed one top-up, alice's native sweep and bob's token sweep are two sweeps.
+	t.Run("sweeper reports its gas to the ledger", func(t *testing.T) {
+		waitFor(t, 60*time.Second, "the sweeper's Gas Fees", func() (bool, string) {
+			row := psql(t, "ledger", `SELECT coalesce(sum((purpose = 'gas_topup')::int), 0) || '|' || coalesce(sum((purpose = 'sweep')::int), 0)
+				FROM ledger_transactions WHERE source_type = 'gas_fee'`)
+			var topups, sweeps int
+			fmt.Sscanf(row, "%d|%d", &topups, &sweeps)
+			return topups >= 1 && sweeps >= 2, row
+		})
+		// Every one is the exact two-entry shape, and no user account was touched by gas.
+		bad := psql(t, "ledger", `SELECT count(*) FROM ledger_transactions l WHERE l.source_type = 'gas_fee' AND (
+			(SELECT count(*) FROM entries e WHERE e.ledger_transaction_id = l.id) <> 2
+			OR EXISTS (SELECT 1 FROM entries e JOIN accounts a ON a.id = e.account_id WHERE e.ledger_transaction_id = l.id AND a.kind = 'user'))`)
+		if bad != "0" {
+			t.Errorf("%s gas_fee transactions are malformed or touched a user account", bad)
+		}
+	})
+
 	// Isolation and no double credit: carol saw nothing, and neither balance moved again.
 	t.Run("no stray credits", func(t *testing.T) {
 		time.Sleep(5 * time.Second)

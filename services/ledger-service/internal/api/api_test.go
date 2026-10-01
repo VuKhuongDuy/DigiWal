@@ -24,6 +24,8 @@ type fake struct {
 	gotKey  string
 	calls   int
 	sheet   []ledger.AssetBalance
+	gas     ledger.GasFeeResult
+	gotGas  ledger.GasFee
 }
 
 func (f *fake) Apply(_ context.Context, t ledger.Transaction) (ledger.Status, error) {
@@ -45,6 +47,12 @@ func (f *fake) Release(_ context.Context, key string) error {
 	f.calls++
 	f.gotKey = key
 	return f.err
+}
+
+func (f *fake) PostGasFee(_ context.Context, g ledger.GasFee) (ledger.GasFeeResult, error) {
+	f.calls++
+	f.gotGas = g
+	return f.gas, f.err
 }
 
 func (f *fake) BalanceSheet(_ context.Context, userID, assetID string) ([]ledger.AssetBalance, error) {
@@ -248,5 +256,62 @@ func TestBalancesWireContract(t *testing.T) {
 	// An empty sheet is an empty array, never null.
 	if rec := get(&fake{}, "api-gateway", "/v1/ledger/balances/alice"); strings.TrimSpace(rec.Body.String()) != "[]" {
 		t.Fatalf("empty sheet = %s", rec.Body)
+	}
+}
+
+const gasBody = `{"chain_id":31337,"tx_hash":"0x1111111111111111111111111111111111111111111111111111111111111111","gas_used":21000,"effective_gas_price":"2000000000","purpose":"gas_topup"}`
+
+// ledger.md invariant #12: gas-fees has its own allow-list (the two signers), and sweeper still cannot
+// reach apply, the Locks, or anything else.
+func TestGasFeesAreReportedByTheTwoSignersOnly(t *testing.T) {
+	for cn, want := range map[string]int{"withdrawal-service": 200, "sweeper": 200, "api-gateway": 403, "chain-watcher": 403, "": 403} {
+		f := &fake{gas: ledger.GasFeeResult{TransactionID: "tx1", Amount: big.NewInt(42)}}
+		if got := call(t, f, cn, "/v1/ledger/gas-fees", gasBody).Code; got != want {
+			t.Errorf("CN=%q: %d, want %d", cn, got, want)
+		}
+		if want == 403 && f.calls != 0 {
+			t.Errorf("CN=%q reached the ledger", cn)
+		}
+	}
+	for path, body := range endpoints { // sweeper is still 403 on apply and the Lock trio
+		if got := call(t, &fake{}, "sweeper", path, body).Code; got != 403 {
+			t.Errorf("sweeper reached %s: %d", path, got)
+		}
+	}
+}
+
+func TestGasFee_WireContract(t *testing.T) {
+	f := &fake{gas: ledger.GasFeeResult{TransactionID: "tx1", Amount: big.NewInt(42000000000000)}}
+	rec := call(t, f, "sweeper", "/v1/ledger/gas-fees", gasBody)
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), `"ledger_transaction_id":"tx1"`) || !strings.Contains(rec.Body.String(), `"amount":"42000000000000"`) {
+		t.Fatalf("%d %s", rec.Code, rec.Body)
+	}
+	g := f.gotGas
+	if g.ChainID != 31337 || g.GasUsed != 21000 || g.EffectiveGasPrice.String() != "2000000000" || g.Purpose != "gas_topup" {
+		t.Fatalf("parsed wrong: %+v", g)
+	}
+	// A zero fee answers 200 with no transaction.
+	f = &fake{gas: ledger.GasFeeResult{Amount: new(big.Int)}}
+	if rec := call(t, f, "sweeper", "/v1/ledger/gas-fees", gasBody); rec.Code != 200 || !strings.Contains(rec.Body.String(), `"ledger_transaction_id":null`) {
+		t.Fatalf("%d %s", rec.Code, rec.Body)
+	}
+	for _, bad := range []string{`not json`, `{"effective_gas_price":"-1"}`, `{"effective_gas_price":"1.5"}`, `{"effective_gas_price":"+5"}`, `{"effective_gas_price":""}`, gasBody[:len(gasBody)-1] + `,"account_id":"x"}`} {
+		if got := call(t, &fake{}, "sweeper", "/v1/ledger/gas-fees", bad).Code; got != 400 {
+			t.Errorf("%q → %d, want 400", bad, got)
+		}
+	}
+	for err, want := range map[error]int{ledger.ErrIdempotencyKeyReused: 409, ledger.ErrInvalid: 400, ledger.ErrUnknownAsset: 400, errors.New("db"): 500} {
+		if got := call(t, &fake{err: err}, "sweeper", "/v1/ledger/gas-fees", gasBody).Code; got != want {
+			t.Errorf("%v → %d, want %d", err, got, want)
+		}
+	}
+}
+
+// POST /v1/ledger/transactions stays correction-only: a gas_fee cannot be posted through it.
+func TestApplyStillRefusesGasFeeSourceType(t *testing.T) {
+	body := `{"idempotency_key":"x","source_type":"gas_fee","entries":[{"account_ref":"chain","asset_id":"` + eth + `","amount":"5"},{"account_ref":"gas_expense","asset_id":"` + eth + `","amount":"-5"}]}`
+	f := &fake{}
+	if got := call(t, f, "withdrawal-service", "/v1/ledger/transactions", body).Code; got != 400 || f.calls != 0 {
+		t.Fatalf("%d, calls %d", got, f.calls)
 	}
 }

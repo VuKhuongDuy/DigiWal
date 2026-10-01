@@ -413,7 +413,7 @@ type disputedStore struct {
 
 func (d disputedStore) GetByID(context.Context, string) (store.Withdrawal, error) { return d.w, nil }
 func (d disputedStore) ListTxs(context.Context, string) ([]store.Tx, error)       { return d.txs, nil }
-func (d disputedStore) Transition(context.Context, string, string, string, *string) (store.Withdrawal, error) {
+func (d disputedStore) MarkFailed(context.Context, string, string, string, string, *store.GasRecord, func(store.Withdrawal) (string, []byte, error)) (store.Withdrawal, error) {
 	return d.w, nil
 }
 
@@ -425,7 +425,7 @@ func TestAbandonRefusesWhenAFeeBumpIsMined(t *testing.T) {
 	rep, _ := r.signer.ReplaceHotWallet(context.Background(), w.Key(), 1)
 	r.chain.receipts[common.HexToHash(rep.Hash)] = &chain.Receipt{BlockNumber: 5, Success: true}
 	r.chain.minedNonce = 5
-	_, err := Abandon(context.Background(), disputedStore{w: w, txs: []store.Tx{{Seq: 1, Hash: rep.Hash, Raw: rep.RawTx}}}, r.ledger, r.chain, w.ID)
+	_, err := Abandon(context.Background(), disputedStore{w: w, txs: []store.Tx{{Seq: 1, Hash: rep.Hash, Raw: rep.RawTx}}}, r.ledger, r.chain, nil, w.ID)
 	if err == nil || !strings.Contains(err.Error(), "is mined") || len(r.ledger.released) != 0 {
 		t.Fatalf("abandon = %v released %v", err, r.ledger.released)
 	}

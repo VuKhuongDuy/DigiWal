@@ -24,7 +24,7 @@ func (r *rig) disputeConfirmed(key string) store.Withdrawal {
 }
 
 func abandon(r *rig, id string) (store.Withdrawal, error) {
-	return Abandon(context.Background(), r.st, r.ledger, r.chain, id)
+	return Abandon(context.Background(), r.st, r.ledger, r.chain, nil, id)
 }
 
 // Settled, then reorged out: once nonce N is provably consumed, a Compensating Entry reverses

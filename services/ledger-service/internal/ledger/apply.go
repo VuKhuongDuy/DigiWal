@@ -21,6 +21,9 @@ const (
 	SourceCorrection SourceType = "correction"
 	// SourceWithdrawalSettle is posted only by Settle (locks.go), never through Apply.
 	SourceWithdrawalSettle SourceType = "withdrawal_settle"
+	// SourceGasFee is posted only by PostGasFee (gasfee.go): POST /v1/ledger/gas-fees, never Apply's
+	// public endpoint.
+	SourceGasFee SourceType = "gas_fee"
 )
 
 type AccountRef string
@@ -28,6 +31,9 @@ type AccountRef string
 const (
 	RefUser  AccountRef = "user"
 	RefChain AccountRef = "chain"
+	// RefGasExpense is the native asset's Gas Expense Account (ledger.md invariant #12): a gas_fee's
+	// counterparty to the Chain Account. Never named by a caller; PostGasFee derives it.
+	RefGasExpense AccountRef = "gas_expense"
 )
 
 // Entry is one signed posting. Positive credits the account, negative debits it.
@@ -58,6 +64,14 @@ type Transaction struct {
 	Source         SourceType
 	Entries        []Entry
 	Deposit        *DepositRef // deposits only
+	Gas            *GasRef     // gas fees only
+	Purpose        string      // gas fees only
+}
+
+// GasRef is the mined tx a Gas Fee accounts for; stored on the ledger transaction for reporting.
+type GasRef struct {
+	ChainID int64
+	TxHash  string
 }
 
 type Status string
@@ -90,12 +104,15 @@ func (t Transaction) Validate() error {
 		return bad("idempotency_key is required (max 256 chars)")
 	}
 	switch t.Source {
-	case SourceDeposit, SourceCorrection: // Settle has its own operation (ledger.md); it never goes through Apply
+	case SourceDeposit, SourceCorrection, SourceGasFee: // Settle has its own operation (ledger.md); it never goes through Apply
 	default:
-		return bad("source_type must be deposit or correction, got %q", t.Source)
+		return bad("source_type must be deposit, correction or gas_fee, got %q", t.Source)
 	}
 	if (t.Source == SourceDeposit) != (t.Deposit != nil) {
 		return bad("a deposit carries its (chain_id, tx_hash, log_index), and only a deposit does")
+	}
+	if (t.Source == SourceGasFee) != (t.Gas != nil) || (t.Source == SourceGasFee) != (t.Purpose != "") {
+		return bad("a gas fee carries its (chain_id, tx_hash) and a purpose, and only a gas fee does")
 	}
 	if len(t.Entries) < 2 {
 		return bad("a ledger transaction needs at least 2 entries")
@@ -130,12 +147,12 @@ func (t Transaction) Validate() error {
 			if e.UserID == "" {
 				return bad("entry %d: a user entry needs user_id", i)
 			}
-		case RefChain:
+		case RefChain, RefGasExpense:
 			if e.UserID != "" {
-				return bad("entry %d: a chain entry must not carry user_id", i)
+				return bad("entry %d: a %s entry must not carry user_id", i, e.Ref)
 			}
 		default:
-			return bad("entry %d: account_ref must be user or chain", i)
+			return bad("entry %d: account_ref must be user, chain or gas_expense", i)
 		}
 		k := strings.ToLower(e.AssetID)
 		if sums[k] == nil {
@@ -167,6 +184,9 @@ func (t Transaction) hash() string {
 	if t.Deposit != nil {
 		dep = fmt.Sprintf("%d|%s|%d", t.Deposit.ChainID, strings.ToLower(t.Deposit.TxHash), t.Deposit.LogIndex)
 	}
+	if t.Gas != nil {
+		dep = fmt.Sprintf("%d|%s|%s", t.Gas.ChainID, strings.ToLower(t.Gas.TxHash), t.Purpose)
+	}
 	sum := sha256.Sum256([]byte(string(t.Source) + "#" + dep + "#" + strings.Join(es, ";")))
 	return hex.EncodeToString(sum[:])
 }
@@ -190,19 +210,23 @@ func (s *Store) Apply(ctx context.Context, t Transaction) (Status, error) {
 	defer tx.Rollback(ctx)
 
 	var chainID, logIndex *int64
-	var txHash *string
+	var txHash, purpose *string
 	if t.Deposit != nil {
 		h := strings.ToLower(t.Deposit.TxHash)
 		chainID, txHash, logIndex = &t.Deposit.ChainID, &h, &t.Deposit.LogIndex
+	}
+	if t.Gas != nil { // no log_index: a gas fee's uniqueness is its idempotency key
+		h := strings.ToLower(t.Gas.TxHash)
+		chainID, txHash, purpose = &t.Gas.ChainID, &h, &t.Purpose
 	}
 	hash := t.hash()
 
 	var txID string
 	err = tx.QueryRow(ctx, `
-		INSERT INTO ledger_transactions (source_type, idempotency_key, request_hash, chain_id, tx_hash, log_index)
-		VALUES ($1, $2, $3, $4, $5, $6)
+		INSERT INTO ledger_transactions (source_type, idempotency_key, request_hash, chain_id, tx_hash, log_index, purpose)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
 		ON CONFLICT (idempotency_key) DO NOTHING
-		RETURNING id`, string(t.Source), t.IdempotencyKey, hash, chainID, txHash, logIndex).Scan(&txID)
+		RETURNING id`, string(t.Source), t.IdempotencyKey, hash, chainID, txHash, logIndex, purpose).Scan(&txID)
 	switch {
 	case errors.Is(err, pgx.ErrNoRows): // this key was applied before
 		var prev string
@@ -256,7 +280,7 @@ func (s *Store) Apply(ctx context.Context, t Transaction) (Status, error) {
 		// Balance (total - locked), so a correction can't undercut an active Lock.
 		tag, err := tx.Exec(ctx, `
 			UPDATE accounts SET total_balance = total_balance + $2::numeric
-			WHERE id = $1 AND (kind = 'chain' OR total_balance - locked_balance + $2::numeric >= 0)`, id, net[id].String())
+			WHERE id = $1 AND (kind IN ('chain', 'gas_expense') OR total_balance - locked_balance + $2::numeric >= 0)`, id, net[id].String())
 		if err != nil {
 			return "", fmt.Errorf("updating balance: %w", err)
 		}
@@ -355,9 +379,12 @@ func resolveAccount(ctx context.Context, tx pgx.Tx, ref AccountRef, userID, asse
 	}
 	var id string
 	var err error
-	if ref == RefChain {
+	switch ref {
+	case RefChain:
 		err = tx.QueryRow(ctx, `SELECT id FROM accounts WHERE asset_id = $1 AND kind = 'chain'`, assetID).Scan(&id)
-	} else {
+	case RefGasExpense:
+		err = tx.QueryRow(ctx, `SELECT id FROM accounts WHERE asset_id = $1 AND kind = 'gas_expense'`, assetID).Scan(&id)
+	default:
 		err = tx.QueryRow(ctx, `
 			INSERT INTO accounts (asset_id, kind, user_id) VALUES ($1, 'user', $2)
 			ON CONFLICT (asset_id, user_id) WHERE kind = 'user' DO UPDATE SET user_id = EXCLUDED.user_id

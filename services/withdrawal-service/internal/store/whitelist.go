@@ -8,10 +8,12 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// Whitelist Entry states. Only `pending` → `active` exists, and it is a function of time.
+// Whitelist Entry states. `pending` → `active` is a function of time; `blocked` is stored (invariant
+// #25) and wins: a destination that made a withdrawal revert through no fault of ours.
 const (
 	WhitelistPending = "pending"
 	WhitelistActive  = "active"
+	WhitelistBlocked = "blocked"
 )
 
 type WhitelistEntry struct {
@@ -19,11 +21,16 @@ type WhitelistEntry struct {
 	UserID  string
 	Address string // EIP-55
 	AddedAt time.Time
+	// BlockedAt is set when the entry was blocked (invariant #25); nil otherwise.
+	BlockedAt *time.Time
 }
 
 // Status is the entry's state at now: active once cooldown has passed since AddedAt
 // (invariant #13), computed on read.
 func (e WhitelistEntry) Status(now time.Time, cooldown time.Duration) string {
+	if e.BlockedAt != nil {
+		return WhitelistBlocked
+	}
 	if !now.Before(e.AddedAt.Add(cooldown)) {
 		return WhitelistActive
 	}
@@ -37,8 +44,8 @@ func (s *Store) AddWhitelistEntry(ctx context.Context, userID, address string) (
 	err = s.pool.QueryRow(ctx, `
 		INSERT INTO whitelist_entries (user_id, address) VALUES ($1, $2)
 		ON CONFLICT (user_id, address) DO NOTHING
-		RETURNING id, user_id, address, added_at`, userID, address).
-		Scan(&e.ID, &e.UserID, &e.Address, &e.AddedAt)
+		RETURNING id, user_id, address, added_at, blocked_at`, userID, address).
+		Scan(&e.ID, &e.UserID, &e.Address, &e.AddedAt, &e.BlockedAt)
 	if err == nil {
 		return e, true, nil
 	}
@@ -46,8 +53,8 @@ func (s *Store) AddWhitelistEntry(ctx context.Context, userID, address string) (
 		return WhitelistEntry{}, false, err
 	}
 	err = s.pool.QueryRow(ctx, `
-		SELECT id, user_id, address, added_at FROM whitelist_entries WHERE user_id = $1 AND address = $2`,
-		userID, address).Scan(&e.ID, &e.UserID, &e.Address, &e.AddedAt)
+		SELECT id, user_id, address, added_at, blocked_at FROM whitelist_entries WHERE user_id = $1 AND address = $2`,
+		userID, address).Scan(&e.ID, &e.UserID, &e.Address, &e.AddedAt, &e.BlockedAt)
 	return e, false, err
 }
 
@@ -55,14 +62,14 @@ func (s *Store) AddWhitelistEntry(ctx context.Context, userID, address string) (
 // did not add while it is still pending (the reason the cooldown exists).
 func (s *Store) ListWhitelist(ctx context.Context, userID string) ([]WhitelistEntry, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT id, user_id, address, added_at FROM whitelist_entries
+		SELECT id, user_id, address, added_at, blocked_at FROM whitelist_entries
 		WHERE user_id = $1 ORDER BY added_at DESC, id`, userID)
 	if err != nil {
 		return nil, err
 	}
 	return pgx.CollectRows(rows, func(r pgx.CollectableRow) (WhitelistEntry, error) {
 		var e WhitelistEntry
-		err := r.Scan(&e.ID, &e.UserID, &e.Address, &e.AddedAt)
+		err := r.Scan(&e.ID, &e.UserID, &e.Address, &e.AddedAt, &e.BlockedAt)
 		return e, err
 	})
 }
@@ -79,18 +86,21 @@ func (s *Store) RemoveWhitelistEntry(ctx context.Context, userID, id string) err
 // The cooldown comparison runs against the database clock, so the app's clock cannot
 // disagree with the stored added_at.
 func (s *Store) WhitelistStatus(ctx context.Context, userID, address string, cooldown time.Duration) (status string, ok bool, err error) {
-	var active bool
+	var active, blocked bool
 	err = s.pool.QueryRow(ctx, `
-		SELECT now() >= added_at + make_interval(secs => $3)
+		SELECT now() >= added_at + make_interval(secs => $3), blocked_at IS NOT NULL
 		FROM whitelist_entries WHERE user_id = $1 AND address = $2`,
-		userID, address, cooldown.Seconds()).Scan(&active)
+		userID, address, cooldown.Seconds()).Scan(&active, &blocked)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", false, nil
 	}
 	if err != nil {
 		return "", false, err
 	}
-	if active {
+	switch {
+	case blocked:
+		return WhitelistBlocked, true, nil
+	case active:
 		return WhitelistActive, true, nil
 	}
 	return WhitelistPending, true, nil

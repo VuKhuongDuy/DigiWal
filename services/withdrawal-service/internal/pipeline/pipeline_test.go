@@ -188,15 +188,25 @@ func (c *fakeChain) mine(success bool) {
 	for _, raw := range c.sent {
 		h, _ := chain.TxHash(raw)
 		if c.receipts[h] == nil {
-			c.receipts[h] = &chain.Receipt{BlockNumber: c.head, Success: success}
+			c.receipts[h] = &chain.Receipt{BlockNumber: c.head, Success: success, GasUsed: 21000, EffectiveGasPrice: big.NewInt(2_000_000_000)}
 		}
 	}
 }
 
 type fakeLedger struct {
+	gasPosts          []ledger.GasFee
+	gasErr            error // returned by PostGasFee while set
 	settled, released []string
 	refunds           map[string][]string
 	settleErr         error
+}
+
+func (l *fakeLedger) PostGasFee(_ context.Context, g ledger.GasFee) error {
+	if l.gasErr != nil {
+		return l.gasErr
+	}
+	l.gasPosts = append(l.gasPosts, g)
+	return nil
 }
 
 func (l *fakeLedger) Refund(_ context.Context, key string, entries []string) error {

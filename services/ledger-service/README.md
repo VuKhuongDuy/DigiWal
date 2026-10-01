@@ -21,6 +21,19 @@ balance goes through one operation, `Apply`.
   - `POST /v1/ledger/locks/{key}/release`: gives the capacity back, posts nothing.
   - Settled xor released, exactly once. A conflicting resolution is **`409`, never `200`**, so the
     caller can't mistake a released lock for a debited one.
+- **Gas Fees** (task 1.9, `ledger.md` invariant #12): `POST /v1/ledger/gas-fees`
+  `{chain_id, tx_hash, gas_used, effective_gas_price, purpose}` (`gas_used` a number, `effective_gas_price` a
+  decimal string in wei; `purpose` is one of `withdrawal`, `withdrawal_reverted`, `nonce_filler`, `gas_topup`,
+  `sweep`, `treasury_sweep`) → `200 {ledger_transaction_id, amount}`. Gas our own mined txs burn is not any
+  user's, so each tx posts one Ledger Transaction `{Gas Expense Account −fee, Chain Account +fee}` in the
+  native asset (`source_type = 'gas_fee'`), where `fee = gas_used × effective_gas_price` is computed here:
+  the caller never sends a total or an account. Key `gas:{chain_id}:{tx_hash}`: a replay with the same values
+  returns the same transaction, different values for the same tx are `409`; a zero fee posts nothing
+  (`ledger_transaction_id: null`). The Gas Expense Account (one per native asset, created with the Chain
+  Account) only ever decreases and, like the Chain Account, may go negative; a user's balance is never
+  touched. Allowed CNs: `withdrawal-service` and `sweeper` — a separate allow-list, so `sweeper` still
+  cannot reach `apply` or the Locks. `POST /v1/ledger/transactions` still refuses any `source_type` but
+  `correction`.
 - **`POST /v1/ledger/transactions`** posts a **correction** only: it names the entries to reverse
   (`corrects_entry_id`); the account and amount are derived server-side as their exact negation and
   whatever the caller sends for them is ignored. Every leg must be reversed, and an entry can be

@@ -19,7 +19,25 @@ decides, broadcasts and waits.
 Nothing is remembered between attempts (idempotent by construction, invariants #8, #10): a redelivered event, a crash
 after broadcast, or a retry after a timeout re-reads the chain and converges. It also refuses to sign while a
 transaction from the user address is still in the mempool (pending nonce > latest), so a retry cannot stack a second
-sweep behind one that is about to spend the same balance. A Sweep never touches the Ledger (invariant #9).
+sweep behind one that is about to spend the same balance. A Sweep never touches a user's balance in the Ledger
+(invariant #9); the only thing it reports is its gas (below).
+
+**A stuck Gas Top-Up is Fee Bumped** (task 2.8, `deposit-flow.md` invariant #18, `withdrawal-flow.md` #21). A Gas
+Top-Up is a Hot Wallet tx, so one that is stuck underpriced holds a Hot Wallet nonce and every withdrawal queues behind
+it. While waiting for it to be mined, sweeper asks wallet-service (`GET /v1/sign/hot-wallet/{key}`, `CN=sweeper`, own
+`gas-topup:…` keys only) for the key's versions, then re-signs it with `POST …/replace` — same tx, same nonce, fees
+×1.125, under wallet-service's 50 gwei ceiling — when the node refuses it as underpriced, or when it has not been mined
+`FEE_BUMP_AFTER_BLOCKS` (20) blocks after it was last sent and its max fee is below the current base fee. At most
+`MAX_FEE_BUMPS` (5), then an `ALERT` (a refusal — the ceiling, or an operator's Nonce Filler — is an `ALERT` too, and
+sweeper stops asking). Only the latest version is re-sent, every version's receipt is watched, and whichever is mined
+ends the wait: a retry after a crash or timeout continues from the latest replacement instead of the original.
+
+**Gas Fees** (`ledger.md` invariant #12): after each mined Gas Top-Up and Sweep, sweeper posts its gas to
+`POST /v1/ledger/gas-fees` (`LEDGER_SERVICE_URL`, its own certificate; purpose `gas_topup` / `sweep`) with the receipt's
+`gasUsed` and `effectiveGasPrice`; ledger-service computes the fee and dedupes on the tx hash, so a retry cannot double
+it. For a bumped top-up it is the **mined** version's gas. Best effort, by decision (`ledger.md` Open Questions #6):
+a few attempts, then an `ALERT`, and it never fails the Sweep — sweeper keeps no state, so a crash between a tx being
+mined and its Gas Fee being posted loses that fee (a small drift, accepted).
 
 Failures: **transient** (RPC/wallet-service down, revert, not mined in time) back off and retry; after `MAX_ATTEMPTS` (10)
 the record is given up on with an `ALERT` log line and committed, so one stuck address cannot halt every later sweep.
@@ -31,11 +49,12 @@ event for that address sweeps its whole balance.
 
 | Env | Default | |
 |---|---|---|
-| `KAFKA_BROKERS`, `RPC_URL`, `ASSETS_FILE`, `SCREENING_FILE`, `WALLET_SERVICE_URL`, `TLS_CERT_FILE`, `TLS_KEY_FILE`, `TLS_CA_FILE` | required | |
+| `KAFKA_BROKERS`, `RPC_URL`, `ASSETS_FILE`, `SCREENING_FILE`, `WALLET_SERVICE_URL`, `LEDGER_SERVICE_URL`, `TLS_CERT_FILE`, `TLS_KEY_FILE`, `TLS_CA_FILE` | required | |
 | `GAS_TOPUP_WEI` | `1000000000000000` | 0.001 ETH (decided, `deposit-flow.md`) |
 | `SWEEP_GAS_RESERVE_WEI` | `650000000000000` | below this an ERC-20 address gets a top-up: 65,000 gas x 10 gwei, the design's own arithmetic |
 | `INCLUSION_TIMEOUT` / `POLL_INTERVAL` | `5m` / `3s` | wait for a broadcast tx to be mined |
 | `MAX_ATTEMPTS` | `10` | transient attempts per record |
+| `FEE_BUMP_AFTER_BLOCKS` / `MAX_FEE_BUMPS` | `20` / `5` | Fee Bump of a stuck Gas Top-Up (decided) |
 
 ## Please confirm / known gaps
 

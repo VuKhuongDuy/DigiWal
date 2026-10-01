@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 
@@ -156,4 +157,87 @@ func ClientTLSConfig(certFile, keyFile, caFile string) (*tls.Config, error) {
 		return nil, fmt.Errorf("no certificates found in %s", caFile)
 	}
 	return &tls.Config{Certificates: []tls.Certificate{cert}, RootCAs: pool, MinVersion: tls.VersionTLS13}, nil
+}
+
+// Version is one signed form of a Hot Wallet key's tx: its Fee Bumps, or an operator's Nonce Filler.
+type Version struct {
+	Seq  int
+	Kind string // fee_bump | cancel
+	Raw  []byte
+	Hash string
+}
+
+// HotKey is wallet-service's view of a key sweeper signed (GET /v1/sign/hot-wallet/{key}): the
+// original and every replacement, so a retry knows the next replacement_seq and every hash to watch.
+type HotKey struct {
+	Raw          []byte
+	Hash         string
+	Replacements []Version
+}
+
+// LookupHotKey is GET /v1/sign/hot-wallet/{key}. nil, nil when the key was never signed.
+func (c *Client) LookupHotKey(ctx context.Context, key string) (*HotKey, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(c.BaseURL, "/")+"/v1/sign/hot-wallet/"+url.PathEscape(key), nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.HTTP.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("calling wallet-service key lookup: %w", err)
+	}
+	defer resp.Body.Close()
+	payload, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
+	switch resp.StatusCode {
+	case http.StatusOK:
+	case http.StatusNotFound:
+		return nil, nil
+	default:
+		return nil, fmt.Errorf("wallet-service key lookup answered %d: %s", resp.StatusCode, strings.TrimSpace(string(payload)))
+	}
+	var out struct {
+		SignedRawTx  string `json:"signed_raw_tx"`
+		TxHash       string `json:"tx_hash"`
+		Replacements []struct {
+			Seq    int    `json:"replacement_seq"`
+			Kind   string `json:"kind"`
+			Raw    string `json:"signed_raw_tx"`
+			TxHash string `json:"tx_hash"`
+		} `json:"replacements"`
+	}
+	if err := json.Unmarshal(payload, &out); err != nil {
+		return nil, fmt.Errorf("wallet-service returned an unusable key view: %q", payload)
+	}
+	k := &HotKey{Hash: strings.ToLower(out.TxHash)}
+	var err2 error
+	if k.Raw, err2 = decodeTx(out.SignedRawTx); err2 != nil {
+		return nil, err2
+	}
+	for _, r := range out.Replacements {
+		raw, err := decodeTx(r.Raw)
+		if err != nil {
+			return nil, err
+		}
+		k.Replacements = append(k.Replacements, Version{Seq: r.Seq, Kind: r.Kind, Raw: raw, Hash: strings.ToLower(r.TxHash)})
+	}
+	return k, nil
+}
+
+// ReplaceHotWallet is POST /v1/sign/hot-wallet/{key}/replace: the same Gas Top-Up re-signed at the same
+// nonce with higher fees (a Fee Bump, withdrawal-flow.md invariant #21). The same seq replays the stored
+// replacement, so a retry after a lost answer is safe. A refusal (fee ceiling 422, a Nonce Filler 409,
+// 404) is ErrPermanent; a Nonce Gap freeze (503) is transient.
+func (c *Client) ReplaceHotWallet(ctx context.Context, key string, seq int) ([]byte, string, error) {
+	var out struct {
+		SignedRawTx string `json:"signed_raw_tx"`
+		TxHash      string `json:"tx_hash"`
+		Seq         int    `json:"replacement_seq"`
+	}
+	if err := c.post(ctx, "/v1/sign/hot-wallet/"+url.PathEscape(key)+"/replace", map[string]int{"replacement_seq": seq}, &out); err != nil {
+		return nil, "", err
+	}
+	if out.Seq != seq {
+		return nil, "", fmt.Errorf("wallet-service answered for replacement_seq %d, asked %d", out.Seq, seq)
+	}
+	raw, err := decodeTx(out.SignedRawTx)
+	return raw, strings.ToLower(out.TxHash), err
 }

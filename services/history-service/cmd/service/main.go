@@ -28,7 +28,7 @@ func main() {
 	}
 	defer store.Close(context.Background())
 
-	topics := []string{events.TopicDepositsDetected, events.TopicDepositsConfirmed, events.TopicWithdrawalsBroadcast, events.TopicWithdrawalsConfirmed}
+	topics := []string{events.TopicDepositsDetected, events.TopicDepositsConfirmed, events.TopicWithdrawalsBroadcast, events.TopicWithdrawalsConfirmed, events.TopicWithdrawalsFailed}
 	reader := history.NewKafkaReader(strings.Split(requireEnv("KAFKA_BROKERS"), ","), envOr("KAFKA_GROUP_ID", "history-service"), topics)
 	defer reader.Close()
 

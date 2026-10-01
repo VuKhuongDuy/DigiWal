@@ -1,9 +1,9 @@
 # history-service
 
 The transaction-history **read model** (`docs/ARCHITECTURE.md`): one denormalized MongoDB document
-per deposit or withdrawal, built from the four topics it consumes (`integration-contracts.md` §1,
+per deposit or withdrawal, built from the five topics it consumes (`integration-contracts.md` §1,
 Open Questions #3): `deposits.detected`, `deposits.confirmed`, `withdrawals.broadcast`,
-`withdrawals.confirmed`. It never touches a balance and holds nothing that cannot be rebuilt by
+`withdrawals.confirmed`, `withdrawals.failed`. It never touches a balance and holds nothing that cannot be rebuilt by
 replaying the topics (a new consumer group starts from the beginning).
 
 ## What works
@@ -11,7 +11,11 @@ replaying the topics (a new consumer group starts from the beginning).
 - One document per deposit (`_id = deposit:<chain_id>:<tx_hash>:<log_index>`) or withdrawal
   (`_id = withdrawal:<idempotency_key>`), with `user_id`, `kind`, `asset_id`, `amount` (decimal
   string, never a float or int64), counterparty `address`, `tx_hash`, `status`, timestamps.
-- Statuses only move forward: `pending`/`broadcast` -> `confirmed`. A late or duplicate
+- Statuses only move forward: `pending`/`broadcast` -> `confirmed`, and a withdrawal's `failed` (task 3.14) is
+  terminal and may follow `confirmed` (a Settled withdrawal reorged out and refunded): a redelivered older
+  event never takes a failed entry back, and a failure without a tx never erases the tx hash it already has
+  (`fail_reason`, and `revert_reason` for a revert, are stored on the document).
+- A late or duplicate
   detected/broadcast event never turns a confirmed entry back (`$setOnInsert` upsert for progress,
   `$set` upsert for confirmed), so events may arrive out of order or twice.
 - At-least-once: the offset is committed only after the write succeeded. A store outage is retried up to

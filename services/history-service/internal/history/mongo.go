@@ -68,11 +68,41 @@ func (m *Mongo) RecordConfirmed(ctx context.Context, e Entry) error {
 	set := append(fields(e),
 		bson.E{Key: "status", Value: StatusConfirmed}, bson.E{Key: "block_number", Value: e.BlockNumber},
 		bson.E{Key: "confirmed_at", Value: e.At}, bson.E{Key: "updated_at", Value: e.At})
-	_, err := m.history.UpdateOne(ctx, bson.D{{Key: "_id", Value: e.ID}},
+	// failed is terminal: the filter skips a failed document, and the upsert that then tries to insert
+	// the same _id is a duplicate key — which is exactly "leave it alone".
+	_, err := m.history.UpdateOne(ctx, bson.D{{Key: "_id", Value: e.ID}, {Key: "status", Value: bson.D{{Key: "$ne", Value: StatusFailed}}}},
 		bson.D{
 			{Key: "$set", Value: set},
 			{Key: "$setOnInsert", Value: bson.D{{Key: "created_at", Value: e.At}}},
 		}, options.UpdateOne().SetUpsert(true))
+	if mongo.IsDuplicateKeyError(err) {
+		return nil
+	}
+	return err
+}
+
+// RecordFailed makes the document failed (terminal) from any status, keeping a tx hash it already
+// has: a request that failed before it was ever signed has none to give.
+func (m *Mongo) RecordFailed(ctx context.Context, e Entry) error {
+	set := bson.D{
+		{Key: "status", Value: StatusFailed}, {Key: "fail_reason", Value: e.FailReason},
+		{Key: "failed_at", Value: e.At}, {Key: "updated_at", Value: e.At},
+	}
+	if e.RevertReason != "" {
+		set = append(set, bson.E{Key: "revert_reason", Value: e.RevertReason})
+	}
+	onInsert := bson.D{
+		{Key: "user_id", Value: e.UserID}, {Key: "kind", Value: e.Kind}, {Key: "asset_id", Value: e.AssetID},
+		{Key: "amount", Value: e.Amount}, {Key: "address", Value: e.Address}, {Key: "chain_id", Value: e.ChainID},
+		{Key: "block_number", Value: e.BlockNumber}, {Key: "created_at", Value: e.At},
+	}
+	if e.TxHash != "" {
+		set = append(set, bson.E{Key: "tx_hash", Value: e.TxHash})
+	} else {
+		onInsert = append(onInsert, bson.E{Key: "tx_hash", Value: ""})
+	}
+	_, err := m.history.UpdateOne(ctx, bson.D{{Key: "_id", Value: e.ID}},
+		bson.D{{Key: "$set", Value: set}, {Key: "$setOnInsert", Value: onInsert}}, options.UpdateOne().SetUpsert(true))
 	return err
 }
 
