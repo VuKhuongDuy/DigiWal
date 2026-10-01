@@ -18,6 +18,9 @@ import (
 type Receipt struct {
 	Success bool
 	Block   int64
+	// GasUsed and EffectiveGasPrice (wei) are what the tx cost: the ledger's Gas Fee is their product.
+	GasUsed           uint64
+	EffectiveGasPrice *big.Int
 }
 
 type Chain interface {
@@ -34,6 +37,11 @@ type Chain interface {
 	Broadcast(ctx context.Context, rawTx []byte) (common.Hash, error)
 	// Receipt returns nil while the transaction is not mined.
 	Receipt(ctx context.Context, tx common.Hash) (*Receipt, error)
+	// Head is the latest block number: a stuck Gas Top-Up is measured in blocks, not minutes.
+	Head(ctx context.Context) (int64, error)
+	// Underpriced reports whether the signed tx's max fee is below the latest block's base fee, i.e.
+	// it cannot be mined at this price (a Fee Bump's cue).
+	Underpriced(ctx context.Context, rawTx []byte) (bool, error)
 }
 
 // Client is the slice of go-ethereum's client Eth uses (satisfied by *ethclient.Client and by
@@ -46,6 +54,8 @@ type Client interface {
 	NonceAt(ctx context.Context, account common.Address, blockNumber *big.Int) (uint64, error)
 	SendTransaction(ctx context.Context, tx *types.Transaction) error
 	TransactionReceipt(ctx context.Context, txHash common.Hash) (*types.Receipt, error)
+	BlockNumber(ctx context.Context) (uint64, error)
+	HeaderByNumber(ctx context.Context, number *big.Int) (*types.Header, error)
 }
 
 type Eth struct{ c Client }
@@ -122,5 +132,29 @@ func (e *Eth) Receipt(ctx context.Context, tx common.Hash) (*Receipt, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Receipt{Success: r.Status == types.ReceiptStatusSuccessful, Block: r.BlockNumber.Int64()}, nil
+	price := r.EffectiveGasPrice
+	if price == nil {
+		price = new(big.Int)
+	}
+	return &Receipt{Success: r.Status == types.ReceiptStatusSuccessful, Block: r.BlockNumber.Int64(), GasUsed: r.GasUsed, EffectiveGasPrice: price}, nil
+}
+
+func (e *Eth) Head(ctx context.Context) (int64, error) {
+	n, err := e.c.BlockNumber(ctx)
+	return int64(n), err
+}
+
+func (e *Eth) Underpriced(ctx context.Context, rawTx []byte) (bool, error) {
+	var tx types.Transaction
+	if err := tx.UnmarshalBinary(rawTx); err != nil {
+		return false, fmt.Errorf("decoding signed transaction: %w", err)
+	}
+	h, err := e.c.HeaderByNumber(ctx, nil)
+	if err != nil {
+		return false, err
+	}
+	if h.BaseFee == nil {
+		return false, nil
+	}
+	return tx.GasFeeCap().Cmp(h.BaseFee) < 0, nil
 }

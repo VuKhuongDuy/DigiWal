@@ -19,6 +19,7 @@ import (
 
 	"digiwal/pkg/events"
 	"digiwal/services/sweeper/internal/chain"
+	"digiwal/services/sweeper/internal/ledger"
 	"digiwal/services/sweeper/internal/registry"
 	"digiwal/services/sweeper/internal/screening"
 	"digiwal/services/sweeper/internal/sweep"
@@ -57,6 +58,12 @@ func main() {
 		HTTP:    &http.Client{Timeout: 30 * time.Second, Transport: &http.Transport{TLSClientConfig: tlsCfg}},
 	}
 
+	// ledger-service, over mTLS as CN=sweeper: only POST /v1/ledger/gas-fees (ledger.md invariant #12).
+	led := &ledger.Client{
+		BaseURL: requireEnv("LEDGER_SERVICE_URL"),
+		HTTP:    &http.Client{Timeout: 15 * time.Second, Transport: &http.Transport{TLSClientConfig: tlsCfg}},
+	}
+
 	// The Hot Wallet's address comes from wallet-service, which derived it — never from local
 	// config that could drift (deposit-flow.md invariant #15). Asked once; wallet-service may
 	// still be starting, so retry for a while before giving up.
@@ -66,7 +73,7 @@ func main() {
 	}
 
 	s := &sweep.Sweeper{
-		Chain: c, Wallet: w, Assets: assets, Screening: screen,
+		Chain: c, Wallet: w, Assets: assets, Screening: screen, Ledger: led,
 		Config: sweep.Config{
 			ChainID:   chainID,
 			HotWallet: hot,
@@ -75,6 +82,9 @@ func main() {
 			GasReserve:       envBig("SWEEP_GAS_RESERVE_WEI", "650000000000000"),
 			InclusionTimeout: envDuration("INCLUSION_TIMEOUT", 5*time.Minute),
 			PollInterval:     envDuration("POLL_INTERVAL", 3*time.Second),
+			// Fee Bump of a stuck Gas Top-Up (Decided): after 20 blocks while underpriced, at most 5 times.
+			FeeBumpAfterBlocks: envInt("FEE_BUMP_AFTER_BLOCKS", 20),
+			MaxFeeBumps:        int(envInt("MAX_FEE_BUMPS", 5)),
 		},
 	}
 

@@ -43,6 +43,7 @@ type op struct {
 	From   common.Address
 	To     common.Address
 	Amount *big.Int
+	Salt   int `json:",omitempty"` // a Fee Bump is the same op under a new hash
 }
 
 // world is a tiny chain plus a wallet-service, wired to behave the way the real ones do.
@@ -63,14 +64,26 @@ type world struct {
 	hotErr   error
 	userErr  error
 	// chain side
-	broadcasts int
-	failMined  bool // mined txs revert
-	stuck      bool // txs never mine
+	broadcasts     int
+	failMined      bool                 // mined txs revert
+	stuckTopUpOnly bool                 // stuck applies to Gas Top-Ups only (a Sweep from the user address still mines)
+	stuck          bool                 // txs never mine ...
+	minable        map[common.Hash]bool // ... except these (a Fee Bump the network accepts)
+
+	// Fee Bump side (task 2.8)
+	head         int64
+	headStep     int64 // the chain grows by this many blocks every time it is asked
+	underpriced  bool  // the node would not mine the latest version at its price
+	bumpErr      error
+	bumpCalls    []int
+	reps         map[string][]wallet.Version
+	mineBumpSeq  int // the replacement with this seq becomes minable when issued
+	broadcastErr func(raw []byte) error
 }
 
 func newWorld() *world {
 	return &world{native: map[common.Address]*big.Int{}, tokens: map[common.Address]*big.Int{}, latest: map[common.Address]uint64{},
-		pending: map[common.Hash]op{}, mined: map[common.Hash]bool{}, autoMine: true, hotByKey: map[string][]byte{}}
+		pending: map[common.Hash]op{}, mined: map[common.Hash]bool{}, autoMine: true, hotByKey: map[string][]byte{}, minable: map[common.Hash]bool{}, reps: map[string][]wallet.Version{}}
 }
 
 func bal(m map[common.Address]*big.Int, a common.Address) *big.Int {
@@ -112,6 +125,11 @@ func (w *world) Broadcast(_ context.Context, raw []byte) (common.Hash, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.broadcasts++
+	if w.broadcastErr != nil {
+		if err := w.broadcastErr(raw); err != nil {
+			return common.Hash{}, err
+		}
+	}
 	h := crypto.Keccak256Hash(raw)
 	var o op
 	if err := json.Unmarshal(raw, &o); err != nil {
@@ -128,13 +146,59 @@ func (w *world) Receipt(_ context.Context, h common.Hash) (*chain.Receipt, error
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if ok, done := w.mined[h]; done {
-		return &chain.Receipt{Success: ok, Block: 1}, nil
+		return &chain.Receipt{Success: ok, Block: 1, GasUsed: 21000, EffectiveGasPrice: big.NewInt(2_000_000_000)}, nil
 	}
-	if o, p := w.pending[h]; p && w.autoMine && !w.stuck {
+	if o, p := w.pending[h]; p && ((w.autoMine && !(w.stuck && (o.Kind == "topup" || !w.stuckTopUpOnly))) || w.minable[h]) {
 		w.mine(h, o)
-		return &chain.Receipt{Success: !w.failMined, Block: 1}, nil
+		return &chain.Receipt{Success: !w.failMined, Block: 1, GasUsed: 21000, EffectiveGasPrice: big.NewInt(2_000_000_000)}, nil
 	}
 	return nil, nil
+}
+
+func (w *world) Head(context.Context) (int64, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.head += w.headStep
+	return w.head, nil
+}
+
+func (w *world) Underpriced(context.Context, []byte) (bool, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.underpriced, nil
+}
+
+func (w *world) LookupHotKey(_ context.Context, key string) (*wallet.HotKey, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	raw, ok := w.hotByKey[key]
+	if !ok {
+		return nil, nil
+	}
+	return &wallet.HotKey{Raw: raw, Hash: crypto.Keccak256Hash(raw).Hex(), Replacements: w.reps[key]}, nil
+}
+
+func (w *world) ReplaceHotWallet(_ context.Context, key string, seq int) ([]byte, string, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.bumpCalls = append(w.bumpCalls, seq)
+	if w.bumpErr != nil {
+		return nil, "", w.bumpErr
+	}
+	if seq >= 1 && seq <= len(w.reps[key]) { // a replay returns the stored one
+		v := w.reps[key][seq-1]
+		return v.Raw, v.Hash, nil
+	}
+	var o op
+	_ = json.Unmarshal(w.hotByKey[key], &o)
+	o.Salt = seq
+	raw := encodeOp(o)
+	h := crypto.Keccak256Hash(raw)
+	w.reps[key] = append(w.reps[key], wallet.Version{Seq: seq, Kind: "fee_bump", Raw: raw, Hash: strings.ToLower(h.Hex())})
+	if seq == w.mineBumpSeq {
+		w.minable[h] = true
+	}
+	return raw, strings.ToLower(h.Hex()), nil
 }
 func (w *world) mine(h common.Hash, o op) {
 	delete(w.pending, h)

@@ -104,6 +104,33 @@ func TestEthAgainstARealEVM(t *testing.T) {
 		t.Fatalf("BalanceAt = %v %v", b, err)
 	}
 
+	// Head grows with each block; the receipt carries what the tx cost (the Gas Fee's two numbers).
+	h0, err := e.Head(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	backend.Commit()
+	if h1, _ := e.Head(ctx); h1 != h0+1 {
+		t.Fatalf("head %d then %d", h0, h1)
+	}
+	if r, _ := e.Receipt(ctx, deployHash); r.GasUsed == 0 || r.EffectiveGasPrice == nil || r.EffectiveGasPrice.Sign() <= 0 {
+		t.Fatalf("receipt carries no gas: %+v", r)
+	}
+
+	// Underpriced: a tx whose max fee is below the latest base fee cannot be mined at that price.
+	hdr, _ := cl.HeaderByNumber(ctx, nil)
+	cheap := types.MustSignNewTx(key, signer, &types.DynamicFeeTx{ChainID: id, Nonce: 2, GasTipCap: big.NewInt(0), GasFeeCap: new(big.Int).Sub(hdr.BaseFee, big.NewInt(1)), Gas: 21_000, To: &to, Value: big.NewInt(1)})
+	cheapRaw, _ := cheap.MarshalBinary()
+	if under, err := e.Underpriced(ctx, cheapRaw); err != nil || !under {
+		t.Fatalf("a tx paying below the base fee: underpriced=%v %v", under, err)
+	}
+	if under, err := e.Underpriced(ctx, sign(2, &to, big.NewInt(1), nil, 21_000)); err != nil || under {
+		t.Fatalf("a tx paying 50 gwei: underpriced=%v %v", under, err)
+	}
+	if _, err := e.Underpriced(ctx, []byte{1, 2, 3}); err == nil {
+		t.Fatal("garbage was judged")
+	}
+
 	// Garbage is rejected before it reaches the node.
 	if _, err := e.Broadcast(ctx, []byte{1, 2, 3}); err == nil {
 		t.Fatal("garbage raw tx accepted")

@@ -90,6 +90,7 @@ services:
       ASSETS_FILE: /config/assets.yaml
       SCREENING_FILE: /config/screening.yaml
       WALLET_SERVICE_URL: https://wallet-service:8443
+      LEDGER_SERVICE_URL: https://ledger-service:8443   # its Gas Fees (task 2.8)
       TLS_CERT_FILE: /certs/cert.pem
       TLS_KEY_FILE: /certs/key.pem
       TLS_CA_FILE: /certs/ca-cert.pem
@@ -101,6 +102,7 @@ services:
     depends_on:
       kafka: {condition: service_healthy}
       anvil: {condition: service_healthy}
+      ledger-service: {condition: service_started}
 
   history-service:
     build:

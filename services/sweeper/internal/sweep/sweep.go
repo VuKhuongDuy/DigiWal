@@ -19,6 +19,7 @@ import (
 
 	"digiwal/pkg/events"
 	"digiwal/services/sweeper/internal/chain"
+	"digiwal/services/sweeper/internal/ledger"
 	"digiwal/services/sweeper/internal/registry"
 	"digiwal/services/sweeper/internal/wallet"
 
@@ -35,6 +36,14 @@ type Screener interface{ Contains(address string) bool }
 type Wallet interface {
 	SignHotWallet(ctx context.Context, req wallet.HotRequest) (rawTx []byte, nonce uint64, err error)
 	SignUserAddress(ctx context.Context, req wallet.UserRequest) (rawTx []byte, err error)
+	// LookupHotKey and ReplaceHotWallet are a stuck Gas Top-Up's Fee Bump (task 2.8, withdrawal-flow.md #21).
+	LookupHotKey(ctx context.Context, key string) (*wallet.HotKey, error)
+	ReplaceHotWallet(ctx context.Context, key string, seq int) (rawTx []byte, txHash string, err error)
+}
+
+// GasPoster reports the gas a mined tx of ours spent to ledger-service (ledger.md invariant #12).
+type GasPoster interface {
+	PostGasFee(ctx context.Context, g ledger.GasFee) error
 }
 
 type Config struct {
@@ -51,6 +60,10 @@ type Config struct {
 	// is how often the chain is asked.
 	InclusionTimeout time.Duration
 	PollInterval     time.Duration
+	// Fee Bump of a stuck Gas Top-Up (Decided: after 20 blocks while underpriced, at most 5 times; the
+	// 50 gwei ceiling is wallet-service's). Zero values mean those defaults.
+	FeeBumpAfterBlocks int64
+	MaxFeeBumps        int
 }
 
 type Sweeper struct {
@@ -59,6 +72,12 @@ type Sweeper struct {
 	Assets    registry.Assets
 	Screening Screener
 	Config    Config
+	// Ledger receives each mined Gas Top-Up's and Sweep's gas; nil disables it. Best effort: sweeper keeps
+	// no state, so a crash between a tx being mined and its Gas Fee being posted loses that fee — an accepted
+	// limitation (ledger.md Open Questions #6, Decided).
+	Ledger GasPoster
+	// Alert is where ALERTs go; default: the log, prefixed "ALERT:".
+	Alert func(msg string)
 }
 
 // TopUpKey is the Gas Top-Up's idempotency key (deposit-flow.md invariant #13, PROPOSED):
@@ -153,7 +172,7 @@ func (s *Sweeper) sweepNative(ctx context.Context, ev events.DepositConfirmed, u
 	case err != nil:
 		return classify(err)
 	}
-	return s.broadcastAndWait(ctx, raw, "sweep")
+	return s.sweepTx(ctx, raw)
 }
 
 func (s *Sweeper) sweepToken(ctx context.Context, ev events.DepositConfirmed, user common.Address, asset registry.Asset) error {
@@ -187,7 +206,17 @@ func (s *Sweeper) sweepToken(ctx context.Context, ev events.DepositConfirmed, us
 	if err != nil {
 		return classify(err)
 	}
-	return s.broadcastAndWait(ctx, raw, "sweep")
+	return s.sweepTx(ctx, raw)
+}
+
+// sweepTx sends a Sweep, waits for it, and reports its gas.
+func (s *Sweeper) sweepTx(ctx context.Context, raw []byte) error {
+	hash, rc, err := s.broadcastAndWait(ctx, raw, "sweep")
+	if err != nil {
+		return err
+	}
+	s.postGas(ctx, hash, rc, "sweep")
+	return nil
 }
 
 func (s *Sweeper) topUp(ctx context.Context, ev events.DepositConfirmed, user common.Address) error {
@@ -203,34 +232,40 @@ func (s *Sweeper) topUp(ctx context.Context, ev events.DepositConfirmed, user co
 		return classify(err)
 	}
 	log.Printf("gas top-up for deposit %s (hot wallet nonce %d)", ev.Key(), nonce)
-	return s.broadcastAndWait(ctx, raw, "gas top-up")
+	key := TopUpKey(ev.ChainID, ev.TxHash, ev.LogIndex)
+	hash, rc, err := s.sendHotTx(ctx, key, raw)
+	if err != nil {
+		return err
+	}
+	s.postGas(ctx, hash, rc, "gas_topup")
+	return nil
 }
 
 // broadcastAndWait sends the signed transaction and waits until it is mined. Waiting matters:
 // the next step (or the next retry) must read the balance after this one has landed, not
 // while it is still in flight.
-func (s *Sweeper) broadcastAndWait(ctx context.Context, raw []byte, what string) error {
+func (s *Sweeper) broadcastAndWait(ctx context.Context, raw []byte, what string) (common.Hash, *chain.Receipt, error) {
 	hash, err := s.Chain.Broadcast(ctx, raw)
 	if err != nil {
-		return fmt.Errorf("broadcasting %s: %w", what, err)
+		return hash, nil, fmt.Errorf("broadcasting %s: %w", what, err)
 	}
 	deadline := time.Now().Add(s.Config.InclusionTimeout)
 	for {
 		r, err := s.Chain.Receipt(ctx, hash)
 		if err != nil {
-			return fmt.Errorf("reading %s receipt: %w", what, err)
+			return hash, nil, fmt.Errorf("reading %s receipt: %w", what, err)
 		}
 		if r != nil {
 			if !r.Success {
-				return fmt.Errorf("%s %s reverted in block %d", what, hash, r.Block)
+				return hash, r, fmt.Errorf("%s %s reverted in block %d", what, hash, r.Block)
 			}
-			return nil
+			return hash, r, nil
 		}
 		if time.Now().After(deadline) {
-			return fmt.Errorf("%s %s not mined within %s", what, hash, s.Config.InclusionTimeout)
+			return hash, nil, fmt.Errorf("%s %s not mined within %s", what, hash, s.Config.InclusionTimeout)
 		}
 		if err := sleep(ctx, s.Config.PollInterval); err != nil {
-			return err
+			return hash, nil, err
 		}
 	}
 }

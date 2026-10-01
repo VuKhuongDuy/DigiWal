@@ -116,3 +116,49 @@ func TestHotAddress(t *testing.T) {
 		}
 	}
 }
+
+func TestLookupHotKey(t *testing.T) {
+	c, seen := serve(t, 200, `{"nonce":7,"signed_raw_tx":"0x0102","tx_hash":"0xAA","replacements":[{"replacement_seq":1,"kind":"fee_bump","signed_raw_tx":"0x03","tx_hash":"0xBB"},{"replacement_seq":2,"kind":"cancel","signed_raw_tx":"0x04","tx_hash":"0xCC"}]}`)
+	k, err := c.LookupHotKey(context.Background(), "gas-topup:1:0xh:0")
+	if err != nil || k == nil || len(k.Raw) != 2 || k.Hash != "0xaa" || len(k.Replacements) != 2 {
+		t.Fatalf("%+v %v", k, err)
+	}
+	if k.Replacements[0].Seq != 1 || k.Replacements[0].Kind != "fee_bump" || k.Replacements[0].Hash != "0xbb" || k.Replacements[1].Kind != "cancel" || k.Replacements[1].Raw[0] != 4 {
+		t.Fatalf("%+v", k.Replacements)
+	}
+	if (*seen)[0] != "GET /v1/sign/hot-wallet/gas-topup:1:0xh:0 " {
+		t.Fatalf("request %q", (*seen)[0])
+	}
+	// Never signed: nil, not an error. Anything else is an error, never "no versions".
+	if c, _ := serve(t, 404, `{}`); true {
+		if k, err := c.LookupHotKey(context.Background(), "k"); k != nil || err != nil {
+			t.Fatalf("404: %+v %v", k, err)
+		}
+	}
+	if c, _ := serve(t, 503, `{}`); true {
+		if _, err := c.LookupHotKey(context.Background(), "k"); err == nil {
+			t.Fatal("a 503 read as 'never signed'")
+		}
+	}
+}
+
+func TestReplaceHotWallet(t *testing.T) {
+	c, seen := serve(t, 200, `{"signed_raw_tx":"0x0a0b","tx_hash":"0xAB","replacement_seq":2}`)
+	raw, hash, err := c.ReplaceHotWallet(context.Background(), "gas-topup:1:0xh:0", 2)
+	if err != nil || len(raw) != 2 || hash != "0xab" || (*seen)[0] != `POST /v1/sign/hot-wallet/gas-topup:1:0xh:0/replace {"replacement_seq":2}` {
+		t.Fatalf("%x %s %v %q", raw, hash, err, *seen)
+	}
+	// 422 (the fee ceiling), 409 (a Nonce Filler, a seq gap) and 404 are refusals; 503 (a freeze) is transient.
+	for code, permanent := range map[int]bool{422: true, 409: true, 404: true, 403: true, 503: false, 500: false} {
+		c, _ := serve(t, code, `{}`)
+		_, _, err := c.ReplaceHotWallet(context.Background(), "k", 1)
+		if err == nil || errors.Is(err, ErrPermanent) != permanent {
+			t.Errorf("%d: %v permanent=%v", code, err, permanent)
+		}
+	}
+	if c, _ := serve(t, 200, `{"signed_raw_tx":"0x0a","tx_hash":"0xab","replacement_seq":9}`); true {
+		if _, _, err := c.ReplaceHotWallet(context.Background(), "k", 1); err == nil {
+			t.Fatal("accepted an answer for another replacement_seq")
+		}
+	}
+}
