@@ -286,7 +286,22 @@ Questions #3 for the one remaining unresolved failure mode.
     is rejected at validation, before any ledger Reservation is made.**
     Same off-ramp as any other validation failure — `rejected`, no
     Entry ever posted — so a dust request never even touches the
-    Ledger or claims a Hot Wallet nonce.
+    Ledger or claims a Hot Wallet nonce. **Validation response —
+    Decided (Tech Lead), implemented in task 3.2:** every validation
+    rejection returns `422 {"idempotency_key","status":"rejected",
+    "reject_reason"}` (never `202` + rejected); a request that passes
+    returns `202 {"idempotency_key","status":"validated"}` (`"reserved"`
+    once task 3.3 adds the Reservation); no verdict returns `503` with
+    the row left `requested` (invariants #11, #18). Order, first failure
+    wins, with its `reject_reason`: asset registered
+    (`asset_not_registered`) → `to_address` well-formed and non-zero
+    (`invalid_to_address`) → amount ≤ uint256 max (`amount_too_large`)
+    → amount ≥ Minimum Withdrawal Amount
+    (`below_minimum_withdrawal_amount`) → active Whitelist Entry
+    (`destination_not_whitelisted`: no entry, or still `pending`,
+    invariant #12) → Screening List (`destination_on_screening_list`,
+    #14) → Hot/Warm (`destination_is_system_wallet`, local, #18) →
+    deposit address (`destination_is_deposit_address`, remote, #18).
 11. **A Withdrawal Request's own row is created idempotently, before
     anything else runs.** `INSERT INTO withdrawal_requests
     (idempotency_key, ...) ON CONFLICT (idempotency_key) DO NOTHING`,
@@ -458,14 +473,16 @@ Questions #3 for the one remaining unresolved failure mode.
       any always-on service.
     - **Comparison:** byte-wise address equality (never string/checksum
       casing). Hot and Warm are local, in-memory comparisons.
-    - **Where it runs:** after well-formed address, asset registered,
-      Minimum Withdrawal Amount (#10), active Whitelist Entry (#12) and
-      Screening List (#14); then the Hot/Warm comparison (local, cheap);
+    - **Where it runs:** after asset registered, well-formed non-zero
+      address, amount ≤ uint256, Minimum Withdrawal Amount (#10), active
+      Whitelist Entry (#12) and Screening List (#14) — full order and
+      codes under invariant #10; then the Hot/Warm comparison (local, cheap);
       then the deposit-address lookup last (the only network call);
       then the ledger Reservation. Every check precedes any Lock or Hot
       Wallet nonce claim (same off-ramp guarantee as #10).
     - **What the client sees:** the request goes to `rejected` (terminal,
-      no Lock) and `POST /v1/withdrawals` returns `422` with reason
+      no Lock) and `POST /v1/withdrawals` returns `422
+      {"idempotency_key","status":"rejected","reject_reason"}` with reason
       `destination_is_deposit_address` (Decided) or, for Hot/Warm,
       **`destination_is_system_wallet`** (**Decided** — one code for both
       tiers, so it does not reveal which treasury address was hit). A
@@ -578,7 +595,7 @@ sequenceDiagram
         WD->>WD: read back existing row
         WD-->>Gateway: existing request's current status
     else new row created
-        WD->>WD: validate (well-formed address, asset registered,<br/>amount >= asset.min_withdrawal_amount,<br/>to_address is an active Whitelist Entry,<br/>to_address not on Screening List,<br/>to_address not a deposit address / Hot / Warm — invariant #18)
+        WD->>WD: validate, first failure wins (invariant #10 order):<br/>asset registered, to_address valid & non-zero, amount <= uint256,<br/>amount >= min, active Whitelist Entry, not on Screening List,<br/>not Hot/Warm, not a deposit address (invariant #18)<br/>reject → 422 {idempotency_key, status: rejected, reject_reason}
         WD->>Ledger: lock(idempotency_key, user_id, asset_id, amount)<br/>Reservation — reserves capacity only, no Entry posted (ledger.md)
         alt insufficient available funds
             Ledger-->>WD: error
