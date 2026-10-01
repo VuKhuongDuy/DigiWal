@@ -35,6 +35,21 @@ func (f *fakeRequests) Create(_ context.Context, r store.NewRequest) (store.With
 	return w, true, nil
 }
 
+func (f *fakeRequests) Transition(_ context.Context, id, from, to string, reason *string) (store.Withdrawal, error) {
+	f.calls++
+	for k, w := range f.rows {
+		if w.ID == id {
+			if w.Status != from {
+				return store.Withdrawal{}, store.ErrStateChanged
+			}
+			w.Status, w.RejectReason = to, reason
+			f.rows[k] = w
+			return w, nil
+		}
+	}
+	return store.Withdrawal{}, store.ErrStateChanged
+}
+
 func (f *fakeRequests) Get(_ context.Context, userID, key string) (store.Withdrawal, error) {
 	f.calls++
 	if w, ok := f.rows[[2]string{userID, key}]; ok {
@@ -42,6 +57,11 @@ func (f *fakeRequests) Get(_ context.Context, userID, key string) (store.Withdra
 	}
 	return store.Withdrawal{}, store.ErrNotFound
 }
+
+// passAll is a validator that accepts everything (the 3.1 tests are about creation, not rules).
+type passAll struct{}
+
+func (passAll) Check(context.Context, store.Withdrawal) (string, error) { return "", nil }
 
 func withPeer(r *http.Request, cn string) *http.Request {
 	if cn != "" {
@@ -55,7 +75,7 @@ func do(t *testing.T, f *fakeRequests, cn, method, path, body string) *httptest.
 	t.Helper()
 	req := withPeer(httptest.NewRequest(method, path, strings.NewReader(body)), cn)
 	rec := httptest.NewRecorder()
-	NewServer(f, nil, Config{}).MTLSRoutes().ServeHTTP(rec, req)
+	NewServer(f, nil, passAll{}, Config{}).MTLSRoutes().ServeHTTP(rec, req)
 	return rec
 }
 
@@ -81,13 +101,13 @@ func TestCreateIsIdempotent(t *testing.T) {
 	}
 	var got map[string]any
 	_ = json.Unmarshal(rec.Body.Bytes(), &got)
-	if got["idempotency_key"] != "k1" || got["status"] != "requested" || got["tx_hash"] != nil {
+	if got["idempotency_key"] != "k1" || got["status"] != "validated" || got["tx_hash"] != nil {
 		t.Fatalf("first POST body = %v", got)
 	}
 	if strings.Contains(rec.Body.String(), "id-alice") || strings.Contains(rec.Body.String(), "user_id") {
 		t.Fatalf("response leaks internal ids: %s", rec.Body)
 	}
-	if rec := do(t, f, "api-gateway", "POST", "/v1/withdrawals", body); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"status":"requested"`) {
+	if rec := do(t, f, "api-gateway", "POST", "/v1/withdrawals", body); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"status":"validated"`) {
 		t.Fatalf("duplicate POST: %d %s, want 200 with the existing status", rec.Code, rec.Body)
 	}
 	if len(f.rows) != 1 {
@@ -133,7 +153,7 @@ func TestCreateRefusesUnstorableBodies(t *testing.T) {
 func TestGetIsScopedToTheUser(t *testing.T) {
 	f := newFake()
 	do(t, f, "api-gateway", "POST", "/v1/withdrawals", body)
-	if rec := do(t, f, "api-gateway", "GET", "/v1/withdrawals/k1?user_id=alice", ""); rec.Code != 200 || !strings.Contains(rec.Body.String(), `"status":"requested"`) {
+	if rec := do(t, f, "api-gateway", "GET", "/v1/withdrawals/k1?user_id=alice", ""); rec.Code != 200 || !strings.Contains(rec.Body.String(), `"status":"validated"`) {
 		t.Fatalf("alice's own: %d %s", rec.Code, rec.Body)
 	}
 	if rec := do(t, f, "api-gateway", "GET", "/v1/withdrawals/k1?user_id=bob", ""); rec.Code != 404 {

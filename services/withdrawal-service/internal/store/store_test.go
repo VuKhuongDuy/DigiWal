@@ -137,3 +137,21 @@ func TestSchemaRejectsBadRows(t *testing.T) {
 		t.Error("unknown status accepted")
 	}
 }
+
+// invariant #11: transitions are guarded, so a second writer from the same status loses.
+func TestTransitionIsGuarded(t *testing.T) {
+	s := newStore(t)
+	ctx := context.Background()
+	w, _, _ := s.Create(ctx, req("alice", "t1"))
+	reason := "below_minimum_withdrawal_amount"
+	got, err := s.Transition(ctx, w.ID, StatusRequested, StatusRejected, &reason)
+	if err != nil || got.Status != StatusRejected || got.RejectReason == nil || *got.RejectReason != reason || !got.UpdatedAt.After(w.UpdatedAt) {
+		t.Fatalf("first transition: %+v %v", got, err)
+	}
+	if _, err := s.Transition(ctx, w.ID, StatusRequested, StatusFailed, nil); !errors.Is(err, ErrStateChanged) {
+		t.Fatalf("second writer: %v, want ErrStateChanged", err)
+	}
+	if again, _ := s.Get(ctx, "alice", "t1"); again.Status != StatusRejected {
+		t.Fatalf("row overwritten: %s", again.Status)
+	}
+}

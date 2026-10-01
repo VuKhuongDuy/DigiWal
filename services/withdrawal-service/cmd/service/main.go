@@ -1,9 +1,10 @@
 // Command withdrawal-service orchestrates withdrawals (docs/design/withdrawal-flow.md).
 //
-// Today (tasks 3.1, 3.6): apply migrations, then serve /healthz on a plain listener and the
-// withdrawal and whitelist endpoints on an mTLS listener restricted to CN=api-gateway. A request is
-// recorded idempotently and stays `requested`; validation, Reservation and signing are
-// tasks 3.2-3.3. Without TLS certs the mTLS listener does not start.
+// Today (tasks 3.1, 3.2, 3.6): apply migrations, load the Asset Registry and Screening List,
+// then serve /healthz on a plain listener and the withdrawal and whitelist endpoints on an
+// mTLS listener restricted to CN=api-gateway. A request is recorded idempotently, then
+// validated in-line (`validated` or `rejected`); Reservation and signing are task 3.3.
+// Without TLS certs the mTLS listener does not start.
 package main
 
 import (
@@ -17,7 +18,10 @@ import (
 
 	"digiwal/services/withdrawal-service/internal/api"
 	"digiwal/services/withdrawal-service/internal/authz"
+	"digiwal/services/withdrawal-service/internal/registry"
+	"digiwal/services/withdrawal-service/internal/screening"
 	"digiwal/services/withdrawal-service/internal/store"
+	"digiwal/services/withdrawal-service/internal/validate"
 )
 
 func main() {
@@ -30,8 +34,21 @@ func main() {
 	}
 	defer st.Close()
 
+	// Fail startup on a bad registry or screening list rather than validate against a half one.
+	assets, err := registry.Load(requireEnv("ASSETS_FILE"))
+	if err != nil {
+		log.Fatal(err)
+	}
+	screen, err := screening.Load(requireEnv("SCREENING_FILE"))
+	if err != nil {
+		log.Fatal(err)
+	}
+	log.Printf("asset registry loaded: %d assets; screening list: %d addresses", assets.Len(), screen.Len())
+
 	// Whitelist Cooldown is Decided at 24h (withdrawal-flow.md); override only for e2e tests.
-	server := api.NewServer(st, st, api.Config{WhitelistCooldown: envDuration("WHITELIST_COOLDOWN", 24*time.Hour)})
+	cooldown := envDuration("WHITELIST_COOLDOWN", 24*time.Hour)
+	validator := &validate.Validator{Assets: assets, Whitelist: st, Screening: screen, Cooldown: cooldown}
+	server := api.NewServer(st, st, validator, api.Config{WhitelistCooldown: cooldown})
 
 	if certFile := os.Getenv("TLS_CERT_FILE"); certFile != "" {
 		tlsCfg, err := authz.ServerTLSConfig(certFile, requireEnv("TLS_KEY_FILE"), requireEnv("TLS_CA_FILE"))

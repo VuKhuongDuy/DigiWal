@@ -1,9 +1,9 @@
 # withdrawal-service
 
-Orchestrates withdrawals (`docs/design/withdrawal-flow.md`). **Tasks 3.1 and 3.6 so far:** the service,
-its schema, idempotent request creation, and the Withdrawal Whitelist. A request is recorded and stays
-`requested`; validation (3.2), Reservation/signing/broadcast/Settle (3.3), Nonce Gap handling (3.4), the
-destination checks (3.10) and the Reaper (3.9) are not built yet.
+Orchestrates withdrawals (`docs/design/withdrawal-flow.md`). **Tasks 3.1, 3.2 and 3.6 so far:** the
+service, its schema, idempotent request creation, validation, and the Withdrawal Whitelist. A request
+ends at `validated` or `rejected`; Reservation/signing/broadcast/Settle (3.3), Nonce Gap handling (3.4),
+the destination checks against wallet-service (3.10) and the Reaper (3.9) are not built yet.
 
 ## What works
 
@@ -17,13 +17,17 @@ destination checks (3.10) and the Reaper (3.9) are not built yet.
 - **`POST /v1/withdrawals`** `{user_id, idempotency_key, asset_id, amount, to_address}` (mTLS,
   `CN=api-gateway` only; `user_id` is injected by the gateway):
   - The row is inserted **first**, `INSERT ... ON CONFLICT (user_id, idempotency_key) DO NOTHING`
-    (invariant #11). New: `202 {idempotency_key, status, tx_hash}`.
+    (invariant #11), then validated in-line by the same handler (task 3.2, below):
+    `202 {idempotency_key, status: "validated", tx_hash}`, or `422 {..., status: "rejected", reject_reason}`.
   - Duplicate (same user, same key, same request): `200` with the existing row's status. It never
     re-validates, whatever the status (Tech Lead, Open Questions #9b option B).
   - Same user and key but a **different** request (asset, amount or address): `409`. This is not a
     retry; answering with another request's status would mislead the client. Not spelled out in the
     design docs (which only cover the identical-retry case); it matches ledger-service's and
     wallet-service's handling of a reused key.
+  - `503` when validation could not reach a verdict (a dependency failed). The row stays `requested`
+    and that key is spent: retrying it only reads the row back. The Reaper (3.9) will mark it `failed`;
+    the client retries with a new key (Tech Lead, Open Questions #9b option B).
   - `400` only for a body that cannot be stored (bad JSON, unknown field, missing field, a key that is
     not 1-128 printable ASCII characters, an amount that is not a positive integer in minor units).
     Everything else — asset registered, minimum, address format, whitelist, screening, destination —
@@ -32,6 +36,23 @@ destination checks (3.10) and the Reaper (3.9) are not built yet.
   request, `{idempotency_key, status, tx_hash, reject_reason?}`. Another user's key is `404`, the same
   as a missing one.
 - `withdrawal_id` and `user_id` are never returned.
+- **Validation** (task 3.2; invariants #10, #12, #14, #18), in the decided order, first failure wins.
+  Local checks first, the remote one last, so a request is never sent to wallet-service if a local rule
+  already rejects it. Every guarded `requested → validated|rejected` transition is an
+  `UPDATE ... WHERE status = 'requested'`; if the Reaper got there first, the response reports what it
+  found.
+
+  | # | Rule | `reject_reason` |
+  |---|---|---|
+  | 1 | asset is in the Asset Registry (`ASSETS_FILE`) | `asset_not_registered` |
+  | 2 | `to_address` is a 0x 20-byte hex address, not zero | `invalid_to_address` |
+  | 3 | amount fits in uint256 | `amount_too_large` |
+  | 4 | amount ≥ the asset's `min_withdrawal_amount` | `below_minimum_withdrawal_amount` |
+  | 5 | `to_address` is an **active** entry in the user's own whitelist | `destination_not_whitelisted` |
+  | 6 | `to_address` is not on the Screening List (`SCREENING_FILE`) | `destination_on_screening_list` |
+  | 7 | not a deposit / Hot / Warm address (task 3.10, hook unset today) | `destination_is_deposit_address`, `destination_is_system_wallet` |
+
+  The reason codes for rules 1-6 are not named in the design docs (only #18's are); these are new.
 - **Withdrawal Whitelist** (invariants #12, #13, #15), mTLS, `CN=api-gateway` only:
   - `POST /v1/whitelist {user_id, address}` → `{id, user_id, address, status, added_at}`. A new entry is
     `201` and `pending`; re-adding the same address is `200` with the existing entry, and never restarts
@@ -53,12 +74,14 @@ destination checks (3.10) and the Reaper (3.9) are not built yet.
 
 ```bash
 make certs && make up   # Postgres (own database "withdrawal") + withdrawal-service, http://localhost:8086, mTLS :8446
+                        # needs ASSETS_FILE / SCREENING_FILE (infra/assets.yaml, infra/screening.yaml, mounted)
 make test               # store tests on a real Postgres (testcontainers or TEST_POSTGRES_DSN)
 ```
 
 ## Not built / to know
 
 - Not in `e2e/` yet, and api-gateway does not route to it yet (task 3.7).
+- `internal/screening` is a copy of ledger-service's loader (same file, same rules).
 - No `pkg/events` dependency yet: the withdrawal events come with task 3.3, keyed on `withdrawal_id`
   (task 3.11).
 - `internal/authz` is a copy of wallet-service's, as in ledger-service (a shared package needs a

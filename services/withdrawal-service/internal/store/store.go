@@ -132,6 +132,23 @@ func (s *Store) Create(ctx context.Context, r NewRequest) (w Withdrawal, created
 	}
 }
 
+// ErrStateChanged: a guarded transition found the row no longer in the expected status
+// (e.g. the Reaper failed it first). The caller re-reads the row instead of overwriting it.
+var ErrStateChanged = errors.New("withdrawal request is no longer in the expected status")
+
+// Transition moves the row from `from` to `to` (and records reason, for `rejected`) in one
+// guarded UPDATE, so two writers can never both succeed (invariant #11).
+func (s *Store) Transition(ctx context.Context, id, from, to string, reason *string) (Withdrawal, error) {
+	w, err := scan(s.pool.QueryRow(ctx, `
+		UPDATE withdrawal_requests SET status = $3, reject_reason = $4, updated_at = now()
+		WHERE withdrawal_id = $1 AND status = $2
+		RETURNING `+columns, id, from, to, reason))
+	if errors.Is(err, ErrNotFound) {
+		return Withdrawal{}, ErrStateChanged
+	}
+	return w, err
+}
+
 // Get returns the user's own request for that key (invariant #20: never another user's).
 func (s *Store) Get(ctx context.Context, userID, idempotencyKey string) (Withdrawal, error) {
 	return scan(s.pool.QueryRow(ctx,

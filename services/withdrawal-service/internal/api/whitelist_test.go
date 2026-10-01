@@ -70,7 +70,7 @@ func doWL(t *testing.T, wl *fakeWhitelist, cfg Config, cn, method, path, body st
 	t.Helper()
 	req := withPeer(httptest.NewRequest(method, path, strings.NewReader(body)), cn)
 	rec := httptest.NewRecorder()
-	NewServer(newFake(), wl, cfg).MTLSRoutes().ServeHTTP(rec, req)
+	NewServer(newFake(), wl, passAll{}, cfg).MTLSRoutes().ServeHTTP(rec, req)
 	return rec
 }
 

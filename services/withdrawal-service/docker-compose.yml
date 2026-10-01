@@ -8,11 +8,18 @@ services:
     environment:
       PORT: "8080"
       POSTGRES_DSN: postgres://custody:custody@postgres:5432/withdrawal?sslmode=disable
+      # The canonical registry + screening list, mounted identically everywhere.
+      ASSETS_FILE: /config/assets.yaml
+      SCREENING_FILE: /config/screening.yaml
+      # Whitelist Cooldown is 24h (decided); set e.g. 2s only for local/e2e testing.
+      WHITELIST_COOLDOWN: ${WHITELIST_COOLDOWN:-}
       # mTLS listener for the client-facing endpoints, CN=api-gateway only (`make certs`).
       TLS_CERT_FILE: /certs/cert.pem
       TLS_KEY_FILE: /certs/key.pem
       TLS_CA_FILE: /certs/ca-cert.pem
     volumes:
+      - ../../infra/assets.yaml:/config/assets.yaml:ro
+      - ../../infra/screening.yaml:/config/screening.yaml:ro
       - ../../infra/pki/out/withdrawal-service:/certs:ro
     ports: ["8086:8080", "8446:8443"]
     depends_on:

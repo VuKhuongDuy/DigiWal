@@ -17,11 +17,13 @@ import (
 
 	"digiwal/services/withdrawal-service/internal/authz"
 	"digiwal/services/withdrawal-service/internal/store"
+	"digiwal/services/withdrawal-service/internal/validate"
 )
 
 // Requests is the slice of store.Store the API needs.
 type Requests interface {
 	Create(ctx context.Context, r store.NewRequest) (store.Withdrawal, bool, error)
+	Transition(ctx context.Context, id, from, to string, reason *string) (store.Withdrawal, error)
 	Get(ctx context.Context, userID, idempotencyKey string) (store.Withdrawal, error)
 }
 
@@ -33,29 +35,29 @@ type Whitelist interface {
 	Now(ctx context.Context) (time.Time, error)
 }
 
-// Destinations refuses addresses that may never be a withdrawal destination: our own deposit
-// addresses and the Hot/Warm Wallet (invariant #18, task 3.10). reason is the 422 error code,
-// "" when the address is allowed; err means the check could not be completed (fail closed, 503).
-type Destinations interface {
-	Refuse(ctx context.Context, address common.Address) (reason string, err error)
+// Validator is the validation step (task 3.2): the first failing reason, "" if all pass,
+// or an error when no verdict could be reached.
+type Validator interface {
+	Check(ctx context.Context, w store.Withdrawal) (reason string, err error)
 }
 
 type Server struct {
 	requests  Requests
 	whitelist Whitelist
+	validator Validator
 	// Cooldown is the Whitelist Cooldown (Decided: 24h). Configurable only so e2e tests need not wait.
 	cooldown time.Duration
 	// destinations is nil until task 3.10 wires the wallet-service checks.
-	destinations Destinations
+	destinations validate.Destinations
 }
 
 type Config struct {
 	WhitelistCooldown time.Duration
-	Destinations      Destinations
+	Destinations      validate.Destinations
 }
 
-func NewServer(r Requests, wl Whitelist, cfg Config) *Server {
-	return &Server{requests: r, whitelist: wl, cooldown: cfg.WhitelistCooldown, destinations: cfg.Destinations}
+func NewServer(r Requests, wl Whitelist, v Validator, cfg Config) *Server {
+	return &Server{requests: r, whitelist: wl, validator: v, cooldown: cfg.WhitelistCooldown, destinations: cfg.Destinations}
 }
 
 // Routes is the plain listener: /healthz only (service-auth-mtls.md invariant #8).
@@ -108,7 +110,7 @@ func response(w store.Withdrawal) statusResponse {
 
 // handleCreate is POST /v1/withdrawals. Only a body that cannot even be stored is refused
 // up front (400); business validation (asset, minimum, whitelist, screening, destination)
-// happens after the row exists (task 3.2), so it ends in `rejected` rather than vanishing.
+// happens after the row exists, so a failure ends in `rejected` rather than vanishing.
 func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	var b createBody
 	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<14))
@@ -151,7 +153,46 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, response(wd))
 		return
 	}
-	writeJSON(w, http.StatusAccepted, response(wd))
+	s.validateNew(w, r, wd)
+}
+
+// validateNew runs the validation step in-line, right after the row was created: only this
+// handler ever moves a row out of `requested` (invariant #11, Open Questions #9b option B).
+//   - all checks pass: `validated`, 202 (the Reservation, task 3.3, continues from here);
+//   - a check fails: `rejected` with reject_reason, 422 — nothing was reserved (#10);
+//   - no verdict (a dependency failed): the row stays `requested`, 503. That key is spent: a
+//     retry with it only reads the row back; the Reaper fails it after the Stuck Request Timeout,
+//     and the client retries with a new key (#17, #18).
+func (s *Server) validateNew(w http.ResponseWriter, r *http.Request, wd store.Withdrawal) {
+	reason, err := s.validator.Check(r.Context(), wd)
+	if err != nil {
+		log.Printf("validating withdrawal %s: %v", wd.ID, err)
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{
+			"error":           "validation could not complete; retry with a new idempotency_key",
+			"idempotency_key": wd.IdempotencyKey,
+			"status":          wd.Status,
+		})
+		return
+	}
+	to, code := store.StatusValidated, http.StatusAccepted
+	var why *string
+	if reason != "" {
+		to, code, why = store.StatusRejected, http.StatusUnprocessableEntity, &reason
+	}
+	next, err := s.requests.Transition(r.Context(), wd.ID, store.StatusRequested, to, why)
+	if errors.Is(err, store.ErrStateChanged) {
+		// Someone else (the Reaper) moved it first; report what it is now.
+		if next, err = s.requests.Get(r.Context(), wd.UserID, wd.IdempotencyKey); err == nil {
+			writeJSON(w, http.StatusOK, response(next))
+			return
+		}
+	}
+	if err != nil {
+		log.Printf("recording validation of %s: %v", wd.ID, err)
+		writeErr(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	writeJSON(w, code, response(next))
 }
 
 // handleGet is GET /v1/withdrawals/{idempotency_key}?user_id=… — the caller's own request only;
