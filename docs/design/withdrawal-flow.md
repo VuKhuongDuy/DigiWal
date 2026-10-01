@@ -301,7 +301,11 @@ Questions #3 for the one remaining unresolved failure mode.
     mid-validation) is therefore inert, and the Reaper later marks it
     `failed` (invariant #17); the client retries with a **new**
     `idempotency_key`, which cannot double-spend because the old row can
-    never move again. Every state transition is a guarded `UPDATE ...
+    never move again. **Same user, same `idempotency_key`, different
+    request** (`asset_id`, `amount` or `to_address` differ from the stored
+    row) **returns `409`** and changes nothing — **Decided (Tech Lead),
+    implemented in task 3.1**; an identical replay gets the existing
+    row's status as before. Every state transition is a guarded `UPDATE ...
     WHERE status = <expected>`, so a Reaper write and a late in-line
     transition can never both succeed. (Uniqueness scope: see invariant
     #20, PROPOSED.)
@@ -414,8 +418,8 @@ Questions #3 for the one remaining unresolved failure mode.
     #9a), the `422 destination_is_deposit_address` code (#9c), and the
     Hot/Warm rule (#9d) with its `422 destination_is_system_wallet` code.
     **Cold Wallet addresses are deliberately not rejected** (Decided,
-    Tech Lead). Still open: the Warm address source (Open Questions
-    #10). Why: a
+    Tech Lead). Warm address source: **Decided** (Open Questions #10) —
+    `GET /v1/wallet/system-addresses`. Why: a
     Hot Wallet Outflow is never a deposit (`deposit-flow.md` invariant
     #17), so a withdrawal into a deposit address would debit the
     requester, credit nobody and strand the funds; a withdrawal to the
@@ -435,18 +439,18 @@ Questions #3 for the one remaining unresolved failure mode.
       cannot realistically become `200` before broadcast, and a `200`
       never stops being ours; the only real hazard is a cached "no",
       which this forbids.
-    - **Hot Wallet:** address from `GET /v1/wallet/hot-address` (already
-      allowed for `CN=withdrawal-service`), fetched once at startup and
-      cached — same rule as `wallet-tiering.md` invariant #8 and
-      `deposit-flow.md` invariant #15, never an env var.
+    - **Hot and Warm Wallet addresses (Decided, Open Questions #10):**
+      both from one call, `GET /v1/wallet/system-addresses` → `{chain_id,
+      hot, warm}` (mTLS, `CN=withdrawal-service`), fetched once at
+      startup and cached — same rule as `wallet-tiering.md` invariant #8
+      and `deposit-flow.md` invariant #15, never an env var.
       `withdrawal-service` does not accept `POST /v1/withdrawals` or
-      `POST /v1/whitelist` until it has it (fail closed, like
-      `chain-watcher`'s invariant #17 startup rule).
-    - **Warm Wallet:** **no designed source exists** — `wallet-service`
-      cannot derive it (Warm's seed is never in an always-on service,
-      `wallet-tiering.md` invariant #2) and no doc says where the
-      Treasury Sweep monitor gets it either. Open Questions #10; until
-      it is decided this part of the check cannot be built.
+      `POST /v1/whitelist` until it has both (fail closed, like
+      `chain-watcher`'s invariant #17 startup rule). `hot` is derived by
+      `wallet-service` from the `hot_wallet` seed; `warm` comes from the
+      operator file `infra/treasury.yaml`, read by `wallet-service` only
+      (`wallet-tiering.md` invariant #9). The Warm seed is still never in
+      any always-on service.
     - **Comparison:** byte-wise address equality (never string/checksum
       casing). Hot and Warm are local, in-memory comparisons.
     - **Where it runs:** after well-formed address, asset registered,
@@ -863,7 +867,7 @@ sequenceDiagram
    client uses a new key; (c) keep `422 destination_is_deposit_address`;
    (d) also reject the Hot and Warm Wallet addresses with `422
    destination_is_system_wallet` (Decided); Cold Wallet addresses are
-   not rejected (Decided); Warm source still open, #10. Original text:
+   not rejected (Decided); Warm source Decided, #10. Original text:
    ~~**New (Tech Lead resolved `deposit-flow.md` Open Questions #13 as
    option (b); invariant #18 is the design).** The rule is decided; these
    details are **PROPOSED** for confirmation:
@@ -891,7 +895,7 @@ sequenceDiagram
    "destination not allowed".
    (d) **Not covered:** the Hot Wallet's own address and the Warm Wallet
    address as withdrawal destinations are not addressed here.~~
-10. **Open: where does the Warm Wallet address come from?** Needed by
+10. ~~**Open: where does the Warm Wallet address come from?** Needed by
     invariant #18 (reject withdrawals/whitelist entries to it) and —
     an existing, previously unnoticed gap — by the Treasury Sweep itself
     (`wallet-tiering.md`'s diagram signs `to=Warm address` with no
@@ -908,7 +912,15 @@ sequenceDiagram
     directly, or an env var (rejected by default — drift, per
     `deposit-flow.md` invariant #15). Cold: **Decided (Tech Lead) — Cold
     Wallet addresses are not rejected as withdrawal destinations**, so
-    only the Warm address is needed from this source.
+    only the Warm address is needed from this source.~~
+    **Decided (Tech Lead): approved as recommended.** One operator file,
+    `infra/treasury.yaml`, read by `wallet-service` only, served by a new
+    `GET /v1/wallet/system-addresses` → `{chain_id, hot, warm}` (mTLS,
+    `CN=withdrawal-service` only) that sits **beside** `GET
+    /v1/wallet/hot-address` (unchanged, still used by `sweeper` and
+    `chain-watcher`). `wallet-service` fails startup if the file or the
+    Warm address for its chain is missing or malformed. Full rules:
+    `wallet-tiering.md` invariant #9.
 11. ~~**PROPOSED: per-user idempotency keys and a server-minted Withdrawal
     Key (invariant #20).** Changes `withdrawal-flow.md`,
     `integration-contracts.md` §1/§2/§3/§4 and `ledger.md` (key source
