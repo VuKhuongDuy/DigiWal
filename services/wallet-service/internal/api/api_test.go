@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 
@@ -180,7 +181,7 @@ const someAddr = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
 
 // service-auth-mtls.md matrix: chain-watcher only, from day one.
 func TestAddressLookup_OnlyChainWatcherMayCall(t *testing.T) {
-	for cn, want := range map[string]int{"chain-watcher": 200, "sweeper": 403, "withdrawal-service": 403, "api-gateway": 403, "ledger-service": 403, "": 403} {
+	for cn, want := range map[string]int{"chain-watcher": 200, "withdrawal-service": 200, "sweeper": 403, "api-gateway": 403, "ledger-service": 403, "": 403} {
 		f := &fakeAddresses{user: "alice", chain: "evm"}
 		if got := lookup(t, f, cn, someAddr).Code; got != want {
 			t.Errorf("CN=%q: %d, want %d", cn, got, want)
@@ -238,5 +239,104 @@ func TestHotAddress(t *testing.T) {
 	// Without a hot_wallet seed there is no address to give: 503, never an empty/zero address.
 	if rec := get(&Server{}, "sweeper"); rec.Code != 503 || strings.Contains(rec.Body.String(), "0x") {
 		t.Fatalf("unconfigured = %d %s", rec.Code, rec.Body)
+	}
+}
+
+func TestSystemAddresses(t *testing.T) {
+	get := func(srv *Server, cn string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest("GET", "/v1/wallet/system-addresses", nil)
+		if cn != "" {
+			req = withPeer(req, cn)
+		}
+		rec := httptest.NewRecorder()
+		srv.MTLSRoutes().ServeHTTP(rec, req)
+		return rec
+	}
+	srv := (&Server{hotSigner: &fakeHot{}}).WithSystemAddresses(SystemAddresses{
+		ChainID: 31337,
+		Hot:     common.HexToAddress("0x3d0290A916B57AE48a2840E7d3547fA317F976c3"),
+		Warm:    common.HexToAddress("0xa0Ee7A142d267C1f36714E4a8F75612F20a79720"),
+	})
+	// withdrawal-service only: the hot-address readers (sweeper, chain-watcher) get no new grant.
+	for cn, want := range map[string]int{"withdrawal-service": 200, "sweeper": 403, "chain-watcher": 403, "api-gateway": 403, "ledger-service": 403, "": 403} {
+		if got := get(srv, cn).Code; got != want {
+			t.Errorf("CN=%q: %d, want %d", cn, got, want)
+		}
+	}
+	rec := get(srv, "withdrawal-service")
+	if strings.TrimSpace(rec.Body.String()) != `{"chain_id":31337,"hot":"0x3d0290A916B57AE48a2840E7d3547fA317F976c3","warm":"0xa0Ee7A142d267C1f36714E4a8F75612F20a79720"}` {
+		t.Fatalf("body = %s", rec.Body)
+	}
+	// Not configured yet: 503, never a zero/partial answer.
+	if rec := get(&Server{}, "withdrawal-service"); rec.Code != 503 || strings.Contains(rec.Body.String(), "0x") {
+		t.Fatalf("unconfigured = %d %s", rec.Code, rec.Body)
+	}
+	// hot-address is unchanged for its existing callers.
+	for _, cn := range []string{"sweeper", "chain-watcher", "withdrawal-service"} {
+		req := withPeer(httptest.NewRequest("GET", "/v1/wallet/hot-address", nil), cn)
+		rec := httptest.NewRecorder()
+		srv.MTLSRoutes().ServeHTTP(rec, req)
+		if rec.Code != 200 {
+			t.Errorf("hot-address as CN=%q: %d", cn, rec.Code)
+		}
+	}
+}
+
+type fakeGaps struct {
+	err   error
+	calls int
+	got   []uint64
+}
+
+func (f *fakeGaps) FreezeNonceGap(_ context.Context, chainID int64, from uint64) (storage.NonceFreeze, error) {
+	f.calls++
+	f.got = append(f.got, from)
+	if f.err != nil {
+		return storage.NonceFreeze{}, f.err
+	}
+	return storage.NonceFreeze{ChainID: chainID, FromNonce: from, At: time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)}, nil
+}
+
+func TestNonceGap(t *testing.T) {
+	post := func(g *fakeGaps, cn, body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest("POST", "/v1/wallet/nonce-gap", strings.NewReader(body))
+		if cn != "" {
+			req = withPeer(req, cn)
+		}
+		rec := httptest.NewRecorder()
+		(&Server{nonceGaps: g}).MTLSRoutes().ServeHTTP(rec, req)
+		return rec
+	}
+	// withdrawal-service only: the sweeper (or anyone else) can never freeze Hot Wallet signing.
+	for cn, want := range map[string]int{"withdrawal-service": 200, "sweeper": 403, "chain-watcher": 403, "api-gateway": 403, "": 403} {
+		g := &fakeGaps{}
+		if rec := post(g, cn, `{"chain_id":31337,"from_nonce":4}`); rec.Code != want || (want == 403 && g.calls != 0) {
+			t.Errorf("CN=%q: %d (calls %d), want %d", cn, rec.Code, g.calls, want)
+		}
+	}
+	g := &fakeGaps{}
+	rec := post(g, "withdrawal-service", `{"chain_id":31337,"from_nonce":0}`)
+	if rec.Code != 200 || strings.TrimSpace(rec.Body.String()) != `{"chain_id":31337,"frozen_at":"2026-10-01T00:00:00Z","frozen_from_nonce":0}` {
+		t.Fatalf("nonce 0: %d %s", rec.Code, rec.Body)
+	}
+	for _, bad := range []string{`{}`, `{"chain_id":31337}`, `{"chain_id":0,"from_nonce":1}`, `{"chain_id":1,"from_nonce":-1}`, `{"chain_id":1,"from_nonce":1,"x":1}`, `nope`} {
+		if rec := post(&fakeGaps{}, "withdrawal-service", bad); rec.Code != 400 {
+			t.Errorf("%s: %d, want 400", bad, rec.Code)
+		}
+	}
+	if rec := post(&fakeGaps{err: storage.ErrNotFound}, "withdrawal-service", `{"chain_id":1,"from_nonce":1}`); rec.Code != 404 {
+		t.Errorf("never signed: %d", rec.Code)
+	}
+	if rec := post(&fakeGaps{err: storage.ErrNonceNotAllocated}, "withdrawal-service", `{"chain_id":1,"from_nonce":9}`); rec.Code != 422 {
+		t.Errorf("not allocated: %d", rec.Code)
+	}
+	// There is no route to lift a freeze.
+	for _, m := range []string{"DELETE", "PUT", "PATCH"} {
+		req := withPeer(httptest.NewRequest(m, "/v1/wallet/nonce-gap", nil), "withdrawal-service")
+		rec := httptest.NewRecorder()
+		(&Server{nonceGaps: &fakeGaps{}}).MTLSRoutes().ServeHTTP(rec, req)
+		if rec.Code != 405 {
+			t.Errorf("%s: %d, want 405", m, rec.Code)
+		}
 	}
 }

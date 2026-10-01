@@ -44,10 +44,11 @@ type Ledger interface {
 }
 
 type Server struct {
-	Auth   Authenticator
-	Users  UserCreator
-	Wallet Wallet
-	Ledger Ledger
+	Auth        Authenticator
+	Users       UserCreator
+	Wallet      Wallet
+	Ledger      Ledger
+	Withdrawals Withdrawals
 }
 
 // Routes: POST /users is the only unauthenticated route (invariant #3). Everything else,
@@ -57,6 +58,11 @@ func (s *Server) Routes() http.Handler {
 	authed := http.NewServeMux()
 	authed.HandleFunc("GET /v1/deposit-address", s.handleDepositAddress)
 	authed.HandleFunc("GET /v1/balances", s.handleBalances)
+	authed.HandleFunc("POST /v1/withdrawals", s.handleCreateWithdrawal)
+	authed.HandleFunc("GET /v1/withdrawals/{idempotency_key}", s.handleGetWithdrawal)
+	authed.HandleFunc("GET /v1/whitelist", s.handleListWhitelist)
+	authed.HandleFunc("POST /v1/whitelist", s.handleAddWhitelist)
+	authed.HandleFunc("DELETE /v1/whitelist/{id}", s.handleRemoveWhitelist)
 
 	root := http.NewServeMux()
 	root.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
@@ -145,6 +151,10 @@ func (s *Server) handleBalances(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_, _ = w.Write(body)
+}
+
+func logUpstream(svc, method, path string, err error) {
+	log.Printf("%s %s %s: %v", svc, method, strings.SplitN(path, "?", 2)[0], err)
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

@@ -2,7 +2,7 @@
 #   make e2e        bring the stack up, run the tests, tear it down (volumes included)
 #   make up / test / down / logs   the same steps one at a time, for debugging
 COMPOSE = docker compose -p digiwal-e2e --project-directory . -f ../infra/docker-compose.yml -f docker-compose.yml
-SERVICES = wallet-service ledger-service chain-watcher sweeper api-gateway
+SERVICES = wallet-service ledger-service chain-watcher sweeper api-gateway withdrawal-service
 # Fixed, throwaway key: this stack's volumes are deleted on `make down`.
 export MASTER_KEY_HEX ?= 0000000000000000000000000000000000000000000000000000000000000001
 

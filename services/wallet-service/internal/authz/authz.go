@@ -35,9 +35,19 @@ var (
 	// Wallet's own address (deposit-flow.md, Hot Wallet Address Discovery). chain-watcher reads it
 	// only to skip Hot Wallet Outflow (invariant #17); it still cannot reach either /v1/sign/*.
 	HotAddressReaders = []string{CNWithdrawalService, CNSweeper, CNChainWatcher}
-	// AddressLookupCallers may call GET /v1/addresses/{address}: chain-watcher only, and
-	// from day one (service-auth-mtls.md matrix) — it cannot resolve a deposit's user_id without it.
-	AddressLookupCallers = []string{CNChainWatcher}
+	// SystemAddressReaders may call GET /v1/wallet/system-addresses ({hot, warm}): withdrawal-service
+	// only, to refuse withdrawals and whitelist entries to the Hot/Warm Wallet (withdrawal-flow.md
+	// invariant #18) and, later, as its Treasury Sweep destination (wallet-tiering.md invariant #9).
+	SystemAddressReaders = []string{CNWithdrawalService}
+	// NonceGapReporters may call POST /v1/wallet/nonce-gap: withdrawal-service only, the one
+	// component that tracks Hot Wallet txs to Withdrawal Confirmation Depth (withdrawal-flow.md
+	// invariant #19). There is no endpoint to lift a freeze: only an operator, in the database.
+	NonceGapReporters = []string{CNWithdrawalService}
+	// AddressLookupCallers may call GET /v1/addresses/{address}: chain-watcher, which cannot
+	// resolve a deposit's user_id without it (service-auth-mtls.md matrix), and withdrawal-service,
+	// which refuses withdrawals and whitelist entries to one of our own deposit addresses
+	// (withdrawal-flow.md invariant #18, Decided). Neither can reach /v1/sign/user-address.
+	AddressLookupCallers = []string{CNChainWatcher, CNWithdrawalService}
 )
 
 // Require wraps next so only clients whose verified certificate CN is in

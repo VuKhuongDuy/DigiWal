@@ -200,7 +200,9 @@ concrete Confirmation Depth and Gas Top-Up numbers below.
   Wallet Outflow into a Watched Address, so `chain-watcher` must not
   treat it as a deposit — invariant #17** (found by the M2 e2e test: the
   original design was silent on this and the user was credited 0.001 ETH
-  they never sent).
+  they never sent). A stuck (underpriced) top-up is fee-bumped by
+  `sweeper` (invariant #18), and its gas is recorded in the ledger
+  (invariant #19).
 - **Sweepable Amount** — for a **native-coin** Sweep specifically: the
   actual `amount` sent, after reserving enough of the address's own
   balance to pay the Sweep transaction's own gas. Sweeping the *entire*
@@ -436,7 +438,11 @@ concrete Confirmation Depth and Gas Top-Up numbers below.
     ledger credit failing to apply *is* a correctness-critical loss if
     given up on, so that consumer must keep retrying rather than ever
     skip-and-ALERT a message — see `integration-contracts.md` §5 for the
-    consolidated policy across every consumer.
+    consolidated policy across every consumer. **While a Nonce Gap freeze
+    is open** (`withdrawal-flow.md` invariant #19, Decided), every Gas
+    Top-Up gets `503` and ends in this skip path; native Sweeps are
+    unaffected. Re-drive the skipped records after the operator lifts
+    the freeze.
 
 17. **A Hot Wallet Outflow is never a deposit: `chain-watcher` emits no
     `deposits.detected`/`deposits.confirmed` and records no
@@ -501,6 +507,38 @@ concrete Confirmation Depth and Gas Top-Up numbers below.
       deposit; the funds would simply be an operator matter.) Also: transfers already mis-recorded before the fix ships are not
       retroactively corrected, by decision: an environment that ran the
       sweeper before this fix is reset, not repaired — Open Questions #14.
+18. **A stuck Gas Top-Up is fee-bumped by `sweeper`, never abandoned.**
+    **Decided (Tech Lead), `withdrawal-flow.md` Open Questions #17;
+    task 2.8.** A Gas Top-Up holds a Hot Wallet nonce; left underpriced
+    it blocks every later Hot Wallet tx, withdrawals included. While
+    waiting for a top-up's inclusion, `sweeper` uses `POST
+    /v1/sign/hot-wallet/{key}/replace` for its own `gas-topup:…` key
+    (`caller_cn` scoping — it can never touch a withdrawal's signature)
+    with the same rules as withdrawals: when the node refuses the
+    broadcast as underpriced, or the tx is not mined after 20 blocks and
+    is underpriced, bump ×1.125, at most 5 times, 50 gwei ceiling, then
+    `ALERT` (`withdrawal-flow.md` invariant #21). `sweeper` has no
+    database, so it reads `GET /v1/sign/hot-wallet/{key}` for the last
+    `replacement_seq` and every version's hash, and treats the top-up as
+    done when **any** version is mined. Re-broadcasts only the latest.
+    The invariant #16 give-up (10 attempts, `ALERT`, skip) no longer
+    abandons a stuck top-up silently: before skipping, the bump path
+    must have been exhausted and the `ALERT` names the key, so an
+    operator can still bump or fill it.
+19. **`sweeper` records the gas of every Gas Top-Up and Sweep it sends
+    in the ledger.** **Decided (Tech Lead), including the Entry design —
+    `ledger.md` invariant #12; task 2.8.** Once a
+    Gas Top-Up or Sweep tx is mined (the point `sweeper` already waits
+    for), it posts `POST /v1/ledger/gas-fees` `{chain_id, tx_hash,
+    gas_used, effective_gas_price, purpose: gas_topup | sweep}` from the
+    receipt, idempotent on `gas:{chain_id}:{tx_hash}`. Covers native
+    Sweeps (gas paid out of the deposited ETH, so custody holds
+    `deposit − gas` while the user is credited the full deposit) and
+    ERC-20 Sweeps (gas paid out of the top-up). The top-up's value
+    itself is an internal custody move and posts nothing. **Known
+    limitation, accepted (Decided, `ledger.md` Open Questions #6):**
+    `sweeper` stays stateless and posts at inclusion, not after a depth,
+    so a crash between mined and posted can lose one record.
 
 ## Diagram
 
@@ -852,10 +890,9 @@ sequenceDiagram
     addresses, resolved via `wallet-service`'s `GET
     /v1/addresses/{address}` (200 = ours -> reject; 404 = not ours ->
     continue; any other failure = fail closed, never "not ours"). Design
-    in `withdrawal-flow.md` invariant #18; the new `withdrawal-service`
-    grant on that endpoint is **PROPOSED**, awaiting Tech Lead approval
-    (`service-auth-mtls.md`, `integration-contracts.md`); plan task 3.10.
-    Follow-on open points are `withdrawal-flow.md` Open Questions #9.
+    in `withdrawal-flow.md` invariant #18; the `withdrawal-service`
+    grant on that endpoint is **Decided** (Tech Lead, `withdrawal-flow.md`
+    Open Questions #9a, resolved); plan task 3.10.
 14. ~~**Open: remediation of deposits already mis-credited by Gas Top-Ups
     before the fix ships.** `chain-watcher` will not rescan history, and
     `ledger.md` has no designed reversal for a confirmed deposit

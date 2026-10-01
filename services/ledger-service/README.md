@@ -15,7 +15,9 @@ balance goes through one operation, `Apply`.
     UPDATE, so concurrent locks serialize on the account row and can't over-reserve. A replay
     returns the lock's current status; same key with a different request is `409`.
   - `POST /v1/ledger/locks/{key}/settle`: the real debit, one atomic transaction (lock flip, both
-    balance updates, both entries). Never routed through `Apply`. Replay returns the same result.
+    balance updates, both entries). Never routed through `Apply`. Replay returns the same result:
+    `{idempotency_key, status, ledger_transaction_id, entry_ids}` — `entry_ids` (the debit and the
+    chain credit) are what a refund corrects if the withdrawal is later reorged out (task 3.5).
   - `POST /v1/ledger/locks/{key}/release`: gives the capacity back, posts nothing.
   - Settled xor released, exactly once. A conflicting resolution is **`409`, never `200`**, so the
     caller can't mistake a released lock for a debited one.

@@ -33,6 +33,8 @@ POST /v1/sign/hot-wallet                  # CN: withdrawal-service, sweeper
 POST /v1/sign/user-address                # CN: sweeper only (Sweep: user key -> Hot Wallet)
 GET  /v1/addresses/{address}              # CN: chain-watcher only -> {user_id, chain} or 404
 GET  /v1/wallet/hot-address               # CN: withdrawal-service, sweeper, chain-watcher -> {address}; 503 without a hot_wallet seed
+GET  /v1/wallet/system-addresses          # CN: withdrawal-service only -> {chain_id, hot, warm}; 503 until the Hot Wallet is configured
+POST /v1/wallet/nonce-gap                 # CN: withdrawal-service only {chain_id, from_nonce} -> freeze Hot Wallet signing
 ```
 
 `POST /v1/sign/hot-wallet` `{to_address, asset_id, amount, chain_id, idempotency_key, max_gas_price?}`
@@ -55,6 +57,29 @@ are simply not in the hash and resolve through the endpoint.
 (`deposit-flow.md`, Hot Wallet Address Discovery, invariants #15 and #17). Callers ask once at startup and
 cache it rather than configure it. chain-watcher uses it only to skip Hot Wallet Outflow and still cannot
 reach either `/v1/sign/*` endpoint.
+
+`GET /v1/wallet/system-addresses` adds the **Warm** Wallet address (`wallet-tiering.md` invariant #9).
+The Warm seed is never in this service, so the address comes from the operator's Treasury file,
+`infra/treasury.yaml` (`TREASURY_FILE`, mounted into wallet-service only): `chains: [{chain_id,
+warm_address}]`. The file is **required** in server mode: wallet-service refuses to start if it is
+missing or unparseable, lists no chains, has a non-positive or duplicate chain id, or a malformed or
+zero address; and, once the Hot Wallet is configured, if there is no entry for its chain or the Warm
+address equals the Hot Wallet's. withdrawal-service uses it to refuse withdrawals to the Hot/Warm
+Wallet (`withdrawal-flow.md` #18) and later as its Treasury Sweep destination. It sits beside
+`hot-address`, which is unchanged. To change the Warm address: edit the file, restart wallet-service,
+then withdrawal-service.
+
+`POST /v1/wallet/nonce-gap` `{chain_id, from_nonce}` (`withdrawal-flow.md` invariants #7, #19) is how
+withdrawal-service reports a Nonce Gap: from then on no new Hot Wallet nonce is allocated for any caller
+(`POST /v1/sign/hot-wallet` answers `503`; a replay of an already-signed key still works). It returns the
+effective freeze `{chain_id, frozen_from_nonce, frozen_at}`: the lowest nonce ever reported wins, so a
+repeat is a no-op and the caller just retries until `200`. `404` if this chain never allocated a nonce,
+`422` if `from_nonce` was never allocated. **There is no endpoint to lift a freeze** — an operator does it
+in the database after resolving every disputed withdrawal (see withdrawal-service's README):
+
+```sql
+UPDATE hot_wallet_nonces SET frozen_from_nonce = NULL, frozen_at = NULL WHERE chain_id = <chain>;
+```
 
 `POST /v1/sign/user-address` `{user_id, to_address, asset_id, amount, chain_id}` → `{signed_raw_tx}`.
 The caller picks whose key signs but never the destination: `to_address` must equal the Hot

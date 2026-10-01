@@ -86,13 +86,13 @@ func (p *Processor) Handle(ctx context.Context, m Message) error {
 		if err != nil {
 			return p.fail(ctx, m, err.Error())
 		}
-		return p.Store.RecordProgress(ctx, withdrawalEntry(ev.IdempotencyKey, ev.UserID, ev.AssetID, string(ev.Amount), ev.ToAddress, ev.TxHash, ev.ChainID, 0, ev.BroadcastAt), StatusBroadcast)
+		return p.Store.RecordProgress(ctx, withdrawalEntry(ev.WithdrawalID, ev.UserID, ev.AssetID, string(ev.Amount), ev.ToAddress, ev.TxHash, ev.ChainID, 0, ev.BroadcastAt), StatusBroadcast)
 	case events.TopicWithdrawalsConfirmed:
 		ev, err := events.Decode[events.WithdrawalConfirmed](m.Value)
 		if err != nil {
 			return p.fail(ctx, m, err.Error())
 		}
-		return p.Store.RecordConfirmed(ctx, withdrawalEntry(ev.IdempotencyKey, ev.UserID, ev.AssetID, string(ev.Amount), ev.ToAddress, ev.TxHash, ev.ChainID, ev.BlockNumber, ev.ConfirmedAt))
+		return p.Store.RecordConfirmed(ctx, withdrawalEntry(ev.WithdrawalID, ev.UserID, ev.AssetID, string(ev.Amount), ev.ToAddress, ev.TxHash, ev.ChainID, ev.BlockNumber, ev.ConfirmedAt))
 	default:
 		return p.fail(ctx, m, fmt.Sprintf("unexpected topic %q", m.Topic))
 	}
@@ -103,8 +103,8 @@ func depositEntry(chainID int64, txHash string, logIndex int64, user, asset, amo
 		AssetID: asset, Amount: amount, Address: from, TxHash: txHash, ChainID: chainID, BlockNumber: block, At: at.UTC()}
 }
 
-func withdrawalEntry(key, user, asset, amount, to, txHash string, chainID, block int64, at time.Time) Entry {
-	return Entry{ID: KindWithdrawal + ":" + key, UserID: user, Kind: KindWithdrawal,
+func withdrawalEntry(withdrawalID, user, asset, amount, to, txHash string, chainID, block int64, at time.Time) Entry {
+	return Entry{ID: KindWithdrawal + ":" + withdrawalID, UserID: user, Kind: KindWithdrawal,
 		AssetID: asset, Amount: amount, Address: to, TxHash: txHash, ChainID: chainID, BlockNumber: block, At: at.UTC()}
 }
 

@@ -88,6 +88,9 @@ func New(ctx context.Context, store Store, hot *hdwallet.Wallet, chain Chain, as
 	return &Signer{store: store, wallet: hot, chain: chain, assets: assets, chainID: id.Int64(), from: common.HexToAddress(addr)}, nil
 }
 
+// ChainID is the chain this signer signs for (read from the RPC at startup).
+func (s *Signer) ChainID() int64 { return s.chainID }
+
 func (s *Signer) HotWalletAddress() common.Address { return s.from }
 
 func (s *Signer) Sign(ctx context.Context, req Request) (Response, error) {

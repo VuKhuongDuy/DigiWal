@@ -142,7 +142,8 @@ func TestKeys(t *testing.T) {
 		t.Fatal("key must be case-insensitive in tx_hash")
 	}
 	w, _ := Decode[WithdrawalBroadcast](golden(t, TopicWithdrawalsBroadcast))
-	if w.Key() != "33333333-3333-3333-3333-333333333333" {
+	// invariant #20: keyed on the server-minted withdrawal_id, never the client's per-user key.
+	if w.Key() != "44444444-4444-4444-4444-444444444444" {
 		t.Fatalf("withdrawal key %q", w.Key())
 	}
 }

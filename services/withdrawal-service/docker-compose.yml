@@ -1,0 +1,44 @@
+# Pulls in ../../infra/docker-compose.yml via `include:` — don't also pass it with -f.
+include:
+  - path: ../../infra/docker-compose.yml
+
+services:
+  withdrawal-service:
+    build:
+      context: ../..            # repo root: the image needs pkg/events
+      dockerfile: services/withdrawal-service/Dockerfile
+    environment:
+      PORT: "8080"
+      POSTGRES_DSN: postgres://custody:custody@postgres:5432/withdrawal?sslmode=disable
+      # The canonical registry + screening list, mounted identically everywhere.
+      ASSETS_FILE: /config/assets.yaml
+      SCREENING_FILE: /config/screening.yaml
+      # Whitelist Cooldown is 24h (decided); set e.g. 2s only for local/e2e testing.
+      WHITELIST_COOLDOWN: ${WHITELIST_COOLDOWN:-}
+      # Hot/Warm addresses and the deposit-address lookup, over mTLS as CN=withdrawal-service.
+      # Each service's compose is its own project: point this at a reachable wallet-service, or
+      # use e2e/ (one stack). withdrawal-service does not start until it gets an answer.
+      WALLET_SERVICE_URL: ${WALLET_SERVICE_URL:-https://wallet-service:8443}
+      # Lock/Settle/Release on ledger-service, same mTLS client.
+      LEDGER_SERVICE_URL: ${LEDGER_SERVICE_URL:-https://ledger-service:8443}
+      # Broadcast and confirmations; withdrawals.broadcast / withdrawals.confirmed.
+      RPC_URL: ${RPC_URL:-http://anvil:8545}
+      KAFKA_BROKERS: kafka:9092
+      # Decided 64 blocks (Sepolia); a local chain needs far fewer.
+      WITHDRAWAL_CONFIRMATION_DEPTH: ${WITHDRAWAL_CONFIRMATION_DEPTH:-}
+      # mTLS listener for the client-facing endpoints, CN=api-gateway only (`make certs`).
+      TLS_CERT_FILE: /certs/cert.pem
+      TLS_KEY_FILE: /certs/key.pem
+      TLS_CA_FILE: /certs/ca-cert.pem
+    volumes:
+      - ../../infra/assets.yaml:/config/assets.yaml:ro
+      - ../../infra/screening.yaml:/config/screening.yaml:ro
+      - ../../infra/pki/out/withdrawal-service:/certs:ro
+    ports: ["8086:8080", "8446:8443"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      anvil:
+        condition: service_healthy

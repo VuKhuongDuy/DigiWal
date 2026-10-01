@@ -237,12 +237,17 @@ callers invented here.
 | `wallet-service` | `POST /v1/sign/hot-wallet` | `withdrawal-service`, `sweeper` | **Decided here** — required, blocks nothing else, closes the gap the Tech Lead flagged |
 | `wallet-service` | `POST /v1/sign/user-address` | `sweeper` only | **Decided here** — same |
 | `wallet-service` | `GET`/`POST /v1/users/{userID}/deposit-address` | `api-gateway` | **PROPOSED** — see Open Questions #4 |
-| `wallet-service` | `GET /v1/addresses/{address}` | `chain-watcher`; **`withdrawal-service` (PROPOSED addition — new authz grant, awaiting Tech Lead approval, `withdrawal-flow.md` invariant #18 / Open Questions #9)** | **PROPOSED**, new — fixes a real gap (Tech Lead review, `deposit-flow.md`'s Address Resolution): `chain-watcher` cannot resolve a deposit's `user_id` without this endpoint, so unlike the row above it isn't deferred — needed from `chain-watcher`'s first working version, not a later consistency pass |
+| `wallet-service` | `GET /v1/addresses/{address}` | `chain-watcher`; **`withdrawal-service` (Decided, Tech Lead — `withdrawal-flow.md` invariant #18, Open Questions #9a)** | **PROPOSED**, new — fixes a real gap (Tech Lead review, `deposit-flow.md`'s Address Resolution): `chain-watcher` cannot resolve a deposit's `user_id` without this endpoint, so unlike the row above it isn't deferred — needed from `chain-watcher`'s first working version, not a later consistency pass |
 | `wallet-service` | `GET /v1/wallet/hot-address` | `sweeper`, `withdrawal-service`, **`chain-watcher` (Decided, Gas Top-Up bug fix — implemented)** | **PROPOSED**, new — fixes a real gap (Tech Lead review, `deposit-flow.md`'s Hot Wallet Address Discovery): closes a config-drift risk where a locally-configured Hot Wallet address could diverge from what `wallet-service` actually derived. **`chain-watcher` added** so it can recognise Hot Wallet Outflows and never treat them as deposits (`deposit-flow.md` invariant #17, Open Questions #12, resolved). Read-only, public on-chain information, so widening the list costs no signing capability; `chain-watcher` still cannot reach either `/v1/sign/*` endpoint |
 | `wallet-service` | `GET /healthz` | (no client cert required — plain listener, invariant #8) | Decided here |
+| `ledger-service` | `POST /v1/ledger/gas-fees` | `withdrawal-service`, `sweeper` | **Decided (Tech Lead)**, new (`ledger.md` invariant #12). A separate endpoint so `sweeper` never gains access to `apply`/corrections or Locks |
 | `ledger-service` | `POST /v1/ledger/transactions` (`apply`), `POST /v1/ledger/locks`, `.../{key}/settle`, `.../{key}/release` | `withdrawal-service` only, on all four | **PROPOSED**, invariant #7 — build in at Milestone 1 |
 | `ledger-service` | `GET /v1/ledger/balances/{user_id}` | `api-gateway` | **PROPOSED**, new — fixes a real gap (Tech Lead review): `integration-contracts.md`'s `GET /v1/balances` had a decided response shape but no `ledger-service` endpoint behind it until now; this row replaces the old "not yet applicable" placeholder |
-| `withdrawal-service` | `POST /withdrawals`, `GET /withdrawals/{idempotency_key}`, `POST /whitelist`, `DELETE /whitelist/{id}` | `api-gateway` | **PROPOSED, deferred** — see Open Questions #4 |
+| `wallet-service` | `GET /v1/wallet/system-addresses` | `withdrawal-service` only | **Decided (Tech Lead)**, new (`wallet-tiering.md` invariant #9) — `{chain_id, hot, warm}`; sits beside `GET /v1/wallet/hot-address`, whose allow-list is unchanged |
+| `wallet-service` | `GET /v1/sign/hot-wallet/{key}`, `POST /v1/sign/hot-wallet/{key}/replace` | `withdrawal-service`, `sweeper` | **Decided (Tech Lead)**, new (`withdrawal-flow.md` invariants #21, #22; `sweeper` for its own Gas Top-Up keys, Open Questions #17). Each acts only on keys the same CN signed (`caller_cn`), so a CN can never read or re-fee another caller's signatures |
+| `wallet-service` | `POST /v1/sign/hot-wallet/{key}/void` | `withdrawal-service` only | **Decided (Tech Lead)**, new (`withdrawal-flow.md` invariant #22), same `caller_cn` scoping. The Nonce Filler is deliberately **not** an endpoint (CLI inside `wallet-service`, invariant #23) |
+| `wallet-service` | `POST /v1/wallet/nonce-gap` | `withdrawal-service` only | **Decided (Tech Lead)**, new (`withdrawal-flow.md` invariant #19, Open Questions #12) — sets the Nonce Gap freeze. There is deliberately **no** unfreeze endpoint on this listener: lifting a freeze is a manual operator DB action, so no service certificate can ever do it |
+| `withdrawal-service` | `POST /v1/withdrawals`, `GET /v1/withdrawals/{idempotency_key}`, `POST /v1/whitelist`, `GET /v1/whitelist?user_id=` (Decided, new), `DELETE /v1/whitelist/{id}` | `api-gateway` | **Decided (Tech Lead)** — mTLS, `CN=api-gateway`, built with `withdrawal-service` from the start (Open Questions #4, this hop) |
 | `history-service` | (its API is a GAP per `integration-contracts.md` §2) | `api-gateway`, once designed | **PROPOSED, not yet applicable** |
 
 `chain-watcher` now needs its own leaf certificate (previously it was
@@ -446,6 +451,10 @@ technical requirement; see Open Questions #3.
    already-shipped code; the matrix row above stays **PROPOSED**. Come
    back to this once there's a concrete reason to touch that endpoint
    anyway, rather than as a standalone migration.
+   **Decided (Tech Lead) for the `api-gateway` → `withdrawal-service`
+   hop:** mTLS with `CN=api-gateway` on all four endpoints (matrix row
+   above). New code, so no migration concern. The `wallet-service`
+   deposit-address part of this question stays deferred as above.
 5. ~~ECDSA P-256 vs. RSA-4096 for the CA and leaf keys.~~ **Decided:
    ECDSA P-256**, as recommended — faster generation, smaller
    certificates, no strong reason to prefer RSA at this trust level.

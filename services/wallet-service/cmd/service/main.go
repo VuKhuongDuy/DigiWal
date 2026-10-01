@@ -25,6 +25,7 @@ import (
 	"digiwal/services/wallet-service/internal/hdwallet"
 	"digiwal/services/wallet-service/internal/signing"
 	"digiwal/services/wallet-service/internal/storage"
+	"digiwal/services/wallet-service/internal/treasury"
 )
 
 func main() {
@@ -103,12 +104,31 @@ func runServer(ctx context.Context, store *storage.Store, sealer *crypto.Sealer)
 	// address at BIP44 index 0. Signing needs the seed, an EVM RPC (wallet-service
 	// builds the tx itself) and the asset list; without all three the endpoint
 	// answers 503 instead of guessing.
+	// The operator's Treasury file (Warm address per chain, wallet-tiering.md invariant #9).
+	// Required: a missing or malformed file stops startup rather than serve a Warm address we
+	// cannot trust.
+	treasuryFile, err := treasury.Load(requireEnv("TREASURY_FILE"))
+	if err != nil {
+		log.Fatal(err)
+	}
+
 	var hotSigner api.HotSigner
 	var userSign api.UserSigner
+	var system *api.SystemAddresses
 	hotWallet, err := loadWallet(ctx, store, sealer, storage.RoleHotWallet)
 	switch {
 	case err == nil:
-		hotSigner, userSign = buildSigners(ctx, store, hotWallet, userWallet)
+		var signer *signing.Signer
+		signer, userSign = buildSigners(ctx, store, hotWallet, userWallet)
+		if signer != nil {
+			hotSigner = signer
+			warm, err := treasuryFile.WarmFor(signer.ChainID(), signer.HotWalletAddress())
+			if err != nil {
+				log.Fatal(err)
+			}
+			system = &api.SystemAddresses{ChainID: signer.ChainID(), Hot: signer.HotWalletAddress(), Warm: warm}
+			log.Printf("treasury: chain %d, warm %s", system.ChainID, warm.Hex())
+		}
 	case errors.Is(err, storage.ErrNotFound):
 		log.Println("WARNING: no hot_wallet seed found — run with -init-seed hot_wallet before Hot Wallet signing is used")
 	default:
@@ -116,6 +136,9 @@ func runServer(ctx context.Context, store *storage.Store, sealer *crypto.Sealer)
 	}
 
 	server := api.NewServer(store, cache, signer, hotSigner, userSign)
+	if system != nil {
+		server.WithSystemAddresses(*system)
+	}
 
 	// mTLS listener for /v1/sign/* (service-auth-mtls.md). Fail closed: without
 	// certs it simply isn't started, so nothing can be signed.
@@ -142,7 +165,7 @@ func runServer(ctx context.Context, store *storage.Store, sealer *crypto.Sealer)
 // buildSigners wires the Hot Wallet signer and, if the user_derivation seed is
 // loaded too, the Sweep (user-address) signer. Returns nils (endpoints answer
 // 503) when RPC_URL / ASSETS_FILE aren't configured.
-func buildSigners(ctx context.Context, store *storage.Store, hot, users *hdwallet.Wallet) (api.HotSigner, api.UserSigner) {
+func buildSigners(ctx context.Context, store *storage.Store, hot, users *hdwallet.Wallet) (*signing.Signer, api.UserSigner) {
 	rpcURL, assetsFile := os.Getenv("RPC_URL"), os.Getenv("ASSETS_FILE")
 	if rpcURL == "" || assetsFile == "" {
 		log.Println("WARNING: RPC_URL / ASSETS_FILE not set — signing endpoints disabled")

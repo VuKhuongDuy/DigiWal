@@ -134,7 +134,7 @@ func TestSignHotWallet_FailedSigningConsumesNoNonce(t *testing.T) {
 func TestNonceGapFreeze_RefusesNewAllocationButAllowsReplay(t *testing.T) {
 	s := newStore(t)
 	ctx := context.Background()
-	if err := s.FreezeNonceGap(ctx, chain, 3); !errors.Is(err, ErrNotFound) {
+	if _, err := s.FreezeNonceGap(ctx, chain, 3); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("freeze before first use: want ErrNotFound, got %v", err)
 	}
 	for i := 0; i < 3; i++ {
@@ -142,15 +142,25 @@ func TestNonceGapFreeze_RefusesNewAllocationButAllowsReplay(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := s.FreezeNonceGap(ctx, chain, 2); err != nil {
-		t.Fatal(err)
+	f, err := s.FreezeNonceGap(ctx, chain, 2)
+	if err != nil || f.FromNonce != 2 || f.At.IsZero() {
+		t.Fatalf("freeze: %+v %v", f, err)
 	}
-	if err := s.FreezeNonceGap(ctx, chain, 5); err != nil { // later gap must not raise the floor
-		t.Fatal(err)
+	if again, err := s.FreezeNonceGap(ctx, chain, 2); err != nil || again != f { // a repeat is a no-op
+		t.Fatalf("repeat: %+v %v, want %+v", again, err, f)
+	}
+	if _, err := s.FreezeNonceGap(ctx, chain, 3); !errors.Is(err, ErrNonceNotAllocated) { // next_nonce is 3
+		t.Fatalf("never-allocated nonce: %v, want ErrNonceNotAllocated", err)
+	}
+	if lower, err := s.FreezeNonceGap(ctx, chain, 1); err != nil || lower.FromNonce != 1 || !lower.At.Equal(f.At) { // only widens
+		t.Fatalf("lower: %+v %v", lower, err)
+	}
+	if again, err := s.FreezeNonceGap(ctx, chain, 2); err != nil || again.FromNonce != 1 { // a higher report never raises it
+		t.Fatalf("higher after lower: %+v %v", again, err)
 	}
 	var from int64
-	if err := s.pool.QueryRow(ctx, `SELECT frozen_from_nonce FROM hot_wallet_nonces WHERE chain_id=$1`, chain).Scan(&from); err != nil || from != 2 {
-		t.Fatalf("frozen_from_nonce = %d (err %v), want 2", from, err)
+	if err := s.pool.QueryRow(ctx, `SELECT frozen_from_nonce FROM hot_wallet_nonces WHERE chain_id=$1`, chain).Scan(&from); err != nil || from != 1 {
+		t.Fatalf("frozen_from_nonce = %d (err %v), want 1", from, err)
 	}
 
 	// new key: refused, whoever asks (invariant #7)

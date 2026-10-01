@@ -88,6 +88,7 @@ type env struct {
 	wallet    *fakeWallet
 	walletSrv *httptest.Server
 	ledger    *fakeLedger
+	wd        *fakeWithdrawals
 }
 
 func newEnv(t *testing.T) *env {
@@ -103,11 +104,15 @@ func newEnv(t *testing.T) *env {
 	fl := &fakeLedger{}
 	ls := httptest.NewServer(fl.handler())
 	t.Cleanup(ls.Close)
+	fwd := &fakeWithdrawals{}
+	wds := httptest.NewServer(fwd.handler())
+	t.Cleanup(wds.Close)
 	s := &api.Server{Auth: st, Users: st, Wallet: &api.WalletClient{BaseURL: ws.URL, HTTP: ws.Client()},
-		Ledger: &api.LedgerClient{BaseURL: ls.URL, HTTP: ls.Client()}}
+		Ledger:      &api.LedgerClient{BaseURL: ls.URL, HTTP: ls.Client()},
+		Withdrawals: &api.WithdrawalClient{BaseURL: wds.URL, HTTP: wds.Client()}}
 	srv := httptest.NewServer(s.Routes())
 	t.Cleanup(srv.Close)
-	return &env{t: t, st: st, srv: srv, wallet: fw, walletSrv: ws, ledger: fl}
+	return &env{t: t, st: st, srv: srv, wallet: fw, walletSrv: ws, ledger: fl, wd: fwd}
 }
 
 func (e *env) do(method, path, auth string, body string, hdr ...string) (int, string) {
@@ -204,10 +209,14 @@ func TestEverythingElseRequiresAValidKey(t *testing.T) {
 		"garbage":      "Bearer !!!",
 		"two tokens":   "Bearer " + key + " extra",
 	}
-	for _, path := range []string{"/v1/deposit-address", "/v1/balances", "/nope", "/"} {
+	for _, route := range [][2]string{
+		{"GET", "/v1/deposit-address"}, {"GET", "/v1/balances"}, {"GET", "/nope"}, {"GET", "/"},
+		{"POST", "/v1/withdrawals"}, {"GET", "/v1/withdrawals/k1"},
+		{"GET", "/v1/whitelist"}, {"POST", "/v1/whitelist"}, {"DELETE", "/v1/whitelist/x"},
+	} {
 		for name, auth := range bad {
-			if code, _ := e.do("GET", path, auth, ""); code != 401 {
-				t.Errorf("GET %s with %s = %d, want 401", path, name, code)
+			if code, _ := e.do(route[0], route[1], auth, `{}`); code != 401 {
+				t.Errorf("%s %s with %s = %d, want 401", route[0], route[1], name, code)
 			}
 		}
 	}
@@ -215,8 +224,8 @@ func TestEverythingElseRequiresAValidKey(t *testing.T) {
 	if code, _ := e.do("GET", "/nope", "Bearer "+key, ""); code != 404 {
 		t.Errorf("valid key, unknown route = %d, want 404", code)
 	}
-	if len(e.wallet.requests) != 0 {
-		t.Fatalf("an unauthenticated request reached wallet-service: %v", e.wallet.requests)
+	if len(e.wallet.requests) != 0 || len(e.wd.requests) != 0 {
+		t.Fatalf("an unauthenticated request reached a service: %v %v", e.wallet.requests, e.wd.requests)
 	}
 }
 

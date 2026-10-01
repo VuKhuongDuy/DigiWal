@@ -18,9 +18,12 @@ services:
       # endpoints answer 503) and the canonical Asset Registry (infra/assets.yaml).
       RPC_URL: ${RPC_URL:-}
       ASSETS_FILE: /config/assets.yaml
+      # The operator's Treasury file (Warm address per chain) — wallet-service only, required.
+      TREASURY_FILE: /config/treasury.yaml
     volumes:
       - ../../infra/pki/out/wallet-service:/certs:ro
       - ../../infra/assets.yaml:/config/assets.yaml:ro
+      - ../../infra/treasury.yaml:/config/treasury.yaml:ro
     ports: ["8080:8080", "8443:8443"]
     depends_on:
       postgres:

@@ -494,7 +494,7 @@ func TestSettle_IsIdempotentAndNeverDoubleDebits(t *testing.T) {
 	mustLock(t, s, "w1", "alice", "400")
 	first := mustSettle(t, s, "w1")
 	for i := 0; i < 3; i++ {
-		if again := mustSettle(t, s, "w1"); again != first {
+		if again := mustSettle(t, s, "w1"); fmt.Sprintf("%+v", again) != fmt.Sprintf("%+v", first) {
 			t.Fatalf("replay %+v != first %+v", again, first)
 		}
 	}
@@ -870,4 +870,27 @@ func TestBalanceSheet(t *testing.T) {
 	if sheet, _ := s.BalanceSheet(ctx, "carol", eth); sheet[0].Total.String() != "100000000000000000000000" {
 		t.Fatalf("big = %s", sheet[0].Total)
 	}
+}
+
+// Task 3.5: a Settle names its entries, and a refund (a correction of exactly those entries)
+// gives the user back exactly what the Settle took — the post-Settle reorg path.
+func TestSettleReturnsItsEntriesAndARefundReversesThem(t *testing.T) {
+	s, ctx := newStore(t), context.Background()
+	mustApply(t, s, deposit("d1", "alice", "1000"))
+	mustLock(t, s, "withdrawal:w1", "alice", "400")
+	r := mustSettle(t, s, "withdrawal:w1")
+	if len(r.EntryIDs) != 2 || r.EntryIDs[0] == r.EntryIDs[1] {
+		t.Fatalf("settle entries = %v", r.EntryIDs)
+	}
+	if again := mustSettle(t, s, "withdrawal:w1"); again.LedgerTransactionID != r.LedgerTransactionID || fmt.Sprint(again.EntryIDs) != fmt.Sprint(r.EntryIDs) {
+		t.Fatalf("replay = %+v, want %+v", again, r)
+	}
+	bal(t, s, "alice", "600", "0", "600")
+	mustApply(t, s, correction("withdrawal:w1:refund", r.EntryIDs...))
+	bal(t, s, "alice", "1000", "0", "1000")
+	// The deterministic refund key makes a retry a no-op, never a second refund.
+	if _, err := s.Apply(ctx, correction("withdrawal:w1:refund", r.EntryIDs...)); err != nil {
+		t.Fatalf("refund replay: %v", err)
+	}
+	bal(t, s, "alice", "1000", "0", "1000")
 }

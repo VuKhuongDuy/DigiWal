@@ -14,6 +14,8 @@ services:
       WALLET_SERVICE_URL: ${WALLET_SERVICE_URL:-http://wallet-service:8080}
       # Balances come from ledger-service over mTLS, as CN=api-gateway (`make certs`).
       LEDGER_SERVICE_URL: ${LEDGER_SERVICE_URL:-https://ledger-service:8443}
+      # Withdrawals and the whitelist, over mTLS as CN=api-gateway (same certs).
+      WITHDRAWAL_SERVICE_URL: ${WITHDRAWAL_SERVICE_URL:-https://withdrawal-service:8443}
       TLS_CERT_FILE: /certs/cert.pem
       TLS_KEY_FILE: /certs/key.pem
       TLS_CA_FILE: /certs/ca-cert.pem

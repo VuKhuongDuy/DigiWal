@@ -226,8 +226,12 @@ func (e DepositConfirmed) Validate() error {
 // WithdrawalBroadcast — withdrawal-service → history-service. The signed tx was
 // sent; tx_hash and the Hot Wallet nonce it claimed are now known.
 type WithdrawalBroadcast struct {
-	Version        int       `json:"version"`
-	IdempotencyKey string    `json:"idempotency_key"` // the Withdrawal Request's key, uuid
+	Version int `json:"version"`
+	// WithdrawalID is withdrawal-service's server-minted request id (withdrawal-flow.md invariant
+	// #20): the Kafka message key and the consumer's dedup key.
+	WithdrawalID string `json:"withdrawal_id"`
+	// IdempotencyKey is the client's key, unique only per user: informational, never a key here.
+	IdempotencyKey string    `json:"idempotency_key"`
 	UserID         string    `json:"user_id"`
 	AssetID        string    `json:"asset_id"`
 	Amount         Amount    `json:"amount"`
@@ -239,11 +243,12 @@ type WithdrawalBroadcast struct {
 }
 
 func (WithdrawalBroadcast) Topic() string { return TopicWithdrawalsBroadcast }
-func (e WithdrawalBroadcast) Key() string { return e.IdempotencyKey }
+func (e WithdrawalBroadcast) Key() string { return e.WithdrawalID }
 func (e WithdrawalBroadcast) Validate() error {
 	var c check
 	c.common(e.Version)
-	c.uuid("idempotency_key", e.IdempotencyKey)
+	c.uuid("withdrawal_id", e.WithdrawalID)
+	c.nonEmpty("idempotency_key", e.IdempotencyKey)
 	c.nonEmpty("user_id", e.UserID)
 	c.uuid("asset_id", e.AssetID)
 	c.amount(e.Amount)
@@ -256,10 +261,11 @@ func (e WithdrawalBroadcast) Validate() error {
 }
 
 // WithdrawalConfirmed — withdrawal-service → history-service. The tx crossed
-// Withdrawal Confirmation Depth. Not consumed by ledger-service: the debit
-// already happened at Reservation time (withdrawal-flow.md invariant #1).
+// Withdrawal Confirmation Depth and the Lock was Settled. Not consumed by ledger-service: the
+// debit is posted by Settle itself (withdrawal-flow.md invariant #3).
 type WithdrawalConfirmed struct {
 	Version        int       `json:"version"`
+	WithdrawalID   string    `json:"withdrawal_id"` // see WithdrawalBroadcast
 	IdempotencyKey string    `json:"idempotency_key"`
 	UserID         string    `json:"user_id"`
 	AssetID        string    `json:"asset_id"`
@@ -273,11 +279,12 @@ type WithdrawalConfirmed struct {
 }
 
 func (WithdrawalConfirmed) Topic() string { return TopicWithdrawalsConfirmed }
-func (e WithdrawalConfirmed) Key() string { return e.IdempotencyKey }
+func (e WithdrawalConfirmed) Key() string { return e.WithdrawalID }
 func (e WithdrawalConfirmed) Validate() error {
 	var c check
 	c.common(e.Version)
-	c.uuid("idempotency_key", e.IdempotencyKey)
+	c.uuid("withdrawal_id", e.WithdrawalID)
+	c.nonEmpty("idempotency_key", e.IdempotencyKey)
 	c.nonEmpty("user_id", e.UserID)
 	c.uuid("asset_id", e.AssetID)
 	c.amount(e.Amount)

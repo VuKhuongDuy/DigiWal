@@ -157,6 +157,37 @@ Warm/Cold. The shape:
    independently on `withdrawal-service` can silently drift from the
    real one — this endpoint removes the second copy entirely rather than
    trusting it to stay in sync.
+9. **The Warm Wallet address has exactly one source: the operator file
+   `infra/treasury.yaml`, read by `wallet-service` only and served over
+   mTLS.** **Decided (Tech Lead)**, `withdrawal-flow.md` Open Questions
+   #10. Needed by `withdrawal-service` to reject withdrawals to Warm
+   (`withdrawal-flow.md` invariant #18) and later by the Treasury Sweep
+   (Hot → Warm). The Warm *seed* is unchanged — never in any always-on
+   service (invariant #2); only its public address is configured.
+   - **File:** `infra/treasury.yaml`, operator-maintained, committed
+     like `infra/assets.yaml` (public addresses only, never key
+     material), mounted read-only into `wallet-service` only:
+     `chains: [{chain_id: <int>, warm_address: "0x…"}]`. Cold is not
+     listed (Cold is not a rejected destination, and nothing automated
+     needs it).
+   - **Startup validation, fail closed:** `wallet-service` refuses to
+     start if the file is missing or unparseable, if there is no entry
+     for its own chain, or if `warm_address` is not a well-formed
+     20-byte hex address, is the zero address, or equals the Hot Wallet
+     address it derived. Never a silent default.
+   - **Endpoint:** `GET /v1/wallet/system-addresses` → `200 {"chain_id",
+     "hot", "warm"}` (`hot` = the derived Hot Wallet address, the same
+     value `GET /v1/wallet/hot-address` returns). mTLS, allow-list
+     `CN=withdrawal-service` only — covers both invariant #18 and the
+     Treasury Sweep monitor, which run in the same process with the same
+     certificate. **Sits beside `GET /v1/wallet/hot-address`, does not
+     replace it:** `sweeper` and `chain-watcher` keep calling
+     hot-address unchanged and are not granted this endpoint (they have
+     no use for Warm).
+   - **Callers** fetch once at startup and cache in memory, never an env
+     var (same rule as invariant #8). Changing the Warm address means
+     editing the file and restarting `wallet-service` and then
+     `withdrawal-service`.
 
 ## Diagram
 
@@ -288,3 +319,22 @@ sequenceDiagram
    silently decide a new key-minting scheme" instruction. Confirm this
    is acceptable, or propose a simpler alternative if one exists that
    doesn't reintroduce the time-bucket dedupe risk.
+7. ~~**New, open (found while designing `withdrawal-flow.md` invariant
+   #18): no designed source for the Warm Wallet address.** The Treasury
+   Sweep diagram signs `to=Warm address`, but nothing says where the
+   sweep-monitor loop gets it, and `wallet-service` cannot derive it
+   (invariant #2). `withdrawal-service` now needs it too, to reject
+   withdrawals to it. Recommendation and alternatives:
+   `withdrawal-flow.md` Open Questions #10.~~ **Decided (Tech Lead):
+   operator file `infra/treasury.yaml`, served by `wallet-service`'s
+   `GET /v1/wallet/system-addresses` — invariant #9.**
+8. **Open, backlog (Tech Lead, raised during M3 design): run several Hot
+   Wallets as backup,** so a Nonce Gap freeze on one does not halt all
+   withdrawals. Not designed and not scheduled. It would change this
+   doc's one-address-per-tier rule (invariant #7) for Hot, and touch:
+   separate nonce sequences and freeze flags per Hot Wallet; wallet
+   selection/failover on the signing endpoint; Floor/Ceiling math (per
+   wallet or aggregate); `sweeper`'s Sweep destination and Gas Top-Up
+   source, and the Treasury Sweep's source; and every consumer of
+   `GET /v1/wallet/hot-address` (including `chain-watcher`'s Hot Wallet
+   Outflow check). Tracked in `IMPLEMENTATION_PLAN.md`'s Backlog.
