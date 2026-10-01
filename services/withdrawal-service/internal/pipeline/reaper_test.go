@@ -13,12 +13,12 @@ import (
 )
 
 type fakeVoider struct {
-	res   VoidResult
+	res   wallet.VoidResult
 	err   error
 	calls []string
 }
 
-func (v *fakeVoider) VoidHotWallet(_ context.Context, key string) (VoidResult, error) {
+func (v *fakeVoider) VoidHotWallet(_ context.Context, key string) (wallet.VoidResult, error) {
 	v.calls = append(v.calls, key)
 	return v.res, v.err
 }
@@ -139,7 +139,7 @@ func TestReaperReservedFollowsWalletServicesVoid(t *testing.T) {
 		r := newRig(t)
 		w := r.reserved("k")
 		rp, _ := r.reaper(stuck)
-		v := &fakeVoider{res: VoidResult{Voided: true}}
+		v := &fakeVoider{res: wallet.VoidResult{Voided: true}}
 		rp.Voider = v
 		r.reap(rp)
 		got := r.get("k")
@@ -153,7 +153,7 @@ func TestReaperReservedFollowsWalletServicesVoid(t *testing.T) {
 		w := r.reserved("k")
 		raw, nonce, _ := r.signer.SignHotWallet(context.Background(), signReq(w))
 		rp, _ := r.reaper(stuck)
-		rp.Voider = &fakeVoider{res: VoidResult{RawTx: raw, Nonce: nonce}}
+		rp.Voider = &fakeVoider{res: wallet.VoidResult{RawTx: raw, Nonce: nonce}}
 		r.reap(rp)
 		got := r.get("k")
 		if got.Status != store.StatusSigned || *got.SignedRawTx != raw || *got.Nonce != int64(nonce) || *got.ChainID != chainID || len(r.ledger.released) != 0 {

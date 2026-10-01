@@ -30,6 +30,9 @@ GET  /v1/users/{userID}/deposit-address   # 404 if the user has no address yet
 
 # mTLS listener :8443 (client cert CN checked per endpoint — docs/design/service-auth-mtls.md)
 POST /v1/sign/hot-wallet                  # CN: withdrawal-service, sweeper
+GET  /v1/sign/hot-wallet/{key}            # CN: withdrawal-service, sweeper; own keys only -> signature + replacements, else 404
+POST /v1/sign/hot-wallet/{key}/void       # CN: withdrawal-service only -> {"status":"voided"} | {"status":"already_signed",...}
+POST /v1/sign/hot-wallet/{key}/replace    # CN: withdrawal-service, sweeper; own keys only {replacement_seq, max_gas_price?} -> Fee Bump
 POST /v1/sign/user-address                # CN: sweeper only (Sweep: user key -> Hot Wallet)
 GET  /v1/addresses/{address}              # CN: chain-watcher only -> {user_id, chain} or 404
 GET  /v1/wallet/hot-address               # CN: withdrawal-service, sweeper, chain-watcher -> {address}; 503 without a hot_wallet seed
@@ -68,6 +71,31 @@ address equals the Hot Wallet's. withdrawal-service uses it to refuse withdrawal
 Wallet (`withdrawal-flow.md` #18) and later as its Treasury Sweep destination. It sits beside
 `hot-address`, which is unchanged. To change the Warm address: edit the file, restart wallet-service,
 then withdrawal-service.
+
+**Never strand a nonce** (task 3.13, `withdrawal-flow.md` invariants #21-#23). A signed Hot Wallet tx that
+never lands blocks every later one, so a key can be looked up, voided, re-signed with higher fees, or
+cancelled. Every call is scoped to the caller's own keys by the verified certificate CN (`caller_cn`,
+stored at sign time): another caller's key is `404` (GET) or `409` (void, replace), and rows signed before
+the migration are nobody's.
+- `POST .../void` is the only safe basis for Releasing a request whose sign reply may have been lost. Under
+  the same `hot_wallet_nonces` lock signing takes, it either returns the signature the key already has
+  (`already_signed`, nothing changes) or writes a tombstone, after which `POST /v1/sign/hot-wallet` for that
+  key answers `410` and allocates nothing. Idempotent. (A plain `GET` is not enough: a sign call in flight
+  can land after it said `404`.)
+- `POST .../replace` `{replacement_seq, max_gas_price?}` is a **Fee Bump**: the same tx (nonce, `to`, value,
+  data, gas) rebuilt from the stored original with fees `max(network, previous × 1.125, rounded up)` on both
+  `maxFeePerGas` and `maxPriorityFeePerGas`. The request has no field that could change the destination or
+  amount. Capped by `max_gas_price` and by a hard ceiling, `HOT_WALLET_MAX_FEE_PER_GAS_WEI` (default 50 gwei,
+  Decided): above it `422`, nothing signed. The same `replacement_seq` replays the stored replacement, the
+  next one creates it, any other is `409`; a replacement allocates no nonce; `503` under a Nonce Gap freeze
+  that covers the nonce; `409` once a Nonce Filler is the latest version.
+- **Nonce Filler**, operator only, no network endpoint (so no service certificate can cancel a payout):
+  `docker compose exec wallet-service service hot-wallet cancel --key withdrawal:<withdrawal_id>` signs and
+  broadcasts a 0-value Hot → Hot tx at the key's nonce with higher fees, recorded as a `cancel` replacement.
+  It consumes the nonce, so the withdrawal can never land and `next_nonce` needs no reset. Running it again
+  re-sends the same filler. It works under a Nonce Gap freeze (that is how a gap is repaired). Once it is
+  mined, withdrawal-service's Reaper proves the nonce consumed and Releases the Lock. A filler for a nonce
+  with no key (a gap hole) is not built yet.
 
 `POST /v1/wallet/nonce-gap` `{chain_id, from_nonce}` (`withdrawal-flow.md` invariants #7, #19) is how
 withdrawal-service reports a Nonce Gap: from then on no new Hot Wallet nonce is allocated for any caller

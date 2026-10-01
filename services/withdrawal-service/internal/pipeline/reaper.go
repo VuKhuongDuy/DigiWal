@@ -14,6 +14,7 @@ import (
 
 	"digiwal/services/withdrawal-service/internal/chain"
 	"digiwal/services/withdrawal-service/internal/store"
+	"digiwal/services/withdrawal-service/internal/wallet"
 )
 
 // Failure reasons the Reaper records on a `failed` row.
@@ -29,20 +30,13 @@ type ReaperStore interface {
 	Transition(ctx context.Context, id, from, to string, reason *string) (store.Withdrawal, error)
 	MarkSigned(ctx context.Context, id string, chainID int64, nonce uint64, rawTx string) (store.Withdrawal, error)
 	StampBroadcastHead(ctx context.Context, id string, head int64) error
-}
-
-// VoidResult is wallet-service's answer to "void this key" (invariant #22).
-type VoidResult struct {
-	Voided bool // the key is now not signed and never will be: nothing is stranded
-	// When !Voided the key had already been signed; this is that signature.
-	RawTx string
-	Nonce uint64
+	ListTxs(ctx context.Context, id string) ([]store.Tx, error)
 }
 
 // Voider atomically asks wallet-service to never sign a Withdrawal Key (invariant #22; task 3.13).
 // Until that endpoint exists the Reaper's Voider is nil and a stuck `reserved` row only raises an ALERT.
 type Voider interface {
-	VoidHotWallet(ctx context.Context, key string) (VoidResult, error)
+	VoidHotWallet(ctx context.Context, key string) (wallet.VoidResult, error)
 }
 
 // Reaper reclaims stuck Withdrawal Requests (withdrawal-flow.md invariant #17; task 3.9) — but only
@@ -71,13 +65,17 @@ type Reaper struct {
 	StuckReservationTimeout time.Duration
 	StuckBroadcastBlocks    int64
 
+	// Recheck is the pre-sign whitelist/screening re-check (invariant #23); with it, a stuck `signed`
+	// request that now fails it raises an ALERT (never blocks: the nonce is allocated). nil = off.
+	Recheck func(ctx context.Context, w store.Withdrawal) (reason string, err error)
+
 	Batch      int
 	AlertEvery time.Duration // a given ALERT repeats at most this often; default 10 minutes
 	Now        func() time.Time
 	// Alert is where ALERTs go; default: the log, prefixed "ALERT:".
 	Alert func(msg string)
 
-	alerted map[string]time.Time
+	alerts alerter
 }
 
 // Run makes a pass every interval until ctx ends. A failed step is logged and retried.
@@ -199,9 +197,22 @@ func (r *Reaper) signed(ctx context.Context) error {
 		}
 		if w.UpdatedAt.Before(cutoff) {
 			r.alert(w, "signed-stuck", "stuck in signed, never released on a timeout: "+r.diagnose(ctx, w, hot, mined))
+			r.alertIfNoLongerAllowed(ctx, w)
 		}
 		return nil
 	})
+}
+
+// alertIfNoLongerAllowed: the request is signed, so it cannot be blocked without stranding its nonce;
+// if the whitelist entry or Screening List now says no, an operator decides (let it go, or cancel it
+// with a Nonce Filler).
+func (r *Reaper) alertIfNoLongerAllowed(ctx context.Context, w store.Withdrawal) {
+	if r.Recheck == nil {
+		return
+	}
+	if reason, err := r.Recheck(ctx, w); err == nil && reason != "" {
+		r.alert(w, "signed-recheck", fmt.Sprintf("signed but not broadcast, and it no longer passes the pre-sign re-check (%s): let it go out, or cancel it with a Nonce Filler (`service hot-wallet cancel --key %s`)", reason, w.Key()))
+	}
 }
 
 // broadcast: acts only once StuckBroadcastBlocks have passed since the Reaper first saw it.
@@ -258,7 +269,7 @@ func (r *Reaper) nonceConsumedByOther(ctx context.Context, w store.Withdrawal) (
 	if mined <= uint64(*w.Nonce) {
 		return false, mined, hot, nil
 	}
-	hashes, err := txHashes(w)
+	hashes, err := txHashes(ctx, r.Store, w)
 	if err != nil {
 		return false, mined, hot, err
 	}
@@ -274,16 +285,31 @@ func (r *Reaper) nonceConsumedByOther(ctx context.Context, w store.Withdrawal) (
 	return true, mined, hot, nil
 }
 
-// txHashes is every hash this request has ever had on the wire. Today that is the one stored tx;
-// task 3.13 (Fee Bump replacements) adds the others here.
-func txHashes(w store.Withdrawal) ([]common.Hash, error) {
+// txHashes is every hash this request has ever had on the wire: the original, every Fee Bump
+// replacement (invariant #21), and the one recorded as broadcast.
+func txHashes(ctx context.Context, st interface {
+	ListTxs(ctx context.Context, id string) ([]store.Tx, error)
+}, w store.Withdrawal) ([]common.Hash, error) {
 	h, err := chain.TxHash(*w.SignedRawTx)
 	if err != nil {
 		return nil, err
 	}
 	out := []common.Hash{h}
-	if w.TxHash != nil && common.HexToHash(*w.TxHash) != h {
-		out = append(out, common.HexToHash(*w.TxHash))
+	txs, err := st.ListTxs(ctx, w.ID)
+	if err != nil {
+		return nil, err
+	}
+	for _, t := range txs {
+		out = append(out, common.HexToHash(t.Hash))
+	}
+	if w.TxHash != nil {
+		known := false
+		for _, o := range out {
+			known = known || o == common.HexToHash(*w.TxHash)
+		}
+		if !known {
+			out = append(out, common.HexToHash(*w.TxHash))
+		}
 	}
 	return out, nil
 }
@@ -324,22 +350,5 @@ func (r *Reaper) diagnose(ctx context.Context, w store.Withdrawal, hot common.Ad
 
 // alert reports a stuck request an operator must look at, at most once per AlertEvery per kind.
 func (r *Reaper) alert(w store.Withdrawal, kind, msg string) {
-	every := r.AlertEvery
-	if every <= 0 {
-		every = 10 * time.Minute
-	}
-	k := w.ID + "/" + kind
-	if r.alerted == nil {
-		r.alerted = map[string]time.Time{}
-	}
-	if last, ok := r.alerted[k]; ok && r.now().Sub(last) < every {
-		return
-	}
-	r.alerted[k] = r.now()
-	m := fmt.Sprintf("withdrawal %s: %s", w.ID, msg)
-	if r.Alert != nil {
-		r.Alert(m)
-		return
-	}
-	log.Print("ALERT: " + m)
+	r.alerts.raise(r.now(), r.AlertEvery, r.Alert, w, kind, msg)
 }

@@ -122,3 +122,80 @@ func TestDestinations(t *testing.T) {
 		t.Fatalf("lookup failed: %q %v, want an error (fail closed)", got, err)
 	}
 }
+
+func TestVoidHotWallet(t *testing.T) {
+	var path, method string
+	c := serve(t, func(w http.ResponseWriter, r *http.Request) {
+		path, method = r.URL.Path, r.Method
+		_, _ = w.Write([]byte(`{"status":"voided"}`))
+	})
+	got, err := c.VoidHotWallet(context.Background(), "withdrawal:abc")
+	if err != nil || !got.Voided || method != "POST" || path != "/v1/sign/hot-wallet/withdrawal:abc/void" {
+		t.Fatalf("%+v %v %s %s", got, err, method, path)
+	}
+	c = serve(t, func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"status":"already_signed","nonce":7,"signed_raw_tx":"0xabcd","tx_hash":"0x01"}`))
+	})
+	got, err = c.VoidHotWallet(context.Background(), "k")
+	if err != nil || got.Voided || got.Nonce != 7 || got.RawTx != "0xabcd" {
+		t.Fatalf("%+v %v", got, err)
+	}
+	// Anything but a clean answer is NOT "voided": the caller must not Release on it.
+	for name, resp := range map[string]struct {
+		code int
+		body string
+	}{"503": {503, `{}`}, "403": {403, `{}`}, "409": {409, `{}`}, "garbage": {200, `nope`}, "unknown status": {200, `{"status":"maybe"}`},
+		"signed without a tx": {200, `{"status":"already_signed"}`}} {
+		c := serve(t, func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(resp.code)
+			_, _ = w.Write([]byte(resp.body))
+		})
+		if r, err := c.VoidHotWallet(context.Background(), "k"); err == nil {
+			t.Errorf("%s: accepted %+v", name, r)
+		}
+	}
+}
+
+func TestReplaceHotWallet(t *testing.T) {
+	var body string
+	c := serve(t, func(w http.ResponseWriter, r *http.Request) {
+		b := make([]byte, 200)
+		n, _ := r.Body.Read(b)
+		body = string(b[:n])
+		if r.URL.Path != "/v1/sign/hot-wallet/withdrawal:abc/replace" {
+			t.Errorf("path %s", r.URL.Path)
+		}
+		_, _ = w.Write([]byte(`{"signed_raw_tx":"0xbeef","tx_hash":"0xAB","nonce":3,"replacement_seq":2}`))
+	})
+	got, err := c.ReplaceHotWallet(context.Background(), "withdrawal:abc", 2)
+	if err != nil || got.RawTx != "0xbeef" || got.Hash != "0xab" || got.Nonce != 3 || got.Seq != 2 || body != `{"replacement_seq":2}` {
+		t.Fatalf("%+v %v %q", got, err, body)
+	}
+	for name, tc := range map[string]struct {
+		code int
+		want error
+	}{"422": {422, ErrReplaceCeiling}, "409": {409, ErrReplaceRefused}, "404": {404, ErrReplaceRefused}} {
+		c := serve(t, func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(tc.code) })
+		if _, err := c.ReplaceHotWallet(context.Background(), "k", 1); !errors.Is(err, tc.want) {
+			t.Errorf("%s: %v, want %v", name, err, tc.want)
+		}
+	}
+	// 503 (a Nonce Gap freeze) and a wrong seq in the answer are transient/unusable, never "refused".
+	c = serve(t, func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(503) })
+	if _, err := c.ReplaceHotWallet(context.Background(), "k", 1); err == nil || errors.Is(err, ErrReplaceRefused) || errors.Is(err, ErrReplaceCeiling) {
+		t.Fatalf("503: %v", err)
+	}
+	c = serve(t, func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"signed_raw_tx":"0xbeef","tx_hash":"0xab","nonce":3,"replacement_seq":9}`))
+	})
+	if _, err := c.ReplaceHotWallet(context.Background(), "k", 1); err == nil {
+		t.Fatal("accepted an answer for another replacement_seq")
+	}
+}
+
+func TestSignOfAVoidedKeyIsErrKeyVoided(t *testing.T) {
+	c := serve(t, func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(410) })
+	if _, _, err := c.SignHotWallet(context.Background(), SignRequest{IdempotencyKey: "k"}); !errors.Is(err, ErrKeyVoided) {
+		t.Fatalf("%v", err)
+	}
+}

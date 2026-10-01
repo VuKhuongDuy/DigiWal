@@ -17,6 +17,7 @@ const (
 
 type AbandonStore interface {
 	GetByID(ctx context.Context, id string) (store.Withdrawal, error)
+	ListTxs(ctx context.Context, id string) ([]store.Tx, error)
 	Transition(ctx context.Context, id, from, to string, reason *string) (store.Withdrawal, error)
 }
 
@@ -47,10 +48,16 @@ func Abandon(ctx context.Context, st AbandonStore, lg AbandonLedger, ch chain.Ch
 	if err != nil {
 		return store.Withdrawal{}, err
 	}
-	if r, err := ch.Receipt(ctx, hash); err != nil {
+	hashes, err := txHashes(ctx, st, w) // the original and every Fee Bump: any of them may be the one that landed
+	if err != nil {
 		return store.Withdrawal{}, err
-	} else if r != nil {
-		return store.Withdrawal{}, fmt.Errorf("refusing: tx %s is mined (block %d) — it paid out; restore the request instead of abandoning it", hash.Hex(), r.BlockNumber)
+	}
+	for _, h := range hashes {
+		if r, err := ch.Receipt(ctx, h); err != nil {
+			return store.Withdrawal{}, err
+		} else if r != nil {
+			return store.Withdrawal{}, fmt.Errorf("refusing: tx %s is mined (block %d) — it paid out; restore the request instead of abandoning it", h.Hex(), r.BlockNumber)
+		}
 	}
 	hot, err := chain.Sender(*w.SignedRawTx)
 	if err != nil {

@@ -1,6 +1,6 @@
 // Command withdrawal-service orchestrates withdrawals (docs/design/withdrawal-flow.md).
 //
-// Today (tasks 3.1-3.6, 3.9, 3.10): apply migrations, load the Asset Registry and Screening
+// Today (tasks 3.1-3.6, 3.9, 3.10, 3.13): apply migrations, load the Asset Registry and Screening
 // List, learn the Hot/Warm addresses from wallet-service, then serve /healthz on a plain listener
 // and the withdrawal and whitelist endpoints on an mTLS listener restricted to CN=api-gateway.
 // A request is recorded idempotently, validated and Reserved in-line; a background pipeline
@@ -103,15 +103,21 @@ func main() {
 	defer pub.Close()
 	pipe := &pipeline.Pipeline{Store: st, Ledger: ledgerClient, Signer: walletClient, Chain: rpc, Publisher: pub,
 		ChainID: system.ChainID, ConfirmationDepth: envInt("WITHDRAWAL_CONFIRMATION_DEPTH", 64), // Decided: 64 on Sepolia
+		// Fee Bump (task 3.13, invariant #21; Decided): after 20 blocks while underpriced, at most 5 times.
+		FeeBumpAfterBlocks: envInt("FEE_BUMP_AFTER_BLOCKS", 20), MaxFeeBumps: int(envInt("MAX_FEE_BUMPS", 5)),
+		// Re-checked right before signing (invariant #23); a failure Releases only after wallet-service
+		// voids the key.
+		Recheck: validator.Recheck, Voider: walletClient,
 		// Nonce Gap detection (task 3.4): confirmed txs of the last NONCE_GAP_WINDOW blocks are re-checked.
 		Gaps: &pipeline.GapWatch{Store: st, Reporter: walletClient, Window: envInt("NONCE_GAP_WINDOW", 256)}}
 	go pipe.Run(ctx, envDuration("POLL_INTERVAL", 3*time.Second))
 	log.Printf("withdrawal pipeline running: chain %d, confirmation depth %d", system.ChainID, pipe.ConfirmationDepth)
 
 	// The Reaper (task 3.9, invariant #17). Decided (Tech Lead): 5 minutes, 5 minutes, 128 blocks.
-	// Voider stays nil until task 3.13 builds wallet-service's /void: a stuck `reserved` row is
-	// then only ALERTed, never Released.
+	// A stuck `reserved` row is Released only once wallet-service has voided its key (task 3.13,
+	// invariant #22); if the void fails it is ALERTed and retried.
 	reaper := &pipeline.Reaper{Store: st, Ledger: ledgerClient, Chain: rpc, ChainID: system.ChainID,
+		Voider: walletClient, Recheck: validator.Recheck,
 		StuckRequestTimeout:     envDuration("STUCK_REQUEST_TIMEOUT", 5*time.Minute),
 		StuckReservationTimeout: envDuration("STUCK_RESERVATION_TIMEOUT", 5*time.Minute),
 		StuckBroadcastBlocks:    envInt("STUCK_BROADCAST_BLOCKS", 128)}

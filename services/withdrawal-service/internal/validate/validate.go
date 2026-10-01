@@ -90,3 +90,21 @@ func (v *Validator) Check(ctx context.Context, w store.Withdrawal) (reason strin
 }
 
 var maxAmount = new(big.Int).Sub(new(big.Int).Lsh(big.NewInt(1), 256), big.NewInt(1))
+
+// Recheck is the local re-check made immediately before signing (invariant #23): the destination's
+// Whitelist Entry is still active and the address is still off the Screening List. Nothing remote,
+// nothing about the amount: only what can change while a request waits. "" = still fine.
+func (v *Validator) Recheck(ctx context.Context, w store.Withdrawal) (reason string, err error) {
+	to := common.HexToAddress(w.ToAddress)
+	status, ok, err := v.Whitelist.WhitelistStatus(ctx, w.UserID, to.Hex(), v.Cooldown)
+	if err != nil {
+		return "", err
+	}
+	if !ok || status != store.WhitelistActive {
+		return NotWhitelisted, nil
+	}
+	if v.Screening.Contains(to.Hex()) {
+		return OnScreeningList, nil
+	}
+	return "", nil
+}

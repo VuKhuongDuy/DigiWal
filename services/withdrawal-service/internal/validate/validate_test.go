@@ -132,3 +132,31 @@ func TestFailuresAreNotVerdicts(t *testing.T) {
 		t.Fatalf("destination failure: %q %v, want an error", got, err)
 	}
 }
+
+// invariant #23: right before signing only what can change while a request waits is re-checked, and
+// nothing remote (the amount and the registry were settled at validation).
+func TestRecheck(t *testing.T) {
+	dest := &fakeDest{reason: DestinationIsDeposit}
+	v, wl := newValidator(dest)
+	req := func(to string) store.Withdrawal {
+		return store.Withdrawal{UserID: "alice", AssetID: eth, Amount: big.NewInt(1), ToAddress: to} // below the minimum on purpose
+	}
+	for name, tc := range map[string]struct{ to, want string }{
+		"active entry":        {good, ""},
+		"entry still pending": {pendingTo, NotWhitelisted},
+		"entry removed":       {"0x15d34AAf54267DB7D7c367839AAf71A00a2C6A65", NotWhitelisted},
+		"now screened":        {screenedTo, OnScreeningList},
+	} {
+		got, err := v.Recheck(context.Background(), req(tc.to))
+		if err != nil || got != tc.want {
+			t.Errorf("%s: %q, %v, want %q", name, got, err, tc.want)
+		}
+	}
+	if dest.calls != 0 {
+		t.Fatal("the re-check made a remote destination call")
+	}
+	wl.err = errors.New("db down")
+	if got, err := v.Recheck(context.Background(), req(good)); err == nil || got != "" {
+		t.Fatalf("a failed lookup must be an error, not a verdict: %q, %v", got, err)
+	}
+}

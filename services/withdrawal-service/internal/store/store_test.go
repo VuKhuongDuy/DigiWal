@@ -195,3 +195,55 @@ func TestListOlderThanAndStampBroadcastHead(t *testing.T) {
 		t.Fatalf("stamp = %v, want the first head (7)", got.BroadcastHeadSeen)
 	}
 }
+
+func TestAddReplacementIsGuardedIdempotentAndResetsSentHead(t *testing.T) {
+	s := newStore(t)
+	ctx := context.Background()
+	w, _, err := s.Create(ctx, req("alice", "k1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Only a signed/broadcast request takes a Fee Bump.
+	if err := s.AddReplacement(ctx, w.ID, 1, "0xaa", "0x01"); !errors.Is(err, ErrStateChanged) {
+		t.Fatalf("on a requested row: %v", err)
+	}
+	if err := s.AddReplacement(ctx, "00000000-0000-0000-0000-000000000000", 1, "0xaa", "0x01"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("unknown id: %v", err)
+	}
+	if _, err := s.pool.Exec(ctx, `UPDATE withdrawal_requests SET status = 'broadcast', sent_head = 100 WHERE withdrawal_id = $1`, w.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AddReplacement(ctx, w.ID, 1, "0xaa", "0x01"); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := s.GetByID(ctx, w.ID)
+	if got.SentHead != nil {
+		t.Fatal("a new version must be marked not sent yet")
+	}
+	if err := s.MarkSent(ctx, w.ID, 130); err != nil {
+		t.Fatal(err)
+	}
+	// A replay of the same seq changes nothing — in particular it does not unmark the version as sent.
+	if err := s.AddReplacement(ctx, w.ID, 1, "0xaa", "0x01"); err != nil {
+		t.Fatal(err)
+	}
+	got, _ = s.GetByID(ctx, w.ID)
+	if got.SentHead == nil || *got.SentHead != 130 {
+		t.Fatalf("sent_head = %v after a replay, want 130", got.SentHead)
+	}
+	if err := s.AddReplacement(ctx, w.ID, 2, "0xbb", "0x02"); err != nil {
+		t.Fatal(err)
+	}
+	txs, err := s.ListTxs(ctx, w.ID)
+	if err != nil || len(txs) != 2 || txs[0].Seq != 1 || txs[1].Hash != "0xbb" || txs[1].Raw != "0x02" {
+		t.Fatalf("%+v %v", txs, err)
+	}
+	// MarkSent only touches a broadcast row.
+	if _, err := s.pool.Exec(ctx, `UPDATE withdrawal_requests SET status = 'confirmed', sent_head = NULL WHERE withdrawal_id = $1`, w.ID); err != nil {
+		t.Fatal(err)
+	}
+	_ = s.MarkSent(ctx, w.ID, 999)
+	if got, _ := s.GetByID(ctx, w.ID); got.SentHead != nil {
+		t.Fatal("MarkSent stamped a confirmed row")
+	}
+}

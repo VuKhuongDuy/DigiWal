@@ -1,11 +1,11 @@
 # withdrawal-service
 
-Orchestrates withdrawals (`docs/design/withdrawal-flow.md`). **Tasks 3.1-3.6, 3.9, 3.10 and the
+Orchestrates withdrawals (`docs/design/withdrawal-flow.md`). **Tasks 3.1-3.6, 3.9, 3.10, 3.13 and the
 withdrawal-service part of 3.11 so far:** a request is recorded idempotently, validated, Reserved on the
 ledger, then signed, broadcast, confirmed and Settled in the background; confirmed txs are watched for
 Nonce Gaps; an operator can abandon a disputed request (refund or Release, 3.5). A Reaper reclaims stuck
-requests (3.9). The never-strand-a-nonce work (3.13: void/replace in wallet-service, Fee Bump, Nonce
-Filler CLI) and the e2e test (3.8) are not built yet.
+requests (3.9), and a stuck tx is unblocked by a Fee Bump or a Nonce Filler, never abandoned (3.13). The
+e2e test (3.8) is not built yet.
 
 ## What works
 
@@ -116,6 +116,29 @@ Filler CLI) and the e2e test (3.8) are not built yet.
      becomes `failed` (`abandoned_refunded` / `abandoned`). Safe to re-run after a crash.
   3. When no request is `disputed` any more, lift the freeze in wallet-service's database (its README).
   The Nonce Filler is not built yet (task 3.13); until then a filler has to be sent by hand.
+- **Fee Bump, pre-sign re-check, Nonce Filler** (task 3.13, invariants #21-#23):
+  - A tx can have several versions: the original (`signed_raw_tx`) and Fee Bumps (`withdrawal_txs`, seq ≥ 1),
+    all at one nonce, destination and amount. Only the latest is (re)sent; any version may be mined, never
+    more than one. `confirm`, the Reaper's proof and `-abandon` look at **all** of them. The version that is
+    mined becomes the row's `tx_hash` and is what `withdrawals.confirmed` carries, so it can differ from the
+    `withdrawals.broadcast` one.
+  - **When to bump:** the node refuses the tx as underpriced, or it is not mined `FEE_BUMP_AFTER_BLOCKS`
+    (20) blocks after it was last sent **and** its max fee is below the current base fee. At most
+    `MAX_FEE_BUMPS` (5), then an ALERT. wallet-service builds the replacement (`POST .../replace`, fees ×1.125,
+    hard ceiling 50 gwei); a `422` (ceiling) or `409`/`404` is an ALERT, anything transient is retried with the
+    same `replacement_seq`. The pipeline checks the replacement is the same tx (nonce, sender, destination,
+    value, data, gas, higher fee) before storing it, and stores it (`sent_head` NULL = "not sent yet") *before*
+    sending it, so a crash is repaired on the next pass.
+  - **Pre-sign re-check** (`reserved → signed`): the Whitelist Entry must still be `active` and the address off
+    the Screening List. On failure the request is Released and `failed` (`destination_not_whitelisted` /
+    `destination_on_screening_list`) — but only after wallet-service has **voided** its key: a lost sign reply
+    can mean a nonce already exists, in which case the request goes on (a signed tx is never blocked, only
+    cancelled) and an ALERT says so. A request still `signed` after the Stuck Reservation Timeout that now fails
+    the re-check also raises a Reaper ALERT.
+  - **Nonce Filler:** the operator cancels a signed withdrawal with wallet-service's
+    `service hot-wallet cancel --key withdrawal:<id>` (its README). When it is mined the Reaper's proof rule
+    Releases the request (`failed` / `replaced_or_dropped`). A sign answered `410` (the key was voided) is
+    left to the Reaper.
 - **Reaper** (task 3.9, invariant #17, `internal/pipeline/reaper.go`), one pass every `REAPER_INTERVAL`
   (30s). It frees stuck requests only when it can *prove* nothing can still reach the chain and no Hot
   Wallet nonce is left allocated but unused. Every write is a guarded `UPDATE ... WHERE status = <expected>`,
@@ -125,7 +148,7 @@ Filler CLI) and the e2e test (3.8) are not built yet.
   |---|---|---|
   | `requested` > `STUCK_REQUEST_TIMEOUT` (5 min) | nothing was ever held | `failed` / `stale_request`, no ledger call |
   | `validated` > `STUCK_RESERVATION_TIMEOUT` (5 min) | the key never reached wallet-service, so no nonce | Release, `failed` / `stale_reservation` |
-  | `reserved` > 5 min | a sign call may have landed: only wallet-service's `void` rules that out | **ALERT only for now** (no `/void` until task 3.13); then `voided` → Release, `already_signed` → `signed` |
+  | `reserved` > 5 min | a sign call may have landed: only wallet-service's `void` rules that out | `voided` → Release, `failed` / `stale_reservation`; `already_signed` → `signed`; void fails or wallet-service is down → ALERT, retried next pass |
   | `signed` > 5 min | **never** Released on a timeout | ALERT naming the likely cause: underpriced, Hot Wallet lacks ETH, or an earlier nonce is unmined |
   | `signed`/`broadcast`: Hot Wallet's **mined** (`latest`) nonce > N **and** no receipt for any of the request's tx hashes (`broadcast`: also `STUCK_BROADCAST_BLOCKS` = 128 blocks) | nonce N is consumed by another tx, none of ours can land | Release, `failed` / `replaced_or_dropped` (this is how a Nonce Filler completes) |
   | `broadcast` > 128 blocks, N unconsumed | the tx may still be in a mempool | ALERT only |

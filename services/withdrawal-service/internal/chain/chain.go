@@ -161,3 +161,16 @@ func (e *Eth) Receipt(ctx context.Context, hash common.Hash) (*Receipt, error) {
 	}
 	return &Receipt{BlockNumber: r.BlockNumber.Int64(), Success: r.Status == types.ReceiptStatusSuccessful}, nil
 }
+
+// Decode parses a signed raw tx.
+func Decode(rawTx string) (*types.Transaction, error) {
+	b, err := hexutil.Decode(rawTx)
+	if err != nil {
+		return nil, fmt.Errorf("decoding raw tx: %w", err)
+	}
+	var tx types.Transaction
+	if err := tx.UnmarshalBinary(b); err != nil {
+		return nil, fmt.Errorf("decoding raw tx: %w", err)
+	}
+	return &tx, nil
+}
