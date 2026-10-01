@@ -41,7 +41,7 @@ const (
 
 type Store interface {
 	ListByStatus(ctx context.Context, status string, limit int) ([]store.Withdrawal, error)
-	Transition(ctx context.Context, id, from, to string, reason *string) (store.Withdrawal, error)
+	MarkFailed(ctx context.Context, id, from, reason, blockAddress string, event func(store.Withdrawal) (string, []byte, error)) (store.Withdrawal, error)
 	MarkSigned(ctx context.Context, id string, chainID int64, nonce uint64, rawTx string) (store.Withdrawal, error)
 	MarkBroadcast(ctx context.Context, id, txHash string, at time.Time, head int64, event func(store.Withdrawal) (string, []byte, error)) (store.Withdrawal, error)
 	MarkConfirmed(ctx context.Context, id, txHash string, block int64, ledgerTxID string, at time.Time, event func(store.Withdrawal) (string, []byte, error)) (store.Withdrawal, error)
@@ -172,7 +172,7 @@ func (p *Pipeline) sign(ctx context.Context, w store.Withdrawal) error {
 	})
 	if errors.Is(err, wallet.ErrSignRefused) {
 		log.Printf("withdrawal %s: %v — releasing its Lock", w.ID, err)
-		return p.releaseAndFail(ctx, w, store.StatusReserved, ReasonSignRefused)
+		return p.releaseAndFail(ctx, w, store.StatusReserved, failure{reason: ReasonSignRefused})
 	}
 	if errors.Is(err, wallet.ErrKeyVoided) {
 		log.Printf("withdrawal %s: its key was voided; the Reaper releases it", w.ID)
@@ -215,7 +215,7 @@ func (p *Pipeline) recheck(ctx context.Context, w store.Withdrawal) (handled boo
 	}
 	if v.Voided {
 		log.Printf("withdrawal %s: fails the pre-sign re-check (%s) — key voided, releasing its Lock", w.ID, reason)
-		return true, p.releaseAndFail(ctx, w, store.StatusReserved, reason)
+		return true, p.releaseAndFail(ctx, w, store.StatusReserved, failure{reason: reason})
 	}
 	if _, err := chain.TxHash(v.RawTx); err != nil {
 		return true, fmt.Errorf("wallet-service returned an undecodable tx: %w", err)
@@ -356,7 +356,8 @@ func (p *Pipeline) confirm(ctx context.Context, w store.Withdrawal) error {
 			level = "ALERT: withdrawal"
 		}
 		log.Printf("%s %s: tx %s reverted in block %d, revert reason %q — releasing its Lock", level, w.ID, txHash, r.BlockNumber, reason)
-		return p.releaseAndFail(ctx, w, store.StatusBroadcast, ReasonTxReverted)
+		return p.releaseAndFail(ctx, w, store.StatusBroadcast, failure{
+			reason: ReasonTxReverted, revertReason: revertText(reason), txHash: txHash, blockDest: destinationToBlame(reason)})
 	}
 	settled, err := p.Ledger.Settle(ctx, w.Key())
 	if errors.Is(err, ledger.ErrConflict) || errors.Is(err, ledger.ErrLockNotFound) {
@@ -478,22 +479,96 @@ func HotWalletShort(revertReason string) bool {
 	return false
 }
 
+// failure says why a request is being failed, for the withdrawals.failed event and the Whitelist.
+type failure struct {
+	reason       string
+	revertReason string // tx_reverted only
+	txHash       string // the mined (reverted) tx; "" = the latest known one, if the request was ever signed
+	blockDest    bool   // block the user's Whitelist Entry for the destination (invariant #25)
+}
+
+// revertText is the revert reason worth publishing: "" when it could not be recovered.
+func revertText(reason string) string {
+	if strings.HasPrefix(reason, "unknown (") {
+		return ""
+	}
+	return reason
+}
+
+// destinationToBlame: a revert is the destination's doing only when we know why and it is not our own
+// operational fault (the Hot Wallet short of the asset or of ETH). An unknown cause blocks nothing.
+func destinationToBlame(reason string) bool {
+	return revertText(reason) != "" && !HotWalletShort(reason)
+}
+
 // releaseAndFail gives the Lock back, then marks the request failed. Release first: if the
 // transition then fails, the next pass Releases again (idempotent) and retries the transition.
-func (p *Pipeline) releaseAndFail(ctx context.Context, w store.Withdrawal, from, reason string) error {
-	return releaseAndFail(ctx, p.Store, p.Ledger, w, from, reason)
+func (p *Pipeline) releaseAndFail(ctx context.Context, w store.Withdrawal, from string, f failure) error {
+	return releaseAndFail(ctx, p.Store, p.Ledger, w, from, f, p.ChainID, p.now())
 }
 
-type transitioner interface {
-	Transition(ctx context.Context, id, from, to string, reason *string) (store.Withdrawal, error)
+// failer is what failing a request needs: the guarded transition-with-event, and the tx versions
+// (to name the latest known tx in the event).
+type failer interface {
+	MarkFailed(ctx context.Context, id, from, reason, blockAddress string, event func(store.Withdrawal) (string, []byte, error)) (store.Withdrawal, error)
+	ListTxs(ctx context.Context, id string) ([]store.Tx, error)
 }
 
-func releaseAndFail(ctx context.Context, st transitioner, lg Ledger, w store.Withdrawal, from, reason string) error {
+func releaseAndFail(ctx context.Context, st failer, lg Ledger, w store.Withdrawal, from string, f failure, chainID int64, at time.Time) error {
 	if err := lg.Release(ctx, w.Key()); err != nil {
 		return fmt.Errorf("releasing: %w", err)
 	}
-	_, err := st.Transition(ctx, w.ID, from, store.StatusFailed, &reason)
+	return failWith(ctx, st, w, from, f, chainID, at)
+}
+
+// failWith is the one way a request becomes `failed` (invariant #24): the guarded UPDATE and the
+// withdrawals.failed outbox row commit together, so every failure is reported exactly once.
+func failWith(ctx context.Context, st failer, w store.Withdrawal, from string, f failure, chainID int64, at time.Time) error {
+	txHash := f.txHash
+	if txHash == "" && w.SignedRawTx != nil {
+		var err error
+		if txHash, err = latestTxHash(ctx, st, w); err != nil {
+			return err
+		}
+	}
+	blockAddr := ""
+	if f.blockDest {
+		blockAddr = common.HexToAddress(w.ToAddress).Hex()
+	}
+	_, err := st.MarkFailed(ctx, w.ID, from, f.reason, blockAddr, func(u store.Withdrawal) (string, []byte, error) {
+		ev := events.WithdrawalFailed{
+			Version: 1, WithdrawalID: u.ID, IdempotencyKey: u.IdempotencyKey, UserID: u.UserID, AssetID: u.AssetID,
+			Amount: events.Amount(u.Amount.String()), ToAddress: u.ToAddress, ChainID: chainID,
+			Reason: f.reason, RevertReason: f.revertReason, FailedAt: at.UTC(),
+		}
+		if u.ChainID != nil {
+			ev.ChainID = *u.ChainID
+		}
+		if txHash != "" && u.Nonce != nil {
+			ev.TxHash, ev.Nonce = txHash, u.Nonce
+		}
+		b, err := events.Encode(ev)
+		return events.TopicWithdrawalsFailed, b, err
+	})
 	return err
+}
+
+// latestTxHash is the hash of the newest version of the request's tx (a Fee Bump if any).
+func latestTxHash(ctx context.Context, st interface {
+	ListTxs(ctx context.Context, id string) ([]store.Tx, error)
+}, w store.Withdrawal) (string, error) {
+	txs, err := st.ListTxs(ctx, w.ID)
+	if err != nil {
+		return "", err
+	}
+	if n := len(txs); n > 0 {
+		return txs[n-1].Hash, nil
+	}
+	h, err := chain.TxHash(*w.SignedRawTx)
+	if err != nil {
+		return "", err
+	}
+	return strings.ToLower(h.Hex()), nil
 }
 
 // publish sends outbox events Kafka has not acknowledged yet, in order, and marks each published

@@ -39,6 +39,9 @@ func (f *fakeStore) RecordProgress(_ context.Context, e Entry, status string) er
 func (f *fakeStore) RecordConfirmed(_ context.Context, e Entry) error {
 	return f.rec(call{Op: "confirmed", Entry: e})
 }
+func (f *fakeStore) RecordFailed(_ context.Context, e Entry) error {
+	return f.rec(call{Op: "withdrawal-failed", Entry: e})
+}
 func (f *fakeStore) RecordFailedEvent(_ context.Context, topic, key string, _ []byte, reason string) error {
 	return f.rec(call{Op: "failed", Reason: reason, Entry: Entry{ID: topic + "/" + key}})
 }
@@ -283,5 +286,32 @@ func TestRunGivesUpAfterMaxAttemptsThenSkipsAndKeepsGoing(t *testing.T) {
 	defer st.mu.Unlock()
 	if len(st.calls) != 1 || st.calls[0].Entry.Amount != "2" {
 		t.Fatalf("calls = %+v: want only the second record applied", st.calls)
+	}
+}
+
+func TestWithdrawalFailedIsRecordedWithItsReasons(t *testing.T) {
+	st := &fakeStore{}
+	p := &Processor{Store: st}
+	n := int64(7)
+	at := time.Date(2026, 9, 29, 12, 13, 0, 0, time.UTC)
+	ev := events.WithdrawalFailed{Version: 1, WithdrawalID: wdKey, IdempotencyKey: "k", UserID: "alice", AssetID: asset, Amount: bigAmt,
+		ToAddress: addrA, ChainID: 11155111, Reason: "tx_reverted", RevertReason: "recipient rejects ETH", TxHash: hash1, Nonce: &n, FailedAt: at}
+	if err := p.Handle(context.Background(), encode(t, ev)); err != nil {
+		t.Fatal(err)
+	}
+	if len(st.calls) != 1 || st.calls[0].Op != "withdrawal-failed" {
+		t.Fatalf("calls = %+v", st.calls)
+	}
+	e := st.calls[0].Entry
+	if e.ID != "withdrawal:"+wdKey || e.Kind != KindWithdrawal || e.UserID != "alice" || e.Amount != bigAmt || e.TxHash != hash1 ||
+		e.FailReason != "tx_reverted" || e.RevertReason != "recipient rejects ETH" || !e.At.Equal(at) {
+		t.Fatalf("%+v", e)
+	}
+	// A request that failed before it was signed has no tx.
+	never := ev
+	never.Reason, never.RevertReason, never.TxHash, never.Nonce = "stale_request", "", "", nil
+	st.calls = nil
+	if err := p.Handle(context.Background(), encode(t, never)); err != nil || st.calls[0].Entry.TxHash != "" || st.calls[0].Entry.FailReason != "stale_request" {
+		t.Fatalf("%+v %v", st.calls, err)
 	}
 }

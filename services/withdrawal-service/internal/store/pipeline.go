@@ -182,3 +182,38 @@ func (s *Store) StampBroadcastHead(ctx context.Context, id string, head int64) e
 		WHERE withdrawal_id = $1 AND status = 'broadcast' AND broadcast_head_seen IS NULL`, id, head)
 	return err
 }
+
+// MarkFailed moves a request from `from` to `failed` (guarded UPDATE), recording why, and in the
+// same transaction writes the withdrawals.failed event to the outbox (invariant #24) — and, when
+// blockAddress is not empty, blocks the request's user's Whitelist Entry for that EIP-55 address
+// (invariant #25). The outbox row is unique per (withdrawal, topic), so a request fails — and is
+// reported — at most once. ErrStateChanged if the row is no longer in `from`.
+func (s *Store) MarkFailed(ctx context.Context, id, from, reason, blockAddress string, event func(Withdrawal) (topic string, payload []byte, err error)) (Withdrawal, error) {
+	var out Withdrawal
+	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+		w, err := guarded(scan(tx.QueryRow(ctx, `
+			UPDATE withdrawal_requests SET status = 'failed', reject_reason = $3, updated_at = now()
+			WHERE withdrawal_id = $1 AND status = $2
+			RETURNING `+columns, id, from, reason)))
+		if err != nil {
+			return err
+		}
+		topic, payload, err := event(w)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO withdrawal_outbox (withdrawal_id, topic, payload) VALUES ($1, $2, $3)
+			ON CONFLICT (withdrawal_id, topic) DO NOTHING`, w.ID, topic, payload); err != nil {
+			return err
+		}
+		if blockAddress != "" {
+			if _, err := tx.Exec(ctx, `UPDATE whitelist_entries SET blocked_at = now()
+				WHERE user_id = $1 AND address = $2 AND blocked_at IS NULL`, w.UserID, blockAddress); err != nil {
+				return err
+			}
+		}
+		out = w
+		return nil
+	})
+	return out, err
+}

@@ -22,7 +22,7 @@ up: certs
 	# Topics must exist before any consumer starts: kafka-go's group reader that joins while its
 	# topic is missing never gets the partitions afterwards (found by this e2e — ledger-service and
 	# history-service sat idle until restarted). Names from pkg/events.
-	@for t in deposits.detected deposits.confirmed withdrawals.broadcast withdrawals.confirmed; do \
+	@for t in deposits.detected deposits.confirmed withdrawals.broadcast withdrawals.confirmed withdrawals.failed; do \
 		$(COMPOSE) exec -T kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --create --if-not-exists --topic $$t --partitions 1 --replication-factor 1 || exit 1; done
 	$(COMPOSE) run --rm wallet-service -init-seed user_derivation >/dev/null
 	$(COMPOSE) run --rm wallet-service -init-seed hot_wallet >/dev/null

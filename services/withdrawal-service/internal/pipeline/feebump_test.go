@@ -413,7 +413,7 @@ type disputedStore struct {
 
 func (d disputedStore) GetByID(context.Context, string) (store.Withdrawal, error) { return d.w, nil }
 func (d disputedStore) ListTxs(context.Context, string) ([]store.Tx, error)       { return d.txs, nil }
-func (d disputedStore) Transition(context.Context, string, string, string, *string) (store.Withdrawal, error) {
+func (d disputedStore) MarkFailed(context.Context, string, string, string, string, func(store.Withdrawal) (string, []byte, error)) (store.Withdrawal, error) {
 	return d.w, nil
 }
 

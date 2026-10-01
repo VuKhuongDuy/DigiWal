@@ -197,3 +197,22 @@ func TestWhitelistList(t *testing.T) {
 		t.Fatalf("no user_id: %d", rec.Code)
 	}
 }
+
+// invariant #25: a blocked entry shows as `blocked` in GET /v1/whitelist (and in the POST answer for a re-add).
+func TestBlockedEntryIsShownAsBlocked(t *testing.T) {
+	wl := newFakeWL()
+	const addr = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
+	blockedAt := wl.now.Add(-time.Hour)
+	wl.entries[[2]string{"alice", addr}] = store.WhitelistEntry{ID: "id-1", UserID: "alice", Address: addr,
+		AddedAt: wl.now.Add(-72 * time.Hour), BlockedAt: &blockedAt} // long past its cooldown, still blocked
+	cfg := Config{WhitelistCooldown: 24 * time.Hour}
+
+	rec := doWL(t, wl, cfg, "api-gateway", "GET", "/v1/whitelist?user_id=alice", "")
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), `"status":"blocked"`) || strings.Contains(rec.Body.String(), `"active"`) {
+		t.Fatalf("%d %s", rec.Code, rec.Body)
+	}
+	rec = doWL(t, wl, cfg, "api-gateway", "POST", "/v1/whitelist", `{"user_id":"alice","address":"`+addr+`"}`)
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), `"status":"blocked"`) {
+		t.Fatalf("re-adding a blocked entry: %d %s", rec.Code, rec.Body)
+	}
+}

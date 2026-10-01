@@ -27,7 +27,7 @@ const (
 type ReaperStore interface {
 	ListOlderThan(ctx context.Context, status string, before time.Time, limit int) ([]store.Withdrawal, error)
 	ListByStatus(ctx context.Context, status string, limit int) ([]store.Withdrawal, error)
-	Transition(ctx context.Context, id, from, to string, reason *string) (store.Withdrawal, error)
+	MarkFailed(ctx context.Context, id, from, reason, blockAddress string, event func(store.Withdrawal) (string, []byte, error)) (store.Withdrawal, error)
 	MarkSigned(ctx context.Context, id string, chainID int64, nonce uint64, rawTx string) (store.Withdrawal, error)
 	StampBroadcastHead(ctx context.Context, id string, head int64) error
 	ListTxs(ctx context.Context, id string) ([]store.Tx, error)
@@ -139,16 +139,15 @@ func (r *Reaper) now() time.Time {
 }
 
 func (r *Reaper) requested(ctx context.Context, w store.Withdrawal) error {
-	reason := ReasonStaleRequest
-	_, err := r.Store.Transition(ctx, w.ID, store.StatusRequested, store.StatusFailed, &reason)
+	err := failWith(ctx, r.Store, w, store.StatusRequested, failure{reason: ReasonStaleRequest}, r.ChainID, r.now())
 	if err == nil {
-		log.Printf("withdrawal %s: stuck in requested, failed (%s)", w.ID, reason)
+		log.Printf("withdrawal %s: stuck in requested, failed (%s)", w.ID, ReasonStaleRequest)
 	}
 	return err
 }
 
 func (r *Reaper) validated(ctx context.Context, w store.Withdrawal) error {
-	err := releaseAndFail(ctx, r.Store, r.Ledger, w, store.StatusValidated, ReasonStaleReservation)
+	err := releaseAndFail(ctx, r.Store, r.Ledger, w, store.StatusValidated, failure{reason: ReasonStaleReservation}, r.ChainID, r.now())
 	if err == nil {
 		log.Printf("withdrawal %s: stuck in validated, Lock released, failed (%s)", w.ID, ReasonStaleReservation)
 	}
@@ -166,7 +165,7 @@ func (r *Reaper) reserved(ctx context.Context, w store.Withdrawal) error {
 		return nil
 	}
 	if v.Voided {
-		err := releaseAndFail(ctx, r.Store, r.Ledger, w, store.StatusReserved, ReasonStaleReservation)
+		err := releaseAndFail(ctx, r.Store, r.Ledger, w, store.StatusReserved, failure{reason: ReasonStaleReservation}, r.ChainID, r.now())
 		if err == nil {
 			log.Printf("withdrawal %s: stuck in reserved, key voided, Lock released, failed (%s)", w.ID, ReasonStaleReservation)
 		}
@@ -315,7 +314,7 @@ func txHashes(ctx context.Context, st interface {
 }
 
 func (r *Reaper) releaseDead(ctx context.Context, w store.Withdrawal, from string, mined uint64) error {
-	err := releaseAndFail(ctx, r.Store, r.Ledger, w, from, ReasonReplacedOrDropped)
+	err := releaseAndFail(ctx, r.Store, r.Ledger, w, from, failure{reason: ReasonReplacedOrDropped}, r.ChainID, r.now())
 	if err == nil {
 		log.Printf("withdrawal %s: nonce %d consumed by another tx (mined nonce %d), none of ours mined; Lock released, failed (%s)",
 			w.ID, *w.Nonce, mined, ReasonReplacedOrDropped)

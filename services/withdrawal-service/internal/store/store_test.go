@@ -149,7 +149,7 @@ func TestTransitionIsGuarded(t *testing.T) {
 	if err != nil || got.Status != StatusRejected || got.RejectReason == nil || *got.RejectReason != reason || !got.UpdatedAt.After(w.UpdatedAt) {
 		t.Fatalf("first transition: %+v %v", got, err)
 	}
-	if _, err := s.Transition(ctx, w.ID, StatusRequested, StatusFailed, nil); !errors.Is(err, ErrStateChanged) {
+	if _, err := s.Transition(ctx, w.ID, StatusRequested, StatusValidated, nil); !errors.Is(err, ErrStateChanged) {
 		t.Fatalf("second writer: %v, want ErrStateChanged", err)
 	}
 	if again, _ := s.Get(ctx, "alice", "t1"); again.Status != StatusRejected {
@@ -245,5 +245,82 @@ func TestAddReplacementIsGuardedIdempotentAndResetsSentHead(t *testing.T) {
 	_ = s.MarkSent(ctx, w.ID, 999)
 	if got, _ := s.GetByID(ctx, w.ID); got.SentHead != nil {
 		t.Fatal("MarkSent stamped a confirmed row")
+	}
+}
+
+// invariant #24: every `→ failed` writes its event in the same transaction, once.
+func TestMarkFailedWritesTheEventOnceAndTransitionRefusesFailed(t *testing.T) {
+	s := newStore(t)
+	ctx := context.Background()
+	w, _, _ := s.Create(ctx, req("alice", "f1"))
+	if _, err := s.Transition(ctx, w.ID, StatusRequested, StatusFailed, nil); err == nil {
+		t.Fatal("Transition to failed must be refused: it would skip the event")
+	}
+	ev := func(u Withdrawal) (string, []byte, error) {
+		return "withdrawals.failed", []byte(`{"id":"` + u.ID + `"}`), nil
+	}
+	got, err := s.MarkFailed(ctx, w.ID, StatusRequested, "stale_request", "", ev)
+	if err != nil || got.Status != StatusFailed || *got.RejectReason != "stale_request" {
+		t.Fatalf("%+v %v", got, err)
+	}
+	// A second writer loses, and no second event appears.
+	if _, err := s.MarkFailed(ctx, w.ID, StatusRequested, "stale_request", "", ev); !errors.Is(err, ErrStateChanged) {
+		t.Fatalf("second writer: %v, want ErrStateChanged", err)
+	}
+	evs, _ := s.UnpublishedEvents(ctx, 10)
+	if len(evs) != 1 || evs[0].Topic != "withdrawals.failed" || evs[0].WithdrawalID != w.ID {
+		t.Fatalf("outbox = %+v", evs)
+	}
+	// An event that cannot be built fails the whole transition: nothing half-done.
+	w2, _, _ := s.Create(ctx, req("alice", "f2"))
+	if _, err := s.MarkFailed(ctx, w2.ID, StatusRequested, "x", "", func(Withdrawal) (string, []byte, error) { return "", nil, errors.New("boom") }); err == nil {
+		t.Fatal("expected the event error")
+	}
+	if again, _ := s.GetByID(ctx, w2.ID); again.Status != StatusRequested {
+		t.Fatalf("a failed event write left the row %s", again.Status)
+	}
+}
+
+// invariant #25: blocked wins over pending/active, in the same transaction as `→ failed`; only
+// delete + re-add (a new row, a new cooldown) lifts it; other users' entries are untouched.
+func TestMarkFailedCanBlockTheWhitelistEntry(t *testing.T) {
+	s := newStore(t)
+	ctx := context.Background()
+	const addr = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
+	alice, _, _ := s.AddWhitelistEntry(ctx, "alice", addr)
+	_, _, _ = s.AddWhitelistEntry(ctx, "bob", addr)
+	if _, err := s.pool.Exec(ctx, `UPDATE whitelist_entries SET added_at = now() - interval '2 days'`); err != nil {
+		t.Fatal(err)
+	}
+	if st, ok, _ := s.WhitelistStatus(ctx, "alice", addr, 24*time.Hour); !ok || st != WhitelistActive {
+		t.Fatalf("setup: %s", st)
+	}
+	w, _, _ := s.Create(ctx, req("alice", "f1"))
+	if _, err := s.MarkFailed(ctx, w.ID, StatusRequested, "tx_reverted", addr, func(Withdrawal) (string, []byte, error) { return "t", []byte("{}"), nil }); err != nil {
+		t.Fatal(err)
+	}
+	if st, _, _ := s.WhitelistStatus(ctx, "alice", addr, 24*time.Hour); st != WhitelistBlocked {
+		t.Fatalf("alice's entry is %s, want blocked", st)
+	}
+	if st, _, _ := s.WhitelistStatus(ctx, "bob", addr, 24*time.Hour); st != WhitelistActive {
+		t.Fatalf("bob's entry is %s: blocking must not touch other users", st)
+	}
+	list, _ := s.ListWhitelist(ctx, "alice")
+	if len(list) != 1 || list[0].Status(time.Now(), 24*time.Hour) != WhitelistBlocked {
+		t.Fatalf("list = %+v", list)
+	}
+	// Re-adding without deleting is a no-op (stays blocked, same cooldown clock) ...
+	again, created, _ := s.AddWhitelistEntry(ctx, "alice", addr)
+	if created || again.ID != alice.ID || again.Status(time.Now(), 24*time.Hour) != WhitelistBlocked {
+		t.Fatalf("re-add = %+v created=%v", again, created)
+	}
+	// ... delete + re-add is a brand-new pending entry.
+	_ = s.RemoveWhitelistEntry(ctx, "alice", alice.ID)
+	fresh, created, _ := s.AddWhitelistEntry(ctx, "alice", addr)
+	if !created || fresh.ID == alice.ID || fresh.Status(time.Now(), 24*time.Hour) != WhitelistPending {
+		t.Fatalf("after delete + re-add: %+v created=%v", fresh, created)
+	}
+	if st, _, _ := s.WhitelistStatus(ctx, "alice", addr, 24*time.Hour); st != WhitelistPending {
+		t.Fatalf("status %s, want pending", st)
 	}
 }

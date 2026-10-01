@@ -159,7 +159,13 @@ var ErrStateChanged = errors.New("withdrawal request is no longer in the expecte
 
 // Transition moves the row from `from` to `to` (and records reason, for `rejected`) in one
 // guarded UPDATE, so two writers can never both succeed (invariant #11).
+//
+// Moving to `failed` is refused here: every `→ failed` goes through MarkFailed, which writes the
+// withdrawals.failed event in the same transaction (invariant #24).
 func (s *Store) Transition(ctx context.Context, id, from, to string, reason *string) (Withdrawal, error) {
+	if to == StatusFailed {
+		return Withdrawal{}, errors.New("use MarkFailed to fail a request: it publishes withdrawals.failed")
+	}
 	return guarded(scan(s.pool.QueryRow(ctx, `
 		UPDATE withdrawal_requests SET status = $3, reject_reason = $4, updated_at = now()
 		WHERE withdrawal_id = $1 AND status = $2

@@ -23,6 +23,9 @@ const (
 	StatusPending   = "pending"   // deposit seen, not yet confirmation-deep
 	StatusBroadcast = "broadcast" // withdrawal sent, not yet confirmation-deep
 	StatusConfirmed = "confirmed"
+	// StatusFailed is terminal for a withdrawal: it will not happen (withdrawals.failed). It can follow
+	// confirmed — a Settled withdrawal reorged out and refunded (withdrawal-flow.md invariant #9).
+	StatusFailed = "failed"
 )
 
 // Entry is one row of a user's history.
@@ -38,6 +41,8 @@ type Entry struct {
 	BlockNumber int64
 	// At is when the event happened: detection/broadcast time, or confirmation time.
 	At time.Time
+	// FailReason and RevertReason are set only on a failed withdrawal.
+	FailReason, RevertReason string
 }
 
 // Store persists entries. Both operations are idempotent: applying the same event twice,
@@ -47,8 +52,12 @@ type Store interface {
 	// RecordProgress inserts the entry in its in-flight status (pending/broadcast) unless one
 	// already exists; it never modifies an existing entry.
 	RecordProgress(ctx context.Context, e Entry, status string) error
-	// RecordConfirmed inserts the entry as confirmed, or turns an existing one into confirmed.
+	// RecordConfirmed inserts the entry as confirmed, or turns an existing one into confirmed — but
+	// never takes a failed one back: failed is terminal, so a redelivered older event cannot undo it.
 	RecordConfirmed(ctx context.Context, e Entry) error
+	// RecordFailed inserts the entry as failed, or turns an existing one (pending, broadcast or
+	// confirmed) into failed. It never erases a tx hash the entry already has.
+	RecordFailed(ctx context.Context, e Entry) error
 	// RecordFailedEvent parks an event that can never be processed.
 	RecordFailedEvent(ctx context.Context, topic, key string, payload []byte, reason string) error
 }
@@ -93,6 +102,14 @@ func (p *Processor) Handle(ctx context.Context, m Message) error {
 			return p.fail(ctx, m, err.Error())
 		}
 		return p.Store.RecordConfirmed(ctx, withdrawalEntry(ev.WithdrawalID, ev.UserID, ev.AssetID, string(ev.Amount), ev.ToAddress, ev.TxHash, ev.ChainID, ev.BlockNumber, ev.ConfirmedAt))
+	case events.TopicWithdrawalsFailed:
+		ev, err := events.Decode[events.WithdrawalFailed](m.Value)
+		if err != nil {
+			return p.fail(ctx, m, err.Error())
+		}
+		e := withdrawalEntry(ev.WithdrawalID, ev.UserID, ev.AssetID, string(ev.Amount), ev.ToAddress, ev.TxHash, ev.ChainID, 0, ev.FailedAt)
+		e.FailReason, e.RevertReason = ev.Reason, ev.RevertReason
+		return p.Store.RecordFailed(ctx, e)
 	default:
 		return p.fail(ctx, m, fmt.Sprintf("unexpected topic %q", m.Topic))
 	}

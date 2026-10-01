@@ -328,6 +328,14 @@ func TestWithdrawals(t *testing.T) {
 		if st, _ := carol.status(t, "gap-1"); st != "failed" {
 			t.Errorf("gap-1 is %q after abandon", st)
 		}
+		// withdrawals.failed reached history-service for both failures (invariant #24), and the one that
+		// had Settled went confirmed → failed there.
+		for id, reason := range map[string]string{id: "abandoned_refunded", id2: "stale_reservation"} {
+			waitFor(t, 60*time.Second, "history to record the failure of "+id, func() (bool, string) {
+				d := historyDoc(t, id)
+				return strings.Contains(d, `"status":"failed"`) && strings.Contains(d, `"fail_reason":"`+reason+`"`), d
+			})
+		}
 		if b := carol.ledger(t)[ethAssetID]; b.total != eth1(3).String() || b.locked != "0" || b.available != eth1(3).String() {
 			t.Errorf("carol's balance after the refund = %+v, want her full 3 ETH back", b)
 		}
@@ -558,4 +566,11 @@ func revert(ctx context.Context, t *testing.T, c *rpc.Client, id string) {
 	if err := c.CallContext(ctx, &ok, "evm_revert", id); err != nil || !ok {
 		t.Fatalf("evm_revert(%s): %v %v", id, ok, err)
 	}
+}
+
+// historyDoc is history-service's MongoDB document for a withdrawal (the read model has no query API yet).
+func historyDoc(t *testing.T, withdrawalID string) string {
+	t.Helper()
+	return compose(t, "exec", "-T", "mongo", "mongosh", "--quiet", "-u", "custody", "-p", "custody", "--authenticationDatabase", "admin", "history",
+		"--eval", fmt.Sprintf(`JSON.stringify(db.history.findOne({_id: "withdrawal:%s"}) || {})`, withdrawalID))
 }
