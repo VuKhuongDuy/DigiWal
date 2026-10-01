@@ -487,7 +487,7 @@ sequenceDiagram
         alt zero rows (already resolved, or unknown key)
             Ledger->>PG: ROLLBACK
             Ledger->>PG: SELECT status FROM locks WHERE idempotency_key=$key
-            Ledger-->>WD: ok (no-op, already resolved) — or 404 if the key was never locked
+            Ledger-->>WD: ok (no-op, already resolved; a settled replay returns the same entry_ids) — or 404 if the key was never locked
         else newly settled (1 row, account_id + amount in hand)
             Ledger->>PG: INSERT INTO ledger_transaction (idempotency_key=$key, source_type='withdrawal_settle')<br/>ON CONFLICT DO NOTHING — same key as the Lock, never a derived one
             Ledger->>PG: UPDATE accounts SET total_balance = total_balance - amount,<br/>locked_balance = locked_balance - amount WHERE id=account_id<br/>(no balance re-check here — invariant #7: this exact amount<br/>was already reserved by this same Lock at creation time)
@@ -495,7 +495,7 @@ sequenceDiagram
             Ledger->>PG: INSERT INTO entries (ledger_transaction_id, account_id, amount=-amount) -- user debit
             Ledger->>PG: INSERT INTO entries (ledger_transaction_id, account_id=chain_account_id, amount=+amount) -- chain credit
             Ledger->>PG: COMMIT
-            Ledger-->>WD: ok (settled)
+            Ledger-->>WD: ok (settled) {ledger_transaction_id, entry_ids: [debit, chain credit]}<br/>(entry_ids PROPOSED, task 3.5 — needed for a refund's corrects_entry_id)
         end
     else withdrawal fails before confirmation (invariant #3, withdrawal-flow.md)
         WD->>Ledger: release(idempotency_key)

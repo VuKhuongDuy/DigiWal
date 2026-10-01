@@ -111,7 +111,13 @@ Question #7).
   `withdrawal:{withdrawal_id}:refund`**) and
   no-ops via `ledger.md`'s own idempotent-apply mechanism, so a crash
   between posting the refund and marking the Withdrawal Request
-  `failed` can never double-refund.
+  `failed` can never double-refund. **As implemented (task 3.5):** `POST
+  /v1/ledger/transactions {idempotency_key:
+  "withdrawal:{withdrawal_id}:refund", source_type: "correction",
+  entries: [{corrects_entry_id} for each Settle entry_id]}` — the two
+  ids come from Settle's response (`entry_ids`, PROPOSED additive field,
+  `integration-contracts.md` §2), stored with the request; the ledger
+  derives the exact negations (`ledger.md` invariant #11).
 - **Nonce Gap** — the situation where a Hot Wallet transaction at nonce
   N is no longer present in the canonical chain (a reorg deeper than
   Withdrawal Confirmation Depth). By EVM's strict per-account nonce
@@ -197,7 +203,9 @@ Question #7).
   Decided; carried as `reason` on `withdrawals.failed`):
   `sign_refused`, `tx_reverted`, `stale_request`, `stale_reservation`,
   `replaced_or_dropped`, `destination_not_whitelisted` /
-  `destination_on_screening_list` (pre-sign re-check, #23).
+  `destination_on_screening_list` (pre-sign re-check, #23);
+  `abandoned_refunded` / `abandoned` (operator abandon of a `disputed`
+  request, #9 — PROPOSED).
 
 Withdrawal Request states: a row exists first (invariant #11), then
 moves `requested → validated → reserved → signed → broadcast →
@@ -355,6 +363,18 @@ Questions #3 for the one remaining unresolved failure mode.
    no double-spend risk), or submit a nonce-filler transaction to
    abandon it and trigger a Compensating Entry. This is the one case
    kept out of "fully automatic" — see Open Questions #4's resolution.
+   **Abandon, as implemented in task 3.5:** an operator CLI on
+   `withdrawal-service`, `service -abandon <withdrawal_id>`. It refuses
+   unless on-chain proof holds: the request's tx is not mined **and** the
+   Hot Wallet's `latest` nonce is past the request's nonce (a Nonce
+   Filler, invariant #23, consumed it). Then: `disputed_from =
+   confirmed` → refund via the Compensating Entry (the Lock had already
+   Settled); any other `disputed_from` (`signed`, `broadcast`) →
+   Release. Finally `disputed → failed` with reason
+   **`abandoned_refunded`** or **`abandoned`** (both PROPOSED). Being a
+   `→ failed` transition, it must also publish `withdrawals.failed`
+   (invariant #24) and post the filler's Gas Fee (invariant #26) — see
+   Open Questions #25.
 10. **A Withdrawal Request below the asset's Minimum Withdrawal Amount
     is rejected at validation, before any ledger Reservation is made.**
     Same off-ramp as any other validation failure — `rejected`, no
@@ -1349,3 +1369,16 @@ sequenceDiagram
     which restarts the 24h cooldown. Alternative: delete the entry
     outright (simpler, but the user loses the explanation). Confirm the
     rule, the state name, and whether an operator can also block.
+25. **PROPOSED (task 3.5, implemented): the Settle response's additive
+    `entry_ids` field and the fail reasons `abandoned_refunded` /
+    `abandoned`** (invariant #9). Confirm. Two consistency points for
+    the abandon path, to check against the implementation: (a) it is a
+    `→ failed` transition, so it must publish `withdrawals.failed`
+    (#24) and post the mined filler's Gas Fee (#26); (b) **gap found:**
+    for `disputed_from = confirmed`, a Gas Fee was already posted at
+    Settle for the original tx, which was later reorged out and so never
+    actually paid gas. That Gas Fee should be reversed too, by a
+    correction naming its two entries — but `POST /v1/ledger/gas-fees`
+    returns only `ledger_transaction_id`, not `entry_ids`, so the same
+    additive field would be needed there. Decide whether to reverse it
+    or accept the small overstatement.
