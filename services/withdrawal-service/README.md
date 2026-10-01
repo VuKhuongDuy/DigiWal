@@ -1,9 +1,9 @@
 # withdrawal-service
 
-Orchestrates withdrawals (`docs/design/withdrawal-flow.md`). **Tasks 3.1-3.3, 3.6, 3.10 and the
+Orchestrates withdrawals (`docs/design/withdrawal-flow.md`). **Tasks 3.1-3.4, 3.6, 3.10 and the
 withdrawal-service part of 3.11 so far:** a request is recorded idempotently, validated, Reserved on the
-ledger, then signed, broadcast, confirmed and Settled in the background. Nonce Gap handling (3.4),
-refunds (3.5) and the Reaper (3.9) are not built yet.
+ledger, then signed, broadcast, confirmed and Settled in the background; confirmed txs are watched for
+Nonce Gaps. Refunds (3.5), the Reaper (3.9) and the never-strand-a-nonce work (3.13) are not built yet.
 
 ## What works
 
@@ -85,6 +85,29 @@ refunds (3.5) and the Reaper (3.9) are not built yet.
   a pass twice, or two instances at once, does no harm. A request that may already have a nonce is only
   ever moved forward: dropping a signed tx would strand that Hot Wallet nonce and block every later Hot
   Wallet tx.
+- **Nonce Gap detection** (task 3.4, invariants #7-#9, #19), part of every pipeline pass:
+  - every `confirmed` request mined in the last `NONCE_GAP_WINDOW` blocks (default 256) has its receipt
+    re-read. A receipt missing on **two passes in a row** (one flaky RPC answer must not freeze all Hot
+    Wallet signing) means a reorg deeper than the confirmation depth took the tx back: a Nonce Gap at its
+    nonce N (the lowest such one);
+  - in one transaction the gap is recorded (`nonce_gaps`) and every request on the chain at nonce ≥ N that
+    holds a tx (`signed`, `broadcast`, `confirmed`) becomes `disputed`, remembering where it came from
+    (`disputed_from`) — by EVM nonce ordering none of them can confirm while N is missing. `ALERT` logged;
+  - then wallet-service is told (`POST /v1/wallet/nonce-gap`), retried every pass until it answers `200`.
+    From that moment no new Hot Wallet signature is made for anyone: new withdrawals wait in `reserved`;
+  - the pipeline never touches a `disputed` request again. Only an operator resolves it (#9).
+
+  **Operator resolution (stub — manual DB actions, no UI yet).** For each disputed request, oldest nonce
+  first, in withdrawal-service's database:
+  1. *Rebroadcast* (the original tx can still land): send `signed_raw_tx` to the chain yourself, wait for
+     the confirmation depth, then put the request back where it was:
+     `UPDATE withdrawal_requests SET status = disputed_from, disputed_from = NULL, disputed_at = NULL, updated_at = now() WHERE withdrawal_id = '<id>' AND status = 'disputed';`
+     (a `broadcast`/`signed` one then continues through the pipeline; a `confirmed` one had already Settled).
+  2. *Abandon* (the tx can never land): clear nonce N with a Nonce Filler (task 3.13), then — if
+     `disputed_from = 'confirmed'` — a refund is needed (task 3.5); otherwise Release the Lock
+     (`POST /v1/ledger/locks/withdrawal:<id>/release`) and set `status = 'failed'`.
+  3. When no request is `disputed` any more, lift the freeze in wallet-service's database (its README).
+  The nonce-filler and refund steps are not built yet (tasks 3.13, 3.5).
 - **Destination checks** (task 3.10, invariant #18), on both `POST /v1/withdrawals` and
   `POST /v1/whitelist`:
   - Hot and Warm come from wallet-service's `GET /v1/wallet/system-addresses`, asked **once at
