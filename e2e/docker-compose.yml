@@ -123,6 +123,7 @@ services:
       POSTGRES_DSN: postgres://custody:custody@postgres:5432/api_gateway?sslmode=disable
       WALLET_SERVICE_URL: http://wallet-service:8080
       LEDGER_SERVICE_URL: https://ledger-service:8443
+      WITHDRAWAL_SERVICE_URL: https://withdrawal-service:8443
       TLS_CERT_FILE: /certs/cert.pem
       TLS_KEY_FILE: /certs/key.pem
       TLS_CA_FILE: /certs/ca-cert.pem
