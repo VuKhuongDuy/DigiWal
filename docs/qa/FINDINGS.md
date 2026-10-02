@@ -58,3 +58,53 @@ Deposit credit exactly-once (20 duplicates + concurrent producers); native + ERC
 ## Not testable yet (see TEST_PLAN.md)
 
 Internal transfer (no design), real chain-watcher/sweeper/withdrawal-service (M2/M3, stand-ins used), api-gateway (missing), wallet tiering (M4).
+
+---
+
+# Round 2 — real services after Milestone 3 (origin/main @ b74bea7)
+
+Stack: `tests/e2e/stack2.sh up` (Dev's `e2e/docker-compose.yml`, all 7 shipped services, ports +10000, project `digiwal-qa`).
+Suite: `tests/chaos` (`CHAOS=1 go test -p 1 -v ./...`), only via api-gateway, anvil RPC and docker. Ledger conservation check after every test.
+
+## Status of round-1 findings
+
+| ID | Round-1 finding | Now |
+|---|---|---|
+| D-1 | Gas Top-Up credited as deposit | **Fixed, verified** (C2: 500 TT deposit → sweeper top-up lands on the deposit address, ETH balance stays 0) |
+| D-2 | Release possible after broadcast | **Not reproducible through withdrawal-service** (it never releases a lock after broadcast). Ledger itself still has no `broadcast` guard → downgraded to Medium/defence-in-depth |
+| W-7 | Reorg after Settle → debited, not paid | Dev added `disputed`, Nonce Filler, Compensating Entry, Reaper. **Not re-verified by QA yet** |
+| W-4 | No Nonce-Gap endpoint | Fixed (`POST /v1/wallet/nonce-gap`) — existence confirmed, flow not re-tested by QA |
+| W-6 | Nonce drift never healed | Not re-tested |
+| M-1 | api-gateway missing | Fixed (used by every chaos test) |
+| O-1 | `make init-seed` broken | Fixed by Dev |
+| K-1 | Consumer idle if topic missing at boot | **Still open** (Dev: Makefile pre-creates topics; services unchanged; no `WatchPartitionChanges`) |
+| W-8 | No RPC timeout | **Still open** (no `WithTimeout` in wallet-service signing path). Effect seen in C10 |
+| S-1 | No header timeouts | **Still open on 6 of 7** services (only api-gateway has `ReadHeaderTimeout`) — confirmed by `TestS1` |
+| D-4 | Ledger credits any chain_id | Still open (code unchanged) |
+| L-1..L-3, W-1, S-2, W-5 | probes | Not re-tested |
+
+## New findings
+
+| ID | Sev | Finding | Repro |
+|---|---|---|---|
+| **K-2** | **High** | **A Kafka restart kills ledger-service, sweeper and history-service** (`log.Fatalf("consumer: …")` on fetch error; compose has no restart policy, so they stay `Exited (1)`). ledger-service down = balances / locks / withdrawals API all return 502. Reproduced twice. A broker blip must reconnect, not crash the money API. | `TestK2_KafkaRestartDoesNotKillServices` |
+| **W-9** | **High** | **A tx dropped from the mempool leaves the withdrawal in `broadcast` forever with the funds locked.** After `anvil_dropTransaction`, 150 s later: status still `broadcast`, 1 ETH locked, no re-broadcast of the stored raw tx, no failure, no alert (Fee Bump only fires for stuck *and* underpriced). When the same raw tx was re-sent it confirmed once and settled correctly, so recovery is just "someone must re-broadcast". Mempool eviction / node restart makes this a realistic production case. | `TestC12_DroppedTxIsNotLeftStuckForever` |
+| C-2 | Info | Transient RPC outage (25 s) fails all in-flight withdrawals as `failed/stale_reservation` and refunds the ledger correctly (safe, no money moved, but every user has to resubmit). Wallet nonce and chain nonce stayed in sync afterwards (44 = 44). | `TestC10` |
+
+## What the chaos run proved OK (real services, DB + chain checked)
+
+| Case | Fault | Result |
+|---|---|---|
+| C1 | none (smoke) | deposit → credited → withdraw → paid, ledger total/locked correct |
+| C3 | same withdrawal submitted 20× concurrently; same key different amount | 1 accepted (202), 19 replays (200), one DB row, paid once; different body → 409 |
+| C4 | 20 racing withdrawals of 0.1 ETH against 1 ETH | exactly 10 accepted / 10 × 422, all 10 paid, ledger 0, never negative |
+| C5 | `kill -9` withdrawal-service mid-flight (8 withdrawals) | all 8 `confirmed`, each destination exactly 0.2 ETH, ledger == chain, nothing locked |
+| C6 | `kill -9` chain-watcher during 8 deposits | credited exactly 0.8 ETH (no loss, no double) |
+| C7 | `kill -9` ledger-service mid-flight | 8/8 confirmed and consistent |
+| C8 | Postgres restart mid-flight | 8/8 confirmed and consistent |
+| C9 | Kafka restart mid-flight | 8/8 confirmed and consistent **but see K-2: three services died afterwards** |
+| C10 | RPC node paused 25 s | all 8 `failed` (Reaper), 0 paid, ledger refunded exactly |
+| C11 | tx in mempool, withdrawal-service killed, block mined while it is down, service restarted | `confirmed`, paid once, debited once |
+| C12 (second half) | original raw tx replayed after being dropped | single payout, settle once |
+
+Not yet exercised by QA on the real stack: reorg after settle (Dev's own e2e covers it), nonce-gap freeze/resolve flow, whitelist edge cases, history-service consistency, sweeper kills, chain-watcher reorg of deposits, ERC-20 withdrawal chaos, load.
