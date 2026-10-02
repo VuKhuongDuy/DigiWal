@@ -327,7 +327,6 @@ func (f *finder) native(b *chain.Block) error {
 			continue
 		}
 		if tx.From == f.w.HotWallet { // Hot Wallet Outflow, e.g. a Gas Top-Up: not a deposit
-			log.Printf("skipping Hot Wallet Outflow %s (native, to %s)", tx.Hash, tx.To)
 			continue
 		}
 		o, err := f.resolve(*tx.To)
@@ -374,7 +373,6 @@ func (f *finder) erc20(l chain.Log) error {
 	// The Transfer log's `from`, not the transaction sender (a contract may move tokens on
 	// someone's behalf).
 	if common.BytesToAddress(l.Topics[1].Bytes()) == f.w.HotWallet {
-		log.Printf("skipping Hot Wallet Outflow %s:%d (ERC-20)", l.TxHash, l.Index)
 		return nil
 	}
 	to := common.BytesToAddress(l.Topics[2].Bytes())
