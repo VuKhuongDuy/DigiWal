@@ -14,7 +14,7 @@ func TestQA_AmountAboveUint256IsRejected(t *testing.T) {
 	for _, asset := range []string{nativeID, tokenID} {
 		r := nativeReq("huge-" + asset[:2])
 		r.AssetID, r.Amount = asset, huge
-		resp, err := s.Sign(context.Background(), r)
+		resp, err := s.Sign(context.Background(), "withdrawal-service", r)
 		if err == nil {
 			t.Errorf("asset %s: amount 2^256 was SIGNED (nonce %d, %d bytes)", asset[:2], resp.Nonce, len(resp.SignedRawTx))
 		}
@@ -27,11 +27,11 @@ func TestQA_AmountSpellingDoesNotSidestepIdempotency(t *testing.T) {
 	a := nativeReq("spell")
 	b := a
 	b.Amount = "0" + a.Amount
-	ra, err := s.Sign(context.Background(), a)
+	ra, err := s.Sign(context.Background(), "withdrawal-service", a)
 	if err != nil {
 		t.Fatal(err)
 	}
-	rb, err := s.Sign(context.Background(), b)
+	rb, err := s.Sign(context.Background(), "withdrawal-service", b)
 	t.Logf("leading-zero replay: resp=%v err=%v (first nonce %d)", rb, err, ra.Nonce)
 }
 
@@ -40,7 +40,7 @@ func TestQA_ToHotWalletItselfAndZeroAddress(t *testing.T) {
 	for _, to := range []string{"0x0000000000000000000000000000000000000000", s.HotWalletAddress().Hex()} {
 		r := nativeReq("to-" + to[2:6])
 		r.ToAddress = to
-		_, err := s.Sign(context.Background(), r)
+		_, err := s.Sign(context.Background(), "withdrawal-service", r)
 		t.Logf("to=%s -> err=%v", to, err)
 	}
 }
