@@ -3,6 +3,11 @@
 //	service -init-seed <role>     generate the seed for <role> (user_derivation | hot_wallet),
 //	                              seal it, store it, print the mnemonic once, exit. Run this
 //	                              exactly once per role, ever, per environment.
+//	service hot-wallet cancel --key <idempotency key>
+//	                              operator only (withdrawal-flow.md invariant #23): sign and broadcast
+//	                              a Nonce Filler — a 0-value Hot -> Hot tx at the key's nonce with
+//	                              higher fees — so the signed withdrawal can never land. Run it
+//	                              inside this container; there is no network endpoint for it.
 //	service                       normal mode: decrypt the sealed seeds already in Postgres
 //	                              (using MASTER_KEY_HEX) and serve the HTTP API.
 package main
@@ -13,6 +18,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"math/big"
 	"net/http"
 	"os"
 	"strings"
@@ -25,9 +31,14 @@ import (
 	"digiwal/services/wallet-service/internal/hdwallet"
 	"digiwal/services/wallet-service/internal/signing"
 	"digiwal/services/wallet-service/internal/storage"
+	"digiwal/services/wallet-service/internal/treasury"
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "hot-wallet" {
+		runHotWallet(context.Background(), os.Args[2:])
+		return
+	}
 	initSeed := flag.String("init-seed", "", "generate + seal + store the seed for this role (user_derivation|hot_wallet), print the mnemonic once, then exit")
 	flag.Parse()
 
@@ -54,6 +65,70 @@ func main() {
 	}
 
 	runServer(ctx, store, sealer)
+}
+
+// runHotWallet is the operator CLI: `hot-wallet cancel --key <key>` (invariant #23). The Hot key never
+// leaves wallet-service: it signs the filler itself and broadcasts it. Running it again re-sends the
+// same filler. Once it is mined, withdrawal-service's Reaper proves the nonce consumed and Releases.
+func runHotWallet(ctx context.Context, args []string) {
+	fs := flag.NewFlagSet("hot-wallet cancel", flag.ExitOnError)
+	key := fs.String("key", "", "the Hot Wallet idempotency key to cancel, e.g. withdrawal:<withdrawal_id>")
+	if len(args) < 1 || args[0] != "cancel" {
+		log.Fatal("usage: service hot-wallet cancel --key <idempotency key>")
+	}
+	_ = fs.Parse(args[1:])
+	if *key == "" {
+		log.Fatal("usage: service hot-wallet cancel --key <idempotency key>")
+	}
+	sealer, err := crypto.NewSealer(requireEnv("MASTER_KEY_HEX"))
+	if err != nil {
+		log.Fatal(err)
+	}
+	store, err := storage.Connect(ctx, requireEnv("POSTGRES_DSN"))
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer store.Close()
+	hot, err := loadWallet(ctx, store, sealer, storage.RoleHotWallet)
+	if err != nil {
+		log.Fatalf("loading the hot_wallet seed: %v", err)
+	}
+	assets, err := signing.LoadAssets(requireEnv("ASSETS_FILE"))
+	if err != nil {
+		log.Fatalf("loading assets: %v", err)
+	}
+	rpc, err := signing.DialRPC(ctx, requireEnv("RPC_URL"))
+	if err != nil {
+		log.Fatal(err)
+	}
+	signer, err := signing.New(ctx, store, hot, rpc, assets)
+	if err != nil {
+		log.Fatalf("hot wallet signer: %v", err)
+	}
+	signer.WithFeeCeiling(feeCeiling())
+	f, err := signer.Cancel(ctx, *key)
+	if err != nil {
+		log.Fatalf("not cancelled: %v", err)
+	}
+	if err := rpc.Broadcast(ctx, f.SignedRawTx); err != nil {
+		log.Fatalf("Nonce Filler %s stored (replacement %d) but not broadcast: %v — run the command again to re-send it", f.TxHash, f.Seq, err)
+	}
+	fmt.Printf("Nonce Filler broadcast: key %s, nonce %d, tx %s, max fee %s wei (replacement %d)\n", *key, f.Nonce, f.TxHash, f.MaxFeePerGas, f.Seq)
+	fmt.Println("Once it is mined, the withdrawal-service Reaper proves nonce", f.Nonce, "consumed and Releases the Lock (failed / replaced_or_dropped).")
+}
+
+// feeCeiling is the hard cap on max fee per gas of any Fee Bump or Nonce Filler: Decided 50 gwei.
+func feeCeiling() *big.Int {
+	v := os.Getenv("HOT_WALLET_MAX_FEE_PER_GAS_WEI")
+	if v == "" {
+		return signing.DefaultFeeCeiling
+	}
+	n, ok := new(big.Int).SetString(v, 10)
+	if !ok || n.Sign() <= 0 {
+		log.Fatalf("HOT_WALLET_MAX_FEE_PER_GAS_WEI=%q is not a positive integer (wei)", v)
+	}
+	log.Printf("WARNING: HOT_WALLET_MAX_FEE_PER_GAS_WEI=%s overrides the decided default %s", n, signing.DefaultFeeCeiling)
+	return n
 }
 
 func runInit(ctx context.Context, store *storage.Store, sealer *crypto.Sealer, role string) {
@@ -103,12 +178,31 @@ func runServer(ctx context.Context, store *storage.Store, sealer *crypto.Sealer)
 	// address at BIP44 index 0. Signing needs the seed, an EVM RPC (wallet-service
 	// builds the tx itself) and the asset list; without all three the endpoint
 	// answers 503 instead of guessing.
+	// The operator's Treasury file (Warm address per chain, wallet-tiering.md invariant #9).
+	// Required: a missing or malformed file stops startup rather than serve a Warm address we
+	// cannot trust.
+	treasuryFile, err := treasury.Load(requireEnv("TREASURY_FILE"))
+	if err != nil {
+		log.Fatal(err)
+	}
+
 	var hotSigner api.HotSigner
 	var userSign api.UserSigner
+	var system *api.SystemAddresses
 	hotWallet, err := loadWallet(ctx, store, sealer, storage.RoleHotWallet)
 	switch {
 	case err == nil:
-		hotSigner, userSign = buildSigners(ctx, store, hotWallet, userWallet)
+		var signer *signing.Signer
+		signer, userSign = buildSigners(ctx, store, hotWallet, userWallet)
+		if signer != nil {
+			hotSigner = signer
+			warm, err := treasuryFile.WarmFor(signer.ChainID(), signer.HotWalletAddress())
+			if err != nil {
+				log.Fatal(err)
+			}
+			system = &api.SystemAddresses{ChainID: signer.ChainID(), Hot: signer.HotWalletAddress(), Warm: warm}
+			log.Printf("treasury: chain %d, warm %s", system.ChainID, warm.Hex())
+		}
 	case errors.Is(err, storage.ErrNotFound):
 		log.Println("WARNING: no hot_wallet seed found — run with -init-seed hot_wallet before Hot Wallet signing is used")
 	default:
@@ -116,6 +210,12 @@ func runServer(ctx context.Context, store *storage.Store, sealer *crypto.Sealer)
 	}
 
 	server := api.NewServer(store, cache, signer, hotSigner, userSign)
+	if system != nil {
+		server.WithSystemAddresses(*system)
+	}
+	if hs, ok := hotSigner.(*signing.Signer); ok {
+		server.WithHotKeys(hs)
+	}
 
 	// mTLS listener for /v1/sign/* (service-auth-mtls.md). Fail closed: without
 	// certs it simply isn't started, so nothing can be signed.
@@ -142,7 +242,7 @@ func runServer(ctx context.Context, store *storage.Store, sealer *crypto.Sealer)
 // buildSigners wires the Hot Wallet signer and, if the user_derivation seed is
 // loaded too, the Sweep (user-address) signer. Returns nils (endpoints answer
 // 503) when RPC_URL / ASSETS_FILE aren't configured.
-func buildSigners(ctx context.Context, store *storage.Store, hot, users *hdwallet.Wallet) (api.HotSigner, api.UserSigner) {
+func buildSigners(ctx context.Context, store *storage.Store, hot, users *hdwallet.Wallet) (*signing.Signer, api.UserSigner) {
 	rpcURL, assetsFile := os.Getenv("RPC_URL"), os.Getenv("ASSETS_FILE")
 	if rpcURL == "" || assetsFile == "" {
 		log.Println("WARNING: RPC_URL / ASSETS_FILE not set — signing endpoints disabled")
@@ -160,6 +260,7 @@ func buildSigners(ctx context.Context, store *storage.Store, hot, users *hdwalle
 	if err != nil {
 		log.Fatalf("hot wallet signer: %v", err)
 	}
+	hotSigner.WithFeeCeiling(feeCeiling())
 	log.Printf("hot_wallet signing enabled, address %s", hotSigner.HotWalletAddress())
 	if users == nil {
 		return hotSigner, nil

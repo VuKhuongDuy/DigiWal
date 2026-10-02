@@ -15,10 +15,25 @@ balance goes through one operation, `Apply`.
     UPDATE, so concurrent locks serialize on the account row and can't over-reserve. A replay
     returns the lock's current status; same key with a different request is `409`.
   - `POST /v1/ledger/locks/{key}/settle`: the real debit, one atomic transaction (lock flip, both
-    balance updates, both entries). Never routed through `Apply`. Replay returns the same result.
+    balance updates, both entries). Never routed through `Apply`. Replay returns the same result:
+    `{idempotency_key, status, ledger_transaction_id, entry_ids}` — `entry_ids` (the debit and the
+    chain credit) are what a refund corrects if the withdrawal is later reorged out (task 3.5).
   - `POST /v1/ledger/locks/{key}/release`: gives the capacity back, posts nothing.
   - Settled xor released, exactly once. A conflicting resolution is **`409`, never `200`**, so the
     caller can't mistake a released lock for a debited one.
+- **Gas Fees** (task 1.9, `ledger.md` invariant #12): `POST /v1/ledger/gas-fees`
+  `{chain_id, tx_hash, gas_used, effective_gas_price, purpose}` (`gas_used` a number, `effective_gas_price` a
+  decimal string in wei; `purpose` is one of `withdrawal`, `withdrawal_reverted`, `nonce_filler`, `gas_topup`,
+  `sweep`, `treasury_sweep`) → `200 {ledger_transaction_id, amount}`. Gas our own mined txs burn is not any
+  user's, so each tx posts one Ledger Transaction `{Gas Expense Account −fee, Chain Account +fee}` in the
+  native asset (`source_type = 'gas_fee'`), where `fee = gas_used × effective_gas_price` is computed here:
+  the caller never sends a total or an account. Key `gas:{chain_id}:{tx_hash}`: a replay with the same values
+  returns the same transaction, different values for the same tx are `409`; a zero fee posts nothing
+  (`ledger_transaction_id: null`). The Gas Expense Account (one per native asset, created with the Chain
+  Account) only ever decreases and, like the Chain Account, may go negative; a user's balance is never
+  touched. Allowed CNs: `withdrawal-service` and `sweeper` — a separate allow-list, so `sweeper` still
+  cannot reach `apply` or the Locks. `POST /v1/ledger/transactions` still refuses any `source_type` but
+  `correction`.
 - **`POST /v1/ledger/transactions`** posts a **correction** only: it names the entries to reverse
   (`corrects_entry_id`); the account and amount are derived server-side as their exact negation and
   whatever the caller sends for them is ignored. Every leg must be reversed, and an entry can be
@@ -26,8 +41,11 @@ balance goes through one operation, `Apply`.
 - **Deposits** enter only through the `deposits.confirmed` consumer (never over REST, so they can't
   skip screening). The event carries the depositor's `user_id` (resolved once by chain-watcher), so the
   ledger has no address->user mapping and no dependency on wallet-service. `Apply` is idempotent on `(chain_id, tx_hash, log_index)`; sum-to-zero per asset.
-- All four endpoints are on the **mTLS** listener (`:8443`), `CN=withdrawal-service` only
-  (`service-auth-mtls.md` invariant #7).
+- `GET /v1/ledger/balances/{user_id}[?asset_id=]`: Total / Locked / Available per registered asset (zeros
+  for untouched ones). `CN=api-gateway` only.
+- The four write endpoints above (transactions, locks, settle, release) are on the **mTLS** listener
+  (`:8443`), `CN=withdrawal-service` only (`service-auth-mtls.md` invariant #7). Balances is on the same
+  listener, with its own allow-list.
 - **Asset Registry**: the one canonical `infra/assets.yaml`, validated strictly at startup, synced
   into Postgres; assets that leave the file are deactivated, never deleted.
 - **Screening List** (`infra/screening.yaml`) and the consumer (runs when `KAFKA_BROKERS` is set): flag (never credit) a sender on

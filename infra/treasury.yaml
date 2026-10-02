@@ -1,0 +1,14 @@
+# Treasury addresses (docs/design/wallet-tiering.md invariant #9): the PUBLIC Warm Wallet address
+# per chain. Never a key or seed — the Warm seed lives only with the operator, offline, and is
+# used through the local signing CLI. Read by wallet-service only (mounted into no other service);
+# everyone else asks GET /v1/wallet/system-addresses.
+#
+# wallet-service refuses to start if its chain has no entry here, or if the address is malformed,
+# zero, or the Hot Wallet's own. Changing an address: edit, then restart wallet-service and then
+# withdrawal-service (which reads it once at startup). Cold Wallet addresses are not listed:
+# withdrawals to Cold are allowed (withdrawal-flow.md invariant #18).
+chains:
+  # Local Anvil (chain 31337): Anvil's default account #9, a throwaway dev key. Not a real treasury.
+  - chain_id: 31337
+    warm_address: "0xa0Ee7A142d267C1f36714E4a8F75612F20a79720"
+  # Sepolia (11155111): add the operator's Warm address before running wallet-service there.

@@ -165,6 +165,13 @@ func (s *Store) SyncAssets(ctx context.Context, assets []Asset) error {
 			a.ID); err != nil {
 			return fmt.Errorf("creating chain account for %s: %w", a.Symbol, err)
 		}
+		if a.Type == AssetNative { // gas is only ever paid in the native asset (ledger.md invariant #12)
+			if _, err := tx.Exec(ctx,
+				`INSERT INTO accounts (asset_id, kind) VALUES ($1, 'gas_expense') ON CONFLICT (asset_id) WHERE kind = 'gas_expense' DO NOTHING`,
+				a.ID); err != nil {
+				return fmt.Errorf("creating gas expense account for %s: %w", a.Symbol, err)
+			}
+		}
 		ids = append(ids, a.ID)
 	}
 	if _, err := tx.Exec(ctx,

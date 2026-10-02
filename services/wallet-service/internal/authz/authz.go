@@ -7,6 +7,7 @@
 package authz
 
 import (
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
@@ -28,12 +29,35 @@ const (
 var (
 	// HotWalletSigners may call POST /v1/sign/hot-wallet.
 	HotWalletSigners = []string{CNWithdrawalService, CNSweeper}
+	// HotWalletKeyReaders may call GET /v1/sign/hot-wallet/{key} and POST .../replace
+	// (withdrawal-flow.md invariants #21, #22): each caller only ever reaches its own keys
+	// (wallet-service scopes them by the verified CN). sweeper has no database, so it reads its
+	// Gas Top-Up keys' replacements from here.
+	HotWalletKeyReaders = []string{CNWithdrawalService, CNSweeper}
+	// HotWalletVoiders may call POST /v1/sign/hot-wallet/{key}/void: withdrawal-service only —
+	// sweeper never releases anything (invariant #22). There is no endpoint that cancels a signed
+	// tx (the Nonce Filler is an operator CLI), so no service certificate can cancel a payout.
+	HotWalletVoiders = []string{CNWithdrawalService}
 	// UserAddressSigners may call POST /v1/sign/user-address — sweeper only
 	// (invariant #4): withdrawal-service's cert can never pick a user key.
 	UserAddressSigners = []string{CNSweeper}
-	// AddressLookupCallers may call GET /v1/addresses/{address}: chain-watcher only, and
-	// from day one (service-auth-mtls.md matrix) — it cannot resolve a deposit's user_id without it.
-	AddressLookupCallers = []string{CNChainWatcher}
+	// HotAddressReaders may call GET /v1/wallet/hot-address: the services that need the Hot
+	// Wallet's own address (deposit-flow.md, Hot Wallet Address Discovery). chain-watcher reads it
+	// only to skip Hot Wallet Outflow (invariant #17); it still cannot reach either /v1/sign/*.
+	HotAddressReaders = []string{CNWithdrawalService, CNSweeper, CNChainWatcher}
+	// SystemAddressReaders may call GET /v1/wallet/system-addresses ({hot, warm}): withdrawal-service
+	// only, to refuse withdrawals and whitelist entries to the Hot/Warm Wallet (withdrawal-flow.md
+	// invariant #18) and, later, as its Treasury Sweep destination (wallet-tiering.md invariant #9).
+	SystemAddressReaders = []string{CNWithdrawalService}
+	// NonceGapReporters may call POST /v1/wallet/nonce-gap: withdrawal-service only, the one
+	// component that tracks Hot Wallet txs to Withdrawal Confirmation Depth (withdrawal-flow.md
+	// invariant #19). There is no endpoint to lift a freeze: only an operator, in the database.
+	NonceGapReporters = []string{CNWithdrawalService}
+	// AddressLookupCallers may call GET /v1/addresses/{address}: chain-watcher, which cannot
+	// resolve a deposit's user_id without it (service-auth-mtls.md matrix), and withdrawal-service,
+	// which refuses withdrawals and whitelist entries to one of our own deposit addresses
+	// (withdrawal-flow.md invariant #18, Decided). Neither can reach /v1/sign/user-address.
+	AddressLookupCallers = []string{CNChainWatcher, CNWithdrawalService}
 )
 
 // Require wraps next so only clients whose verified certificate CN is in
@@ -52,8 +76,17 @@ func Require(allowed []string, next http.Handler) http.Handler {
 			_ = json.NewEncoder(w).Encode(map[string]string{"error": "forbidden"})
 			return
 		}
-		next.ServeHTTP(w, r)
+		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), cnKey{}, cn)))
 	})
+}
+
+type cnKey struct{}
+
+// CallerCN is the verified certificate CN Require stored on the request: the identity wallet-service
+// scopes Hot Wallet keys by. "" outside a request that passed Require.
+func CallerCN(ctx context.Context) string {
+	cn, _ := ctx.Value(cnKey{}).(string)
+	return cn
 }
 
 // peerCN returns the CN of the verified client certificate. It reads

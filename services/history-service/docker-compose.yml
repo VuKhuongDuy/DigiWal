@@ -1,0 +1,19 @@
+# Pulls in ../../infra/docker-compose.yml via `include:` — don't also pass it with -f.
+include:
+  - path: ../../infra/docker-compose.yml
+
+services:
+  history-service:
+    build:
+      context: ../..            # repo root: the image needs pkg/events
+      dockerfile: services/history-service/Dockerfile
+    environment:
+      PORT: "8080"
+      MONGO_URI: mongodb://custody:custody@mongo:27017/?authSource=admin
+      KAFKA_BROKERS: kafka:9092
+    ports: ["8083:8080"]
+    depends_on:
+      mongo:
+        condition: service_started
+      kafka:
+        condition: service_healthy

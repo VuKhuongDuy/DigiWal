@@ -48,6 +48,7 @@ func TestGoldenWireShapes(t *testing.T) {
 	testGolden[DepositConfirmed](t, TopicDepositsConfirmed)
 	testGolden[WithdrawalBroadcast](t, TopicWithdrawalsBroadcast)
 	testGolden[WithdrawalConfirmed](t, TopicWithdrawalsConfirmed)
+	testGolden[WithdrawalFailed](t, TopicWithdrawalsFailed)
 }
 
 func TestAmount(t *testing.T) {
@@ -142,7 +143,8 @@ func TestKeys(t *testing.T) {
 		t.Fatal("key must be case-insensitive in tx_hash")
 	}
 	w, _ := Decode[WithdrawalBroadcast](golden(t, TopicWithdrawalsBroadcast))
-	if w.Key() != "33333333-3333-3333-3333-333333333333" {
+	// invariant #20: keyed on the server-minted withdrawal_id, never the client's per-user key.
+	if w.Key() != "44444444-4444-4444-4444-444444444444" {
 		t.Fatalf("withdrawal key %q", w.Key())
 	}
 }
@@ -158,6 +160,43 @@ func TestBothDepositEventsRequireUserID(t *testing.T) {
 		}
 		if err == nil {
 			t.Errorf("%s decoded without a user_id: the ledger would have nobody to credit", name)
+		}
+	}
+}
+
+func TestWithdrawalFailed(t *testing.T) {
+	good, err := Decode[WithdrawalFailed](golden(t, TopicWithdrawalsFailed))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if good.Reason != "tx_reverted" || good.RevertReason == "" || good.Nonce == nil || good.Key() != good.WithdrawalID {
+		t.Fatalf("%+v", good)
+	}
+	// Never signed: no tx_hash and no nonce, and the optional fields are absent on the wire.
+	never := good
+	never.Reason, never.RevertReason, never.TxHash, never.Nonce = "stale_request", "", "", nil
+	b, err := Encode(never)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, field := range []string{"tx_hash", "nonce", "revert_reason"} {
+		if strings.Contains(string(b), `"`+field+`"`) {
+			t.Errorf("%s should be omitted: %s", field, b)
+		}
+	}
+	for name, mutate := range map[string]func(*WithdrawalFailed){
+		"no reason":               func(e *WithdrawalFailed) { e.Reason = "" },
+		"bad tx hash":             func(e *WithdrawalFailed) { e.TxHash = "0x12" },
+		"tx hash without a nonce": func(e *WithdrawalFailed) { e.Nonce = nil },
+		"nonce without a tx hash": func(e *WithdrawalFailed) { e.TxHash = "" },
+		"revert reason elsewhere": func(e *WithdrawalFailed) { e.Reason = "stale_request" },
+		"no timestamp":            func(e *WithdrawalFailed) { e.FailedAt = time.Time{} },
+		"bad withdrawal id":       func(e *WithdrawalFailed) { e.WithdrawalID = "x" },
+	} {
+		bad := good
+		mutate(&bad)
+		if bad.Validate() == nil {
+			t.Errorf("%s: accepted", name)
 		}
 	}
 }

@@ -27,7 +27,18 @@ type Signer interface {
 
 // HotSigner signs Hot Wallet transactions (POST /v1/sign/hot-wallet).
 type HotSigner interface {
-	Sign(ctx context.Context, req signing.Request) (signing.Response, error)
+	// Sign signs for caller (the verified certificate CN), who alone can later reach the key.
+	Sign(ctx context.Context, caller string, req signing.Request) (signing.Response, error)
+	// HotWalletAddress is the address derived from the hot_wallet seed.
+	HotWalletAddress() common.Address
+}
+
+// HotKeys is the read/void/replace side of Hot Wallet signing (withdrawal-flow.md invariants
+// #21, #22). Every call is scoped to caller's own keys.
+type HotKeys interface {
+	Lookup(ctx context.Context, caller, key string) (signing.KeyView, error)
+	Void(ctx context.Context, caller, key string) (signing.VoidResponse, error)
+	Replace(ctx context.Context, caller, key string, req signing.ReplaceRequest) (signing.ReplaceResponse, error)
 }
 
 // AddressLookup resolves an address to its owner (GET /v1/addresses/{address}).
@@ -40,6 +51,14 @@ type UserSigner interface {
 	Sign(ctx context.Context, req signing.UserRequest) (signing.UserResponse, error)
 }
 
+// SystemAddresses are the treasury addresses withdrawal-service must know: the Hot Wallet (derived
+// here) and the Warm Wallet (declared by the operator in the treasury file).
+type SystemAddresses struct {
+	ChainID int64
+	Hot     common.Address
+	Warm    common.Address
+}
+
 type Server struct {
 	store     *storage.Store
 	cache     *storage.Cache
@@ -47,10 +66,29 @@ type Server struct {
 	hotSigner HotSigner  // nil until the hot_wallet seed, RPC and assets are configured
 	userSign  UserSigner // nil until both seeds, RPC and assets are configured
 	addresses AddressLookup
+	nonceGaps NonceGaps
+	system    *SystemAddresses // nil until the Hot Wallet is configured (then 503)
+	hotKeys   HotKeys          // nil until Hot Wallet signing is configured (then 503)
+}
+
+// WithHotKeys enables GET /v1/sign/hot-wallet/{key} and POST .../void and .../replace.
+func (s *Server) WithHotKeys(h HotKeys) *Server {
+	s.hotKeys = h
+	return s
+}
+
+// WithSystemAddresses enables GET /v1/wallet/system-addresses.
+func (s *Server) WithSystemAddresses(a SystemAddresses) *Server {
+	s.system = &a
+	return s
 }
 
 func NewServer(store *storage.Store, cache *storage.Cache, signer Signer, hotSigner HotSigner, userSign UserSigner) *Server {
-	return &Server{store: store, cache: cache, signer: signer, hotSigner: hotSigner, userSign: userSign, addresses: store}
+	srv := &Server{store: store, cache: cache, signer: signer, hotSigner: hotSigner, userSign: userSign, addresses: store}
+	if store != nil {
+		srv.nonceGaps = store
+	}
+	return srv
 }
 
 // Routes is the plain-HTTP listener: /healthz (exempt from client certs,
@@ -72,9 +110,71 @@ func (s *Server) Routes() http.Handler {
 func (s *Server) MTLSRoutes() http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("POST /v1/sign/hot-wallet", authz.Require(authz.HotWalletSigners, http.HandlerFunc(s.handleSignHotWallet)))
+	mux.Handle("GET /v1/sign/hot-wallet/{key}", authz.Require(authz.HotWalletKeyReaders, http.HandlerFunc(s.handleHotKeyLookup)))
+	mux.Handle("POST /v1/sign/hot-wallet/{key}/void", authz.Require(authz.HotWalletVoiders, http.HandlerFunc(s.handleHotKeyVoid)))
+	mux.Handle("POST /v1/sign/hot-wallet/{key}/replace", authz.Require(authz.HotWalletKeyReaders, http.HandlerFunc(s.handleHotKeyReplace)))
+	mux.Handle("GET /v1/wallet/hot-address", authz.Require(authz.HotAddressReaders, http.HandlerFunc(s.handleHotAddress)))
+	mux.Handle("POST /v1/wallet/nonce-gap", authz.Require(authz.NonceGapReporters, http.HandlerFunc(s.handleNonceGap)))
+	mux.Handle("GET /v1/wallet/system-addresses", authz.Require(authz.SystemAddressReaders, http.HandlerFunc(s.handleSystemAddresses)))
 	mux.Handle("GET /v1/addresses/{address}", authz.Require(authz.AddressLookupCallers, http.HandlerFunc(s.handleAddressOwner)))
 	mux.Handle("POST /v1/sign/user-address", authz.Require(authz.UserAddressSigners, http.HandlerFunc(s.handleSignUserAddress)))
 	return mux
+}
+
+// handleHotAddress tells sweeper and withdrawal-service the Hot Wallet's own address, so
+// neither keeps a second, driftable copy in config (deposit-flow.md invariant #15).
+func (s *Server) handleHotAddress(w http.ResponseWriter, _ *http.Request) {
+	if s.hotSigner == nil {
+		writeErr(w, http.StatusServiceUnavailable, "hot wallet not configured")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"address": s.hotSigner.HotWalletAddress().Hex()})
+}
+
+// NonceGaps is the slice of storage.Store the nonce-gap endpoint needs.
+type NonceGaps interface {
+	FreezeNonceGap(ctx context.Context, chainID int64, fromNonce uint64) (storage.NonceFreeze, error)
+}
+
+// handleNonceGap is POST /v1/wallet/nonce-gap {chain_id, from_nonce} (withdrawal-flow.md invariant
+// #19): freeze new Hot Wallet nonce allocation from that nonce on, for every caller. Naturally
+// idempotent (the lowest reported nonce wins), so the reporter just retries until 200.
+func (s *Server) handleNonceGap(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		ChainID   int64   `json:"chain_id"`
+		FromNonce *uint64 `json:"from_nonce"`
+	}
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<10))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil || req.ChainID <= 0 || req.FromNonce == nil {
+		writeErr(w, http.StatusBadRequest, "body must be {chain_id > 0, from_nonce >= 0}")
+		return
+	}
+	f, err := s.nonceGaps.FreezeNonceGap(r.Context(), req.ChainID, *req.FromNonce)
+	switch {
+	case err == nil:
+		log.Printf("ALERT: Nonce Gap reported on chain %d at nonce %d; Hot Wallet signing frozen from nonce %d", req.ChainID, *req.FromNonce, f.FromNonce)
+		writeJSON(w, http.StatusOK, map[string]any{"chain_id": f.ChainID, "frozen_from_nonce": f.FromNonce, "frozen_at": f.At.UTC()})
+	case errors.Is(err, storage.ErrNotFound):
+		writeErr(w, http.StatusNotFound, "no Hot Wallet nonce was ever allocated on this chain")
+	case errors.Is(err, storage.ErrNonceNotAllocated):
+		writeErr(w, http.StatusUnprocessableEntity, "from_nonce was never allocated")
+	default:
+		log.Printf("freezing nonce gap: %v", err)
+		writeErr(w, http.StatusInternalServerError, "internal error")
+	}
+}
+
+// handleSystemAddresses is GET /v1/wallet/system-addresses: {chain_id, hot, warm}. 503 until the
+// Hot Wallet (and so the chain) is configured — never a partial or zero address.
+func (s *Server) handleSystemAddresses(w http.ResponseWriter, _ *http.Request) {
+	if s.system == nil {
+		writeErr(w, http.StatusServiceUnavailable, "hot wallet not configured")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"chain_id": s.system.ChainID, "hot": s.system.Hot.Hex(), "warm": s.system.Warm.Hex(),
+	})
 }
 
 // handleAddressOwner is chain-watcher's cache-miss fallback (deposit-flow.md, Address
@@ -145,7 +245,7 @@ func (s *Server) handleSignHotWallet(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "malformed JSON body")
 		return
 	}
-	resp, err := s.hotSigner.Sign(r.Context(), req)
+	resp, err := s.hotSigner.Sign(r.Context(), authz.CallerCN(r.Context()), req)
 	switch {
 	case err == nil:
 		writeJSON(w, http.StatusOK, resp)
@@ -158,8 +258,98 @@ func (s *Server) handleSignHotWallet(w http.ResponseWriter, r *http.Request) {
 	case errors.Is(err, storage.ErrNonceGapOpen):
 		// Refuse rather than allocate while a Nonce Gap is open (invariant #7).
 		writeErr(w, http.StatusServiceUnavailable, "nonce gap open: hot wallet signing frozen")
+	case errors.Is(err, storage.ErrKeyVoided):
+		// The key was voided (invariant #22): nothing is signed and no nonce is allocated.
+		writeErr(w, http.StatusGone, "idempotency key was voided")
 	default:
 		log.Printf("signing hot wallet tx: %v", err)
+		writeErr(w, http.StatusInternalServerError, "internal error")
+	}
+}
+
+func (s *Server) hotKeyKey(w http.ResponseWriter, r *http.Request) (string, bool) {
+	if s.hotKeys == nil {
+		writeErr(w, http.StatusServiceUnavailable, "hot wallet signing not configured")
+		return "", false
+	}
+	key := r.PathValue("key")
+	if key == "" || len(key) > 128 {
+		writeErr(w, http.StatusBadRequest, "key is required (max 128 chars)")
+		return "", false
+	}
+	return key, true
+}
+
+// handleHotKeyLookup is GET /v1/sign/hot-wallet/{key} (invariant #22): the signature and its
+// replacements. Another caller's key, or one never signed, is the same 404.
+func (s *Server) handleHotKeyLookup(w http.ResponseWriter, r *http.Request) {
+	key, ok := s.hotKeyKey(w, r)
+	if !ok {
+		return
+	}
+	v, err := s.hotKeys.Lookup(r.Context(), authz.CallerCN(r.Context()), key)
+	switch {
+	case err == nil:
+		writeJSON(w, http.StatusOK, v)
+	case errors.Is(err, storage.ErrNotFound):
+		writeErr(w, http.StatusNotFound, "key not signed")
+	default:
+		log.Printf("looking up hot wallet key: %v", err)
+		writeErr(w, http.StatusInternalServerError, "internal error")
+	}
+}
+
+// handleHotKeyVoid is POST /v1/sign/hot-wallet/{key}/void (invariant #22): voided, or the signature
+// that already exists. Idempotent.
+func (s *Server) handleHotKeyVoid(w http.ResponseWriter, r *http.Request) {
+	key, ok := s.hotKeyKey(w, r)
+	if !ok {
+		return
+	}
+	v, err := s.hotKeys.Void(r.Context(), authz.CallerCN(r.Context()), key)
+	switch {
+	case err == nil:
+		writeJSON(w, http.StatusOK, v)
+	case errors.Is(err, storage.ErrNotCallers):
+		writeErr(w, http.StatusConflict, "key belongs to another caller")
+	case errors.Is(err, signing.ErrInvalidRequest):
+		writeErr(w, http.StatusBadRequest, err.Error())
+	default:
+		log.Printf("voiding hot wallet key: %v", err)
+		writeErr(w, http.StatusInternalServerError, "internal error")
+	}
+}
+
+// handleHotKeyReplace is POST /v1/sign/hot-wallet/{key}/replace (invariant #21): a Fee Bump. The
+// body has no field that could change the destination or the amount.
+func (s *Server) handleHotKeyReplace(w http.ResponseWriter, r *http.Request) {
+	key, ok := s.hotKeyKey(w, r)
+	if !ok {
+		return
+	}
+	var req signing.ReplaceRequest
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<10))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, "body must be {replacement_seq >= 1, max_gas_price?}")
+		return
+	}
+	resp, err := s.hotKeys.Replace(r.Context(), authz.CallerCN(r.Context()), key, req)
+	switch {
+	case err == nil:
+		writeJSON(w, http.StatusOK, resp)
+	case errors.Is(err, signing.ErrInvalidRequest):
+		writeErr(w, http.StatusBadRequest, err.Error())
+	case errors.Is(err, storage.ErrNotFound):
+		writeErr(w, http.StatusNotFound, "key not signed")
+	case errors.Is(err, storage.ErrNotCallers), errors.Is(err, storage.ErrReplacementGap), errors.Is(err, storage.ErrKeyCancelled):
+		writeErr(w, http.StatusConflict, err.Error())
+	case errors.Is(err, signing.ErrGasCeilingExceeded):
+		writeErr(w, http.StatusUnprocessableEntity, err.Error())
+	case errors.Is(err, storage.ErrNonceGapOpen):
+		writeErr(w, http.StatusServiceUnavailable, "nonce gap open: hot wallet signing frozen")
+	default:
+		log.Printf("replacing hot wallet tx: %v", err)
 		writeErr(w, http.StatusInternalServerError, "internal error")
 	}
 }

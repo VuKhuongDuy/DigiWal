@@ -103,6 +103,22 @@ implementing `wallet-service`'s side of this.
   reconciled against the real on-chain balance of the hot wallet for
   that asset — a genuine "did we lose or fabricate money" check, not
   just bookkeeping ceremony.
+- **Gas Expense Account** — **new; Decided (Tech Lead), invariant #12.** One
+  per chain's native asset (`asset_type = native`), `kind =
+  'gas_expense'`, not tied to a user. The double-entry counterparty for
+  gas our own transactions burn: every mined tx we sign (withdrawals,
+  including reverted ones; Nonce Fillers; Gas Top-Ups; Sweeps; later
+  Treasury Sweeps) pays gas out of custody to the validators, which no
+  user Entry accounts for. Its `total_balance` only ever decreases
+  (cumulative gas spent, negative, same sign convention as the Chain
+  Account); `locked_balance` is always 0; never Locked, never checked by
+  invariant #1.
+- **Gas Fee** — **Decided (Tech Lead).** One Ledger Transaction per mined tx we
+  signed, `source_type = 'gas_fee'`: `{Gas Expense Account −fee, Chain
+  Account +fee}` in the native asset, where `fee = gasUsed ×
+  effectiveGasPrice` from that tx's receipt. The Chain Account side keeps
+  `−ChainAccount.total_balance` equal to what custody really holds after
+  gas has left it.
 - **Entry** — a single, immutable, append-only signed-amount posting to
   one Account. Never updated or deleted; a correction is a new entry
   referencing the one it corrects.
@@ -139,7 +155,11 @@ implementing `wallet-service`'s side of this.
 - **Lock** — a hold placed against an Account's Available Balance,
   created idempotently keyed on the same `idempotency_key` the
   Withdrawal Request already carries (`withdrawal-flow.md`'s
-  Reservation is exactly this). **Callers never pass an `account_id`**
+  Reservation is exactly this). (**Decided (Tech Lead), `withdrawal-flow.md`
+  invariant #20:** that key becomes the server-minted Withdrawal Key
+  `withdrawal:{withdrawal_id}`, never the client's string, which is only
+  unique per user. No `ledger-service` change: it accepts any key up to
+  256 characters.) **Callers never pass an `account_id`**
   — `account_id` is `ledger-service`'s own internal primary key, never
   known outside it. `lock()`'s actual signature is
   `lock(idempotency_key, user_id, asset_id, amount)`; `ledger-service`
@@ -280,6 +300,57 @@ implementing `wallet-service`'s side of this.
     this server-side negation check, since `withdrawal-service` itself
     is the one caller expected to post corrections and is exactly the
     caller this invariant has to hold up against if compromised.
+12. **Every mined tx we sign has its gas recorded exactly once, as a
+    Gas Fee, and gas never touches a user's Account.** **Decided (Tech
+    Lead)** — both recording gas in the ledger (`withdrawal-flow.md` Open
+    Questions #22) and this Entry design (Open Questions #5).
+    - **Entries:** `{gas_expense(native asset): −fee, chain(native
+      asset): +fee}`, sum zero per asset (invariant #2). The user is
+      never debited for gas: a confirmed withdrawal debits exactly
+      `amount` at Settle; a reverted one is Released in full.
+    - **Amount:** `fee = gas_used × effective_gas_price` from the mined
+      receipt, computed by `ledger-service` from the two values the
+      caller sends (never a caller-supplied total). Only the version
+      that was mined pays: a Fee Bump's unmined versions, and a
+      cancelled withdrawal whose nonce a Nonce Filler consumed, post
+      nothing for themselves (the filler posts its own Gas Fee).
+    - **Idempotency:** `idempotency_key = gas:{chain_id}:{tx_hash}` —
+      one tx, one Gas Fee, whoever reports it; a replay with the same
+      values returns the existing transaction, different values →
+      `409`.
+    - **API:** a dedicated `POST /v1/ledger/gas-fees` `{"chain_id",
+      "tx_hash", "gas_used", "effective_gas_price", "purpose"}` →
+      `200 {"ledger_transaction_id","amount"}` (`purpose` ∈
+      `withdrawal`, `withdrawal_reverted`, `nonce_filler`, `gas_topup`,
+      `sweep`, `treasury_sweep`; stored on the transaction for
+      reporting). Not part of Settle (reverts, fillers, top-ups and
+      sweeps have no Settle) and not a `source_type` on `POST
+      /v1/ledger/transactions` (that endpoint is `CN=withdrawal-service`
+      only and its correction rules don't apply); a separate endpoint
+      gets its own CN allow-list: `withdrawal-service`, `sweeper`.
+      `ledger-service` derives both accounts itself; the caller never
+      names one.
+    - **When, and who posts:** after the tx is final for its flow.
+      `withdrawal-service`: at Settle for a confirmed withdrawal and at
+      `→ failed` for `tx_reverted` (both after Withdrawal Confirmation
+      Depth), and for a mined Nonce Filler when the Reaper Releases its
+      request (`withdrawal-flow.md` invariant #26). `sweeper`: for each
+      Gas Top-Up and Sweep tx once it is mined (`deposit-flow.md`
+      invariant #19 — no extra depth wait). **Known limitation, accepted
+      (Decided, Open Questions #6):** `sweeper` stays stateless, so a
+      crash between a tx being mined and its Gas Fee being posted can
+      lose that one record, and a reorg that changes `gasUsed` after
+      inclusion is not reflected. Both are small drifts the
+      reconciliation would show.
+    - **Trust:** `ledger-service` has no chain RPC and cannot verify the
+      tx; a compromised caller could post a fake Gas Fee. The damage is
+      bounded — no user balance moves, only the system accounts, and the
+      on-chain reconciliation would show the mismatch.
+    - **Reconciliation scope (Decided, Open Questions #7):**
+      `−ChainAccount.total_balance` per asset = **all custody** — the
+      Hot Wallet plus unswept deposits plus the ETH dust left at user
+      addresses after ERC-20 Sweeps — not the Hot Wallet alone. The
+      reconciliation job itself stays deferred (Open Questions #2).
 
 ## Diagram
 
@@ -305,7 +376,8 @@ erDiagram
     ACCOUNT {
         uuid id
         uuid asset_id
-        string user_id "null for the Chain Account"
+        string kind "user, chain, gas_expense"
+        string user_id "null for the Chain and Gas Expense Accounts"
         numeric_78_0 total_balance "minor units, materialized, sum of Entries; negative is normal for the Chain Account"
         numeric_78_0 locked_balance "minor units, materialized, sum of active Locks; always 0 for the Chain Account"
     }
@@ -320,7 +392,7 @@ erDiagram
     }
     LEDGER_TRANSACTION {
         uuid id
-        string source_type "deposit, withdrawal_settle, correction"
+        string source_type "deposit, withdrawal_settle, correction, gas_fee"
         string idempotency_key "unique; Settle reuses its Lock's own key unchanged"
         timestamptz created_at
     }
@@ -415,7 +487,7 @@ sequenceDiagram
         alt zero rows (already resolved, or unknown key)
             Ledger->>PG: ROLLBACK
             Ledger->>PG: SELECT status FROM locks WHERE idempotency_key=$key
-            Ledger-->>WD: ok (no-op, already resolved) — or 404 if the key was never locked
+            Ledger-->>WD: ok (no-op, already resolved; a settled replay returns the same entry_ids) — or 404 if the key was never locked
         else newly settled (1 row, account_id + amount in hand)
             Ledger->>PG: INSERT INTO ledger_transaction (idempotency_key=$key, source_type='withdrawal_settle')<br/>ON CONFLICT DO NOTHING — same key as the Lock, never a derived one
             Ledger->>PG: UPDATE accounts SET total_balance = total_balance - amount,<br/>locked_balance = locked_balance - amount WHERE id=account_id<br/>(no balance re-check here — invariant #7: this exact amount<br/>was already reserved by this same Lock at creation time)
@@ -423,7 +495,7 @@ sequenceDiagram
             Ledger->>PG: INSERT INTO entries (ledger_transaction_id, account_id, amount=-amount) -- user debit
             Ledger->>PG: INSERT INTO entries (ledger_transaction_id, account_id=chain_account_id, amount=+amount) -- chain credit
             Ledger->>PG: COMMIT
-            Ledger-->>WD: ok (settled)
+            Ledger-->>WD: ok (settled) {ledger_transaction_id, entry_ids: [debit, chain credit]}<br/>(entry_ids PROPOSED, task 3.5 — needed for a refund's corrects_entry_id)
         end
     else withdrawal fails before confirmation (invariant #3, withdrawal-flow.md)
         WD->>Ledger: release(idempotency_key)
@@ -440,6 +512,13 @@ sequenceDiagram
 ```
 
 ## Alternatives considered
+
+- **(Gas) Fold the Gas Fee into Settle.** Rejected: reverted txs, Nonce
+  Fillers, Gas Top-Ups and Sweeps have no Settle; one endpoint for every
+  mined tx keeps one rule. Settle stays unchanged.
+- **(Gas) Keep gas outside the ledger as an operational record.**
+  Rejected by the Tech Lead (`withdrawal-flow.md` Open Questions #22):
+  the Chain Account would drift from custody by every gas payment.
 
 - **No entries table, only a materialized balance.** Rejected — no
   audit trail, no way to reconstruct how a balance got corrupted if a
@@ -519,3 +598,28 @@ sequenceDiagram
    display layer). Flag if you want price data in scope now.
 4. No new technology introduced — Postgres only, per the existing
    data-model split.
+5. ~~**PROPOSED: Gas Fee Entries (invariant #12).** Decided by the Tech
+   Lead that gas goes in the ledger; the Entry shape, the new
+   `gas_expense` account kind, `source_type = 'gas_fee'`, the
+   `gas:{chain_id}:{tx_hash}` key and the new `POST /v1/ledger/gas-fees`
+   endpoint (`CN=withdrawal-service`, `CN=sweeper`) need review.~~
+   **Decided (Tech Lead): approved as proposed.**
+6. ~~**Open: `sweeper` posts Gas Fees without durable state.** `sweeper`
+   has no database. A crash after a tx is mined but before its Gas Fee
+   is posted loses that record: on redelivery the Sweep is already done
+   (balance zero) and a Sweep tx has no key to recover its hash from
+   (Gas Top-Ups can be recovered via `GET /v1/sign/hot-wallet/{key}`).
+   It also posts at inclusion, not after a confirmation depth, so a
+   reorg that changes `gasUsed` is not reflected. Both are small drifts
+   the reconciliation would show; closing them needs `sweeper` state
+   (or a chain-side scanner of our own txs). Accept for now?~~
+   **Decided (Tech Lead): accept the small drift for now; `sweeper`
+   stays stateless.** Recorded as a known limitation in invariant #12.
+7. ~~**Open (pre-existing #2, now sharper): reconciliation scope.** With
+   Gas Fees, `−ChainAccount.total_balance` per asset equals all custody,
+   which includes not only the Hot Wallet but unswept deposits and the
+   ETH dust left at user addresses after an ERC-20 Sweep (Gas Top-Up
+   minus the Sweep's gas). A reconciliation job against the Hot Wallet
+   alone would always differ by that dust. Still deferred; flagging the
+   definition it will need.~~ **Decided (Tech Lead): scope = all
+   custody as described; the reconciliation job stays deferred.**

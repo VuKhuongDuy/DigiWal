@@ -101,7 +101,7 @@ func decode(t *testing.T, resp Response) *types.Transaction {
 // endpoint signs with the hot key and nothing else.
 func TestSign_NativeTransfer_SignatureRecoversToHotWallet(t *testing.T) {
 	s, _, hot := setup(t)
-	resp, err := s.Sign(context.Background(), nativeReq("w1"))
+	resp, err := s.Sign(context.Background(), "withdrawal-service", nativeReq("w1"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -133,7 +133,7 @@ func TestSign_ERC20_EncodesTransferToTheTokenContract(t *testing.T) {
 	s, _, _ := setup(t)
 	req := nativeReq("w-erc20")
 	req.AssetID, req.Amount = tokenID, "5000000"
-	resp, err := s.Sign(context.Background(), req)
+	resp, err := s.Sign(context.Background(), "withdrawal-service", req)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -156,12 +156,12 @@ func TestSign_ERC20_EncodesTransferToTheTokenContract(t *testing.T) {
 func TestSign_RetryReplaysIdenticalResultWithoutNewNonceOrRPC(t *testing.T) {
 	s, chain, _ := setup(t)
 	ctx := context.Background()
-	first, err := s.Sign(ctx, nativeReq("dup"))
+	first, err := s.Sign(ctx, "withdrawal-service", nativeReq("dup"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	feeCalls := chain.feeCalls.Load()
-	again, err := s.Sign(ctx, nativeReq("dup"))
+	again, err := s.Sign(ctx, "withdrawal-service", nativeReq("dup"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -171,7 +171,7 @@ func TestSign_RetryReplaysIdenticalResultWithoutNewNonceOrRPC(t *testing.T) {
 	if chain.feeCalls.Load() != feeCalls {
 		t.Fatal("a replay must not need the network")
 	}
-	next, _ := s.Sign(ctx, nativeReq("another"))
+	next, _ := s.Sign(ctx, "withdrawal-service", nativeReq("another"))
 	if next.Nonce != first.Nonce+1 {
 		t.Fatalf("next nonce %d, want %d: the retry must not have consumed one", next.Nonce, first.Nonce+1)
 	}
@@ -180,12 +180,12 @@ func TestSign_RetryReplaysIdenticalResultWithoutNewNonceOrRPC(t *testing.T) {
 func TestSign_SameKeyDifferentRequestIsRejected(t *testing.T) {
 	s, _, _ := setup(t)
 	ctx := context.Background()
-	if _, err := s.Sign(ctx, nativeReq("k")); err != nil {
+	if _, err := s.Sign(ctx, "withdrawal-service", nativeReq("k")); err != nil {
 		t.Fatal(err)
 	}
 	other := nativeReq("k")
 	other.Amount = "2"
-	if _, err := s.Sign(ctx, other); !errors.Is(err, storage.ErrIdempotencyKeyReused) {
+	if _, err := s.Sign(ctx, "withdrawal-service", other); !errors.Is(err, storage.ErrIdempotencyKeyReused) {
 		t.Fatalf("want ErrIdempotencyKeyReused, got %v", err)
 	}
 }
@@ -196,13 +196,13 @@ func TestSign_MaxGasPriceIsACeilingNotAPrice(t *testing.T) {
 
 	tooLow := nativeReq("ceiling-low")
 	tooLow.MaxGasPrice = "21999999999" // needed fee cap is 22 gwei
-	if _, err := s.Sign(ctx, tooLow); !errors.Is(err, ErrGasCeilingExceeded) {
+	if _, err := s.Sign(ctx, "withdrawal-service", tooLow); !errors.Is(err, ErrGasCeilingExceeded) {
 		t.Fatalf("want ErrGasCeilingExceeded, got %v", err)
 	}
 
 	ok := nativeReq("ceiling-ok")
 	ok.MaxGasPrice = "22000000000"
-	resp, err := s.Sign(ctx, ok)
+	resp, err := s.Sign(ctx, "withdrawal-service", ok)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -232,7 +232,7 @@ func TestSign_Validation(t *testing.T) {
 		{"unknown asset", mut(func(r *Request) { r.AssetID = "33333333-3333-3333-3333-333333333333" }), ErrUnknownAsset},
 	}
 	for _, tc := range cases {
-		if _, err := s.Sign(ctx, tc.req); !errors.Is(err, tc.want) {
+		if _, err := s.Sign(ctx, "withdrawal-service", tc.req); !errors.Is(err, tc.want) {
 			t.Errorf("%s: got %v, want %v", tc.name, err, tc.want)
 		}
 	}

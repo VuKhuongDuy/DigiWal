@@ -17,11 +17,24 @@ import (
 )
 
 // Service names double as certificate CNs (service-auth-mtls.md invariant #6).
-const CNWithdrawalService = "withdrawal-service"
+const (
+	CNWithdrawalService = "withdrawal-service"
+	CNAPIGateway        = "api-gateway"
+	CNSweeper           = "sweeper"
+)
 
 // ApplyCallers may call POST /v1/ledger/transactions: withdrawal-service only
 // (service-auth-mtls.md invariant #7). Hardcoded on purpose (Open Question #1).
 var ApplyCallers = []string{CNWithdrawalService}
+
+// GasFeeReporters may call POST /v1/ledger/gas-fees (ledger.md invariant #12, task 1.9): the two services that
+// sign Hot Wallet txs. A separate allow-list from ApplyCallers on purpose: sweeper must stay unable to
+// reach apply or the Lock/Settle/Release trio, and this endpoint's correction rules do not apply.
+var GasFeeReporters = []string{CNWithdrawalService, CNSweeper}
+
+// BalanceReaders may call GET /v1/ledger/balances/{user_id}: api-gateway only
+// (integration-contracts.md §2/§3, service-auth-mtls.md matrix). Read-only.
+var BalanceReaders = []string{CNAPIGateway}
 
 // Require wraps next so only clients whose verified certificate CN is in
 // allowed reach it. Anything else gets an opaque 403 — no hint whether the

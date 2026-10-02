@@ -126,6 +126,18 @@ func (s *Store) Lock(ctx context.Context, r LockRequest) (Lock, error) {
 type SettleResult struct {
 	IdempotencyKey      string
 	LedgerTransactionID string
+	// EntryIDs are the Settle's two entries (the user's debit, the chain account's credit): what a
+	// refund names in corrects_entry_id (withdrawal-flow.md, Compensating Entry; task 3.5).
+	EntryIDs []string
+}
+
+// settleEntries reads the entries of a Settle's ledger transaction, debit first.
+func (s *Store) settleEntries(ctx context.Context, txID string) ([]string, error) {
+	rows, err := s.pool.Query(ctx, `SELECT id FROM entries WHERE ledger_transaction_id = $1 ORDER BY amount, id`, txID)
+	if err != nil {
+		return nil, fmt.Errorf("reading settle entries: %w", err)
+	}
+	return pgx.CollectRows(rows, pgx.RowTo[string])
 }
 
 // Settle turns a Lock into the real debit: the withdrawal happened. The lock-status
@@ -193,7 +205,11 @@ func (s *Store) Settle(ctx context.Context, key string) (SettleResult, error) {
 	if err := tx.Commit(ctx); err != nil {
 		return SettleResult{}, fmt.Errorf("committing tx: %w", err)
 	}
-	return SettleResult{IdempotencyKey: key, LedgerTransactionID: txID}, nil
+	ids, err := s.settleEntries(ctx, txID)
+	if err != nil {
+		return SettleResult{}, err
+	}
+	return SettleResult{IdempotencyKey: key, LedgerTransactionID: txID, EntryIDs: ids}, nil
 }
 
 // Release gives a Lock's capacity back: the withdrawal never happened. It posts no
@@ -247,6 +263,9 @@ func (s *Store) resolvedLock(ctx context.Context, key string, want LockStatus) (
 	if want == LockSettled {
 		if err := s.pool.QueryRow(ctx, `SELECT id FROM ledger_transactions WHERE idempotency_key = $1`, key).Scan(&res.LedgerTransactionID); err != nil {
 			return SettleResult{}, fmt.Errorf("reading settle transaction: %w", err)
+		}
+		if res.EntryIDs, err = s.settleEntries(ctx, res.LedgerTransactionID); err != nil {
+			return SettleResult{}, err
 		}
 	}
 	return res, nil

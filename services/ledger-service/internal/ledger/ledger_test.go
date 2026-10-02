@@ -494,7 +494,7 @@ func TestSettle_IsIdempotentAndNeverDoubleDebits(t *testing.T) {
 	mustLock(t, s, "w1", "alice", "400")
 	first := mustSettle(t, s, "w1")
 	for i := 0; i < 3; i++ {
-		if again := mustSettle(t, s, "w1"); again != first {
+		if again := mustSettle(t, s, "w1"); fmt.Sprintf("%+v", again) != fmt.Sprintf("%+v", first) {
 			t.Fatalf("replay %+v != first %+v", again, first)
 		}
 	}
@@ -832,4 +832,65 @@ func TestMigrationDownUp(t *testing.T) {
 	if err := m.Up(); err != nil {
 		t.Fatalf("up again: %v", err)
 	}
+}
+
+func TestBalanceSheet(t *testing.T) {
+	s, ctx := newStore(t), context.Background()
+	mustApply(t, s, deposit("d1", "alice", "100"))
+	mustLock(t, s, "w1", "alice", "30")
+
+	sheet, err := s.BalanceSheet(ctx, "alice", "")
+	if err != nil || len(sheet) != 2 {
+		t.Fatalf("sheet = %+v %v: want one row per registered asset", sheet, err)
+	}
+	byID := map[string]AssetBalance{}
+	for _, b := range sheet {
+		byID[b.AssetID] = b
+	}
+	if b := byID[eth]; b.Total.String() != "100" || b.Locked.String() != "30" || b.Available.String() != "70" || b.Symbol != "ETH" {
+		t.Fatalf("eth row = %+v", b)
+	}
+	// An asset alice never touched is present and zero — not missing, not an error.
+	if b, ok := byID[tok]; !ok || b.Total.Sign() != 0 || b.Locked.Sign() != 0 || b.Available.Sign() != 0 {
+		t.Fatalf("token row = %+v (present %v)", b, ok)
+	}
+	// A user with no account at all still gets the full sheet, zeros.
+	if sheet, err := s.BalanceSheet(ctx, "nobody", ""); err != nil || len(sheet) != 2 || sheet[0].Total.Sign() != 0 {
+		t.Fatalf("unknown user sheet = %+v %v", sheet, err)
+	}
+	// Filter, and never another user's balance.
+	if sheet, _ := s.BalanceSheet(ctx, "alice", tok); len(sheet) != 1 || sheet[0].AssetID != tok {
+		t.Fatalf("filtered = %+v", sheet)
+	}
+	if sheet, _ := s.BalanceSheet(ctx, "bob", eth); len(sheet) != 1 || sheet[0].Total.Sign() != 0 {
+		t.Fatalf("bob sees %+v", sheet)
+	}
+	// Amounts beyond int64 stay exact.
+	mustApply(t, s, deposit("d2", "carol", "100000000000000000000000"))
+	if sheet, _ := s.BalanceSheet(ctx, "carol", eth); sheet[0].Total.String() != "100000000000000000000000" {
+		t.Fatalf("big = %s", sheet[0].Total)
+	}
+}
+
+// Task 3.5: a Settle names its entries, and a refund (a correction of exactly those entries)
+// gives the user back exactly what the Settle took — the post-Settle reorg path.
+func TestSettleReturnsItsEntriesAndARefundReversesThem(t *testing.T) {
+	s, ctx := newStore(t), context.Background()
+	mustApply(t, s, deposit("d1", "alice", "1000"))
+	mustLock(t, s, "withdrawal:w1", "alice", "400")
+	r := mustSettle(t, s, "withdrawal:w1")
+	if len(r.EntryIDs) != 2 || r.EntryIDs[0] == r.EntryIDs[1] {
+		t.Fatalf("settle entries = %v", r.EntryIDs)
+	}
+	if again := mustSettle(t, s, "withdrawal:w1"); again.LedgerTransactionID != r.LedgerTransactionID || fmt.Sprint(again.EntryIDs) != fmt.Sprint(r.EntryIDs) {
+		t.Fatalf("replay = %+v, want %+v", again, r)
+	}
+	bal(t, s, "alice", "600", "0", "600")
+	mustApply(t, s, correction("withdrawal:w1:refund", r.EntryIDs...))
+	bal(t, s, "alice", "1000", "0", "1000")
+	// The deterministic refund key makes a retry a no-op, never a second refund.
+	if _, err := s.Apply(ctx, correction("withdrawal:w1:refund", r.EntryIDs...)); err != nil {
+		t.Fatalf("refund replay: %v", err)
+	}
+	bal(t, s, "alice", "1000", "0", "1000")
 }
