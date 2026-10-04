@@ -29,3 +29,9 @@ logs:
 # Redis via TEST_REDIS_ADDR for the resolver tests.
 test:
 	go test ./...
+
+# The auditor (dev tool) reads this service's tables directly (docs/design/reconciliation-audit.md): run
+# its schema contract test so a migration here cannot silently break it. Needs Docker or TEST_POSTGRES_DSN.
+.PHONY: auditor-contract
+auditor-contract:
+	$(MAKE) -C ../auditor contract
