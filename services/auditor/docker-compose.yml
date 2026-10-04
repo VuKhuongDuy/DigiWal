@@ -20,16 +20,22 @@ services:
       WITHDRAWAL_RO_DSN: postgres://auditor_ro:auditor_ro@postgres:5432/withdrawal?sslmode=disable
       WATCHER_RO_DSN: postgres://auditor_ro:auditor_ro@postgres:5432/chain_watcher?sslmode=disable
       AUDIT_SCAN_START_BLOCK: ${AUDIT_SCAN_START_BLOCK:-0}
-      # Tier addresses (public). Warm is Anvil's default account #9, as in infra/treasury.yaml. Hot is derived by
-      # wallet-service from its seed: set it from `GET /v1/wallet/hot-address` (see README). Cold is optional.
+      # Tier addresses come from wallet-service (GET /v1/wallet/system-addresses over mTLS as CN=auditor).
+      # AUDIT_HOT_ADDRESS / AUDIT_WARM_ADDRESS / AUDIT_COLD_ADDRESS, if set, override them per address.
+      AUDIT_WALLET_URL: ${AUDIT_WALLET_URL:-https://wallet-service:8443}
+      TLS_CERT_FILE: /certs/cert.pem
+      TLS_KEY_FILE: /certs/key.pem
+      TLS_CA_FILE: /certs/ca-cert.pem
       AUDIT_HOT_ADDRESS: ${AUDIT_HOT_ADDRESS:-}
-      AUDIT_WARM_ADDRESS: ${AUDIT_WARM_ADDRESS:-0xa0Ee7A142d267C1f36714E4a8F75612F20a79720}
+      AUDIT_WARM_ADDRESS: ${AUDIT_WARM_ADDRESS:-}
       AUDIT_COLD_ADDRESS: ${AUDIT_COLD_ADDRESS:-}
       # Reconciliation: operator capital in custody that no user owns (the Hot Wallet's gas float and liquidity),
       # e.g. RECON_CAPITAL=ETH=10000000000000000000. RECON_TOLERANCE overrides 0.01 ETH / 0 for tokens.
       RECON_CAPITAL: ${RECON_CAPITAL:-}
       RECON_TOLERANCE: ${RECON_TOLERANCE:-}
       HISTORY_RO_MONGO_URI: mongodb://auditor_ro:auditor_ro@mongo:27017/?authSource=history
+    volumes:
+      - ../../infra/pki/out/auditor:/certs:ro
     ports: ["8087:8080"]
     depends_on:
       postgres:

@@ -1,7 +1,13 @@
 # docker-compose.yml pulls in ../../infra/docker-compose.yml via `include:` — don't also pass it with -f.
 COMPOSE = docker compose
 
-.PHONY: up down logs test contract roles
+.PHONY: up down logs test contract roles certs
+
+# Issues the auditor's leaf cert (CN=auditor; wallet-service admits it on system-addresses only) and
+# wallet-service's, plus the CA once.
+certs:
+	@test -f "$${CA_DIR:-$$HOME/.digiwal-ca}/ca-key.pem" || ../../infra/pki/gen-ca.sh
+	@for svc in auditor wallet-service; do test -f ../../infra/pki/out/$$svc/cert.pem || ../../infra/pki/gen-leaf.sh $$svc; done
 
 # Dev environment only. The service uses its own database on the shared Postgres.
 up:

@@ -52,11 +52,12 @@ type UserSigner interface {
 }
 
 // SystemAddresses are the treasury addresses withdrawal-service must know: the Hot Wallet (derived
-// here) and the Warm Wallet (declared by the operator in the treasury file).
+// here), the Warm Wallet and optionally the Cold Wallet (declared by the operator in the treasury file).
 type SystemAddresses struct {
 	ChainID int64
 	Hot     common.Address
 	Warm    common.Address
+	Cold    common.Address // the zero address when no Cold Wallet is declared; then "cold" is omitted
 }
 
 type Server struct {
@@ -165,16 +166,18 @@ func (s *Server) handleNonceGap(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// handleSystemAddresses is GET /v1/wallet/system-addresses: {chain_id, hot, warm}. 503 until the
+// handleSystemAddresses is GET /v1/wallet/system-addresses: {chain_id, hot, warm, cold?}. 503 until the
 // Hot Wallet (and so the chain) is configured — never a partial or zero address.
 func (s *Server) handleSystemAddresses(w http.ResponseWriter, _ *http.Request) {
 	if s.system == nil {
 		writeErr(w, http.StatusServiceUnavailable, "hot wallet not configured")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"chain_id": s.system.ChainID, "hot": s.system.Hot.Hex(), "warm": s.system.Warm.Hex(),
-	})
+	out := map[string]any{"chain_id": s.system.ChainID, "hot": s.system.Hot.Hex(), "warm": s.system.Warm.Hex()}
+	if s.system.Cold != (common.Address{}) {
+		out["cold"] = s.system.Cold.Hex()
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 // handleAddressOwner is chain-watcher's cache-miss fallback (deposit-flow.md, Address

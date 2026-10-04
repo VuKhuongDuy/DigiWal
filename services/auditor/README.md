@@ -73,10 +73,11 @@ else, so the chain is the only source.
   or Cold is `info` (no operator-side record exists), `warn` if it leaves our tiers (Open Question 5: `info` as the doc proposes).
 - To hash the original signed tx, the auditor reads `hot_wallet_signatures.signed_raw_tx` (a signed tx is not key material;
   added to the contract and the grants). Nothing else about keys is readable.
-- **Addresses come from configuration**, not wallet-service (it calls no service API, and `system-addresses` is
-  withdrawal-service's until A8): `AUDIT_HOT_ADDRESS` (required; the address `GET /v1/wallet/hot-address` returns),
-  `AUDIT_WARM_ADDRESS` (required; `infra/treasury.yaml`), `AUDIT_COLD_ADDRESS` (optional, not configured anywhere yet).
-  A wrong Hot address makes T1 and T2 quiet or noisy, so check it. Needs `LEDGER_RO_DSN`, `WALLET_RO_DSN`, `WITHDRAWAL_RO_DSN`.
+- **Tier addresses** come from wallet-service (A8): `AUDIT_WALLET_URL` plus `TLS_CERT_FILE`/`TLS_KEY_FILE`/`TLS_CA_FILE`
+  (`make certs` issues CN=auditor), one call to `GET /v1/wallet/system-addresses`, the only endpoint wallet-service lets
+  CN=auditor reach. It answers Hot, Warm and, if `infra/treasury.yaml` declares `cold_address`, Cold. `AUDIT_HOT_ADDRESS`,
+  `AUDIT_WARM_ADDRESS`, `AUDIT_COLD_ADDRESS` override them per address (and work without wallet-service). The chain wallet-service
+  reports must be the one the RPC serves. Needs `LEDGER_RO_DSN`, `WALLET_RO_DSN`, `WITHDRAWAL_RO_DSN`.
 - Native transfers made inside contract calls are not seen (no trace API). The scan starts at `AUDIT_SCAN_START_BLOCK`.
 
 ## Reconciliation (A7)
@@ -97,7 +98,7 @@ Every run stores its figures in `recon_snapshots` (residual over time, visible w
 - `RECON_CONFIRMS` (default 1) must not exceed the deposit and withdrawal confirmation depths, or the ledger holds credits for
   blocks newer than B. `RECON_TOLERANCE=SYM=<minor units>` overrides the default (0.01 of the native coin, 0 for a token).
 - It queries every deposit address on chain each run (one call per address and asset): fine for dev, not for production.
-- Needs `LEDGER_RO_DSN`, `WALLET_RO_DSN`, `WITHDRAWAL_RO_DSN`, `WATCHER_RO_DSN`, `AUDIT_HOT_ADDRESS`, `AUDIT_WARM_ADDRESS`.
+- Needs `LEDGER_RO_DSN`, `WALLET_RO_DSN`, `WITHDRAWAL_RO_DSN`, `WATCHER_RO_DSN` and the tier addresses (see above).
 
 ## Read access (A2)
 

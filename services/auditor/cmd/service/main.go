@@ -24,6 +24,7 @@ import (
 	"digiwal/services/auditor/internal/rules/treasury"
 	"digiwal/services/auditor/internal/source"
 	"digiwal/services/auditor/internal/store"
+	"digiwal/services/auditor/internal/walletclient"
 
 	"github.com/ethereum/go-ethereum/ethclient"
 )
@@ -169,15 +170,19 @@ func audits(ctx context.Context, st *store.Store, rpc *ethclient.Client, chainID
 	} else {
 		skip("deposit_audit")
 	}
-	hot, warm := strings.ToLower(os.Getenv("AUDIT_HOT_ADDRESS")), strings.ToLower(os.Getenv("AUDIT_WARM_ADDRESS"))
+	tiers, err := tierAddresses(ctx, chainID)
+	if err != nil {
+		return nil, err
+	}
+	hot, warm := tiers.Hot, tiers.Warm
 	if led != nil && wal != nil && wd != nil && hot != "" && warm != "" {
 		jobs = append(jobs, &audit.TreasuryAudit{
 			Src:   &source.Treasury{Wallet: wal, Ledger: led, Withdrawal: wd, Chain: chain, ChainID: chainID},
 			Store: st, ChainID: chainID, Every: every, Grace: grace, StartBlock: start,
-			Tiers: treasury.Addresses{Hot: hot, Warm: warm, Cold: strings.ToLower(os.Getenv("AUDIT_COLD_ADDRESS"))},
+			Tiers: tiers,
 		})
 	} else {
-		log.Printf("  AUDIT_HOT_ADDRESS / AUDIT_WARM_ADDRESS must be set for the treasury audit")
+		log.Printf("  no tier addresses: set AUDIT_WALLET_URL (and the TLS files), or AUDIT_HOT_ADDRESS and AUDIT_WARM_ADDRESS")
 		skip("treasury_audit")
 	}
 	if led != nil && wal != nil && wd != nil && cw != nil && hot != "" && warm != "" {
@@ -196,12 +201,45 @@ func audits(ctx context.Context, st *store.Store, rpc *ethclient.Client, chainID
 		jobs = append(jobs, &audit.Reconciliation{
 			Src:   &source.Recon{Ledger: led, Watcher: cw, Withdrawal: wd, Wallet: wal, Chain: chain, TxChain: chain, ChainID: chainID},
 			Store: st, Every: every, Confirms: confirms, Capital: capital, Tolerance: tolerance,
-			Tiers: treasury.Addresses{Hot: hot, Warm: warm, Cold: strings.ToLower(os.Getenv("AUDIT_COLD_ADDRESS"))},
+			Tiers: tiers,
 		})
 	} else {
 		skip("reconciliation")
 	}
 	return jobs, nil
+}
+
+// tierAddresses are the Hot, Warm and Cold addresses. They come from wallet-service
+// (GET /v1/wallet/system-addresses over mTLS as CN=auditor) when AUDIT_WALLET_URL is set; AUDIT_HOT_ADDRESS,
+// AUDIT_WARM_ADDRESS and AUDIT_COLD_ADDRESS, when set, take precedence per address. Either way the chain
+// wallet-service reports must be the one the RPC serves.
+func tierAddresses(ctx context.Context, rpcChainID int64) (treasury.Addresses, error) {
+	var t treasury.Addresses
+	if url := os.Getenv("AUDIT_WALLET_URL"); url != "" {
+		cfg, err := walletclient.TLSConfig(requireEnv("TLS_CERT_FILE"), requireEnv("TLS_KEY_FILE"), requireEnv("TLS_CA_FILE"))
+		if err != nil {
+			return t, err
+		}
+		c := &walletclient.Client{BaseURL: url, HTTP: &http.Client{Timeout: 15 * time.Second, Transport: &http.Transport{TLSClientConfig: cfg}}}
+		a, err := c.Fetch(ctx, 30, 4*time.Second, log.Printf)
+		if err != nil {
+			return t, fmt.Errorf("treasury addresses from wallet-service: %w", err)
+		}
+		if a.ChainID != rpcChainID {
+			return t, fmt.Errorf("wallet-service runs chain %d but the RPC serves chain %d", a.ChainID, rpcChainID)
+		}
+		t = treasury.Addresses{Hot: a.Hot, Warm: a.Warm, Cold: a.Cold}
+		log.Printf("tier addresses from wallet-service: hot %s, warm %s, cold %q", t.Hot, t.Warm, t.Cold)
+	}
+	for _, o := range []struct {
+		env string
+		dst *string
+	}{{"AUDIT_HOT_ADDRESS", &t.Hot}, {"AUDIT_WARM_ADDRESS", &t.Warm}, {"AUDIT_COLD_ADDRESS", &t.Cold}} {
+		if v := strings.ToLower(os.Getenv(o.env)); v != "" {
+			*o.dst = v
+		}
+	}
+	return t, nil
 }
 
 // envAmounts parses "SYMBOL=minor units,SYMBOL=minor units", e.g. RECON_CAPITAL=ETH=10000000000000000000.

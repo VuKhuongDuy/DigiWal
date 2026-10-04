@@ -1,5 +1,5 @@
 // Package treasury loads the operator's Treasury file (infra/treasury.yaml, wallet-tiering.md
-// invariant #9): the public Warm Wallet address per chain. The Warm seed is never in any
+// invariant #9): the public Warm Wallet address per chain, and optionally the public Cold Wallet address. The Warm seed is never in any
 // always-on service, so wallet-service cannot derive this address; the operator declares it.
 // Only wallet-service reads the file; other services ask GET /v1/wallet/system-addresses.
 package treasury
@@ -13,8 +13,8 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// File is the parsed, validated file: one Warm address per chain id.
-type File struct{ warm map[int64]common.Address }
+// File is the parsed, validated file: one Warm address and optionally one Cold address per chain id.
+type File struct{ warm, cold map[int64]common.Address }
 
 var addressRe = regexp.MustCompile(`^0x[0-9a-fA-F]{40}$`)
 
@@ -30,6 +30,7 @@ func Load(path string) (*File, error) {
 		Chains []struct {
 			ChainID     int64  `yaml:"chain_id"`
 			WarmAddress string `yaml:"warm_address"`
+			ColdAddress string `yaml:"cold_address"` // optional
 		} `yaml:"chains"`
 	}
 	if err := yaml.Unmarshal(raw, &f); err != nil {
@@ -38,7 +39,7 @@ func Load(path string) (*File, error) {
 	if len(f.Chains) == 0 {
 		return nil, fmt.Errorf("treasury file %s lists no chains", path)
 	}
-	out := &File{warm: map[int64]common.Address{}}
+	out := &File{warm: map[int64]common.Address{}, cold: map[int64]common.Address{}}
 	for i, c := range f.Chains {
 		where := fmt.Sprintf("chains[%d] (chain_id %d)", i, c.ChainID)
 		if c.ChainID <= 0 {
@@ -55,6 +56,16 @@ func Load(path string) (*File, error) {
 			return nil, fmt.Errorf("%s: warm_address is the zero address", where)
 		}
 		out.warm[c.ChainID] = a
+		if c.ColdAddress != "" {
+			if !addressRe.MatchString(c.ColdAddress) {
+				return nil, fmt.Errorf("%s: cold_address %q is not a 0x-prefixed 20-byte hex address", where, c.ColdAddress)
+			}
+			cold := common.HexToAddress(c.ColdAddress)
+			if cold == (common.Address{}) {
+				return nil, fmt.Errorf("%s: cold_address is the zero address", where)
+			}
+			out.cold[c.ChainID] = cold
+		}
 	}
 	return out, nil
 }
@@ -71,4 +82,17 @@ func (f *File) WarmFor(chainID int64, hot common.Address) (common.Address, error
 		return common.Address{}, fmt.Errorf("treasury file: warm_address for chain %d is the Hot Wallet address %s", chainID, hot.Hex())
 	}
 	return warm, nil
+}
+
+// ColdFor returns the Cold address for the chain, if the file declares one (ok is false when it does not: Cold
+// is optional). A Cold address equal to the Hot or Warm Wallet is an error: the tiers are separate.
+func (f *File) ColdFor(chainID int64, hot, warm common.Address) (cold common.Address, ok bool, err error) {
+	cold, ok = f.cold[chainID]
+	if !ok {
+		return common.Address{}, false, nil
+	}
+	if cold == hot || cold == warm {
+		return common.Address{}, false, fmt.Errorf("treasury file: cold_address for chain %d equals the Hot or Warm Wallet address %s", chainID, cold.Hex())
+	}
+	return cold, true, nil
 }

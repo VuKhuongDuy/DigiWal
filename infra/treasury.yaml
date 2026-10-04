@@ -5,10 +5,15 @@
 #
 # wallet-service refuses to start if its chain has no entry here, or if the address is malformed,
 # zero, or the Hot Wallet's own. Changing an address: edit, then restart wallet-service and then
-# withdrawal-service (which reads it once at startup). Cold Wallet addresses are not listed:
-# withdrawals to Cold are allowed (withdrawal-flow.md invariant #18).
+# withdrawal-service (which reads it once at startup).
+#
+# cold_address is OPTIONAL, public, and informational: wallet-service reports it on system-addresses so the
+# dev auditor (and later the dashboards) can see the Cold Wallet. Declaring it restricts nothing: withdrawals
+# to Cold stay allowed (withdrawal-flow.md invariant #18). It must differ from the Hot and Warm addresses.
+# Leave it out until a Cold Wallet exists.
 chains:
   # Local Anvil (chain 31337): Anvil's default account #9, a throwaway dev key. Not a real treasury.
   - chain_id: 31337
     warm_address: "0xa0Ee7A142d267C1f36714E4a8F75612F20a79720"
+    # cold_address: "0x..."
   # Sepolia (11155111): add the operator's Warm address before running wallet-service there.
