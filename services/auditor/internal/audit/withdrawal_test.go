@@ -150,7 +150,7 @@ func (e *env) seedConfirmed() {
 	e.exec(e.led, `INSERT INTO accounts (id, asset_id, kind, total_balance) VALUES ('bbbbbbbb-0000-0000-0000-000000000002', $1, 'chain', 1000)`, assetID)
 	e.exec(e.led, `INSERT INTO locks (idempotency_key, account_id, amount, status, resolved_at)
 		VALUES ('withdrawal:`+wid+`', 'bbbbbbbb-0000-0000-0000-000000000001', 1000, 'settled', now())`)
-	e.exec(e.led, `INSERT INTO ledger_transactions (id, source_type, idempotency_key, request_hash) VALUES ($1, 'withdrawal_settle', 'withdrawal:`+wid+`', 'h')`, settle)
+	e.exec(e.led, `INSERT INTO ledger_transactions (id, source_type, idempotency_key, request_hash, created_at) VALUES ($1, 'withdrawal_settle', 'withdrawal:`+wid+`', 'h', $2)`, settle, t0)
 	e.exec(e.led, `INSERT INTO entries (ledger_transaction_id, account_id, amount) VALUES
 		($1, 'bbbbbbbb-0000-0000-0000-000000000001', -1000), ($1, 'bbbbbbbb-0000-0000-0000-000000000002', 1000)`, settle)
 	e.exec(e.led, `INSERT INTO ledger_transactions (source_type, idempotency_key, request_hash, purpose)
