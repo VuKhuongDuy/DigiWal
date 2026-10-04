@@ -100,6 +100,7 @@ type ChainTx struct {
 	To      string
 	Value   *big.Int
 	Input   []byte
+	GasFee  *big.Int // gas used x effective gas price from the receipt; nil if not mined
 }
 
 // Facts is everything the rules need about one withdrawal, read from every store that should know it.

@@ -9,6 +9,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"math/big"
 	"net/http"
 	"os"
 	"os/signal"
@@ -68,7 +69,7 @@ func main() {
 		}
 	}()
 
-	jobs, err := audits(ctx, st, rpc, chainID.Int64()) // A7 registers its job there too
+	jobs, err := audits(ctx, st, rpc, chainID.Int64()) //
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -179,7 +180,46 @@ func audits(ctx context.Context, st *store.Store, rpc *ethclient.Client, chainID
 		log.Printf("  AUDIT_HOT_ADDRESS / AUDIT_WARM_ADDRESS must be set for the treasury audit")
 		skip("treasury_audit")
 	}
+	if led != nil && wal != nil && wd != nil && cw != nil && hot != "" && warm != "" {
+		capital, err := envAmounts("RECON_CAPITAL")
+		if err != nil {
+			return nil, err
+		}
+		tolerance, err := envAmounts("RECON_TOLERANCE")
+		if err != nil {
+			return nil, err
+		}
+		confirms, err := strconv.ParseInt(envOr("RECON_CONFIRMS", "1"), 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("RECON_CONFIRMS: %w", err)
+		}
+		jobs = append(jobs, &audit.Reconciliation{
+			Src:   &source.Recon{Ledger: led, Watcher: cw, Withdrawal: wd, Wallet: wal, Chain: chain, TxChain: chain, ChainID: chainID},
+			Store: st, Every: every, Confirms: confirms, Capital: capital, Tolerance: tolerance,
+			Tiers: treasury.Addresses{Hot: hot, Warm: warm, Cold: strings.ToLower(os.Getenv("AUDIT_COLD_ADDRESS"))},
+		})
+	} else {
+		skip("reconciliation")
+	}
 	return jobs, nil
+}
+
+// envAmounts parses "SYMBOL=minor units,SYMBOL=minor units", e.g. RECON_CAPITAL=ETH=10000000000000000000.
+func envAmounts(key string) (map[string]*big.Int, error) {
+	out := map[string]*big.Int{}
+	for _, part := range strings.Split(os.Getenv(key), ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		sym, val, ok := strings.Cut(part, "=")
+		n, good := new(big.Int).SetString(strings.TrimSpace(val), 10)
+		if !ok || !good || n.Sign() < 0 {
+			return nil, fmt.Errorf("%s: %q is not SYMBOL=amount in minor units", key, part)
+		}
+		out[strings.TrimSpace(sym)] = n
+	}
+	return out, nil
 }
 
 func envDuration(k string, def time.Duration) time.Duration {

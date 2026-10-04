@@ -48,6 +48,9 @@ func (e EthChain) Tx(ctx context.Context, hash string) (withdrawal.ChainTx, erro
 		return withdrawal.ChainTx{}, fmt.Errorf("rpc: receipt %s: %w", hash, err)
 	}
 	out.Mined, out.Success, out.Block = true, rcpt.Status == 1, rcpt.BlockNumber.Int64()
+	if rcpt.EffectiveGasPrice != nil {
+		out.GasFee = new(big.Int).Mul(new(big.Int).SetUint64(rcpt.GasUsed), rcpt.EffectiveGasPrice)
+	}
 	return out, nil
 }
 
@@ -303,4 +306,31 @@ func (e EthChain) ScanTreasury(ctx context.Context, from, to int64, hot string, 
 		}
 	}
 	return moves, sent, nil
+}
+
+// ReconChain is the chain access the reconciliation needs. Read-only.
+type ReconChain interface {
+	Head(ctx context.Context) (int64, error)
+	// Balance is addr's balance at the given block: the native coin if token is "", else the ERC-20 balance.
+	Balance(ctx context.Context, addr, token string, block int64) (*big.Int, error)
+}
+
+var balanceOfSelector = []byte{0x70, 0xa0, 0x82, 0x31}
+
+func (e EthChain) Balance(ctx context.Context, addr, token string, block int64) (*big.Int, error) {
+	b := big.NewInt(block)
+	if token == "" {
+		v, err := e.C.BalanceAt(ctx, common.HexToAddress(addr), b)
+		if err != nil {
+			return nil, fmt.Errorf("rpc: balance of %s at %d: %w", addr, block, err)
+		}
+		return v, nil
+	}
+	data := append(append([]byte{}, balanceOfSelector...), common.LeftPadBytes(common.HexToAddress(addr).Bytes(), 32)...)
+	t := common.HexToAddress(token)
+	out, err := e.C.CallContract(ctx, ethereum.CallMsg{To: &t, Data: data}, b)
+	if err != nil {
+		return nil, fmt.Errorf("rpc: balanceOf %s on %s at %d: %w", addr, token, block, err)
+	}
+	return new(big.Int).SetBytes(out), nil
 }

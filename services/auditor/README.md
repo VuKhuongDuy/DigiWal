@@ -12,7 +12,7 @@ It is **not** the production design. It refuses to start unless `AUDITOR_ENV=dev
 
 Skeleton (task A1): the dev-only guard, the `auditor` schema, and a scheduler that records every Audit Run in
 `job_runs` (`ok`, `warn`, `fail`, or `error` — a job that could not complete is never `ok`; a panic is `error`).
-Registered so far: W (A3), D (A4), L (A5), T (A6). C (A7) adds its job.
+Registered so far: W (A3), D (A4), L (A5), T (A6), C (A7).
 Read access (task A2) is in place, see below. Not yet done, with the reason:
 - the Prometheus `job_runs` collector and `pkg/jobrun` — they sit on `pkg/metrics` (`monitoring-dashboard.md`
   task 1), which does not exist yet; `store.LastRun` / `store.LastSuccess` are the reads it will use.
@@ -78,6 +78,26 @@ else, so the chain is the only source.
   `AUDIT_WARM_ADDRESS` (required; `infra/treasury.yaml`), `AUDIT_COLD_ADDRESS` (optional, not configured anywhere yet).
   A wrong Hot address makes T1 and T2 quiet or noisy, so check it. Needs `LEDGER_RO_DSN`, `WALLET_RO_DSN`, `WITHDRAWAL_RO_DSN`.
 - Native transfers made inside contract calls are not seen (no trace API). The scan starts at `AUDIT_SCAN_START_BLOCK`.
+
+## Reconciliation (A7)
+
+`reconciliation` compares, per asset, the chain with the ledger: `residual = on-chain custody (Hot + Warm + Cold + every
+deposit address, at block B = head - RECON_CONFIRMS) - (-ChainAccount.total_balance) - explained`, where *explained* is
+deposits chain-watcher saw up to B that the ledger has not credited (lag, and held Flagged Deposits), minus withdrawals mined
+up to B and not yet Settled, minus gas paid and not yet posted, plus operator capital. The chain is read first, the databases
+after. **C1** the residual (within the tolerance: a warn that stays a warn; beyond it: critical), **C2** users are not owed more
+than the chain holds (in-flight withdrawals taken off the claim), **C3** the Hot Wallet holds at least the active Locks (warn).
+None is Immediate: the figures come from different stores a moment apart, so a residual must be seen in two consecutive runs.
+Every run stores its figures in `recon_snapshots` (residual over time, visible while within tolerance).
+
+- **`RECON_CAPITAL` matters.** `ledger.md` #7 says `-ChainAccount` equals all custody, which holds only if every unit on chain
+  came from a user. The Hot Wallet is also funded by the operator (gas float, liquidity); the ledger never sees that, so it
+  would be a permanent residual. Set `RECON_CAPITAL=ETH=<minor units>[,TKN=<...>]` to what the operator put in, or expect C1.
+  Until it is set, C2 is also the check that gas has not eaten into user funds.
+- `RECON_CONFIRMS` (default 1) must not exceed the deposit and withdrawal confirmation depths, or the ledger holds credits for
+  blocks newer than B. `RECON_TOLERANCE=SYM=<minor units>` overrides the default (0.01 of the native coin, 0 for a token).
+- It queries every deposit address on chain each run (one call per address and asset): fine for dev, not for production.
+- Needs `LEDGER_RO_DSN`, `WALLET_RO_DSN`, `WITHDRAWAL_RO_DSN`, `WATCHER_RO_DSN`, `AUDIT_HOT_ADDRESS`, `AUDIT_WARM_ADDRESS`.
 
 ## Read access (A2)
 

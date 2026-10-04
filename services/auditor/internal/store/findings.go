@@ -88,11 +88,13 @@ func reconcileRule(ctx context.Context, tx pgx.Tx, runID int64, flow, ref, rule 
 		if v.EscalateTo != "" && now.Sub(detectedAt) >= escalateAfter {
 			severity = v.EscalateTo
 		}
-		if sev == finding.Critical { // never downgrade
+		// A finding that stays open never gets less severe. One that came back after being resolved is a
+		// new occurrence and has the severity it has now.
+		if sev == finding.Critical && status != "resolved" {
 			severity = finding.Critical
 		}
 		newStatus, resolvedAt, detected := status, any(nil), detectedAt
-		if status == "resolved" { // it came back
+		if status == "resolved" {
 			newStatus, detected = "open", now
 		}
 		if status == "acknowledged" {
@@ -226,6 +228,47 @@ func (s *Store) Movements(ctx context.Context) ([]Movement, error) {
 			return nil, err
 		}
 		out = append(out, m)
+	}
+	return out, rows.Err()
+}
+
+// Snapshot is one asset's reconciliation figures for one run.
+type Snapshot struct {
+	RunID                                                  int64
+	AssetID, Symbol                                        string
+	Block                                                  int64
+	OnChain, LedgerCustody, Explained, Residual, Tolerance string
+	Components                                             map[string]string
+	At                                                     time.Time
+}
+
+// AddSnapshot records the figures of a reconciliation.
+func (s *Store) AddSnapshot(ctx context.Context, x Snapshot) error {
+	comp, err := json.Marshal(x.Components)
+	if err != nil {
+		return err
+	}
+	_, err = s.pool.Exec(ctx, `INSERT INTO recon_snapshots (run_id, asset_id, symbol, block_number, on_chain, ledger_custody, explained, residual, tolerance, components, created_at)
+		VALUES ($1,$2,$3,$4,$5::numeric,$6::numeric,$7::numeric,$8::numeric,$9::numeric,$10,$11)`,
+		x.RunID, x.AssetID, x.Symbol, x.Block, x.OnChain, x.LedgerCustody, x.Explained, x.Residual, x.Tolerance, comp, x.At)
+	return err
+}
+
+// Snapshots lists the recorded figures of an asset, newest first.
+func (s *Store) Snapshots(ctx context.Context, assetID string) ([]Snapshot, error) {
+	rows, err := s.pool.Query(ctx, `SELECT run_id, asset_id, symbol, block_number, on_chain::text, ledger_custody::text, explained::text, residual::text, tolerance::text, created_at
+		FROM recon_snapshots WHERE asset_id = $1 ORDER BY id DESC`, assetID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Snapshot
+	for rows.Next() {
+		var x Snapshot
+		if err := rows.Scan(&x.RunID, &x.AssetID, &x.Symbol, &x.Block, &x.OnChain, &x.LedgerCustody, &x.Explained, &x.Residual, &x.Tolerance, &x.At); err != nil {
+			return nil, err
+		}
+		out = append(out, x)
 	}
 	return out, rows.Err()
 }

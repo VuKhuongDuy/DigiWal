@@ -25,6 +25,10 @@ services:
       AUDIT_HOT_ADDRESS: ${AUDIT_HOT_ADDRESS:-}
       AUDIT_WARM_ADDRESS: ${AUDIT_WARM_ADDRESS:-0xa0Ee7A142d267C1f36714E4a8F75612F20a79720}
       AUDIT_COLD_ADDRESS: ${AUDIT_COLD_ADDRESS:-}
+      # Reconciliation: operator capital in custody that no user owns (the Hot Wallet's gas float and liquidity),
+      # e.g. RECON_CAPITAL=ETH=10000000000000000000. RECON_TOLERANCE overrides 0.01 ETH / 0 for tokens.
+      RECON_CAPITAL: ${RECON_CAPITAL:-}
+      RECON_TOLERANCE: ${RECON_TOLERANCE:-}
       HISTORY_RO_MONGO_URI: mongodb://auditor_ro:auditor_ro@mongo:27017/?authSource=history
     ports: ["8087:8080"]
     depends_on:

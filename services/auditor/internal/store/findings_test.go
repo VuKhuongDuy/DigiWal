@@ -165,3 +165,15 @@ func TestCursor(t *testing.T) {
 		t.Fatalf("cursor = %q", c)
 	}
 }
+
+// A critical that was fixed and later comes back as a warn is a warn: the old severity belongs to the old occurrence.
+func TestReopenedFindingTakesItsNewSeverity(t *testing.T) {
+	s := connect(t)
+	rec(t, s, 1, t0, viol("W1", finding.Critical))
+	rec(t, s, 2, t0.Add(time.Minute), viol("W1", finding.Critical))
+	rec(t, s, 3, t0.Add(2*time.Minute)) // resolved
+	rec(t, s, 4, t0.Add(3*time.Minute), viol("W1", finding.Warn))
+	if r, _ := rowOf(t, s, "W1"); r.status != "open" || r.severity != "warn" {
+		t.Fatalf("%+v", r)
+	}
+}
