@@ -868,6 +868,7 @@ sequenceDiagram
     participant Wallet as wallet-service
     participant RPC as EVM testnet RPC
     participant Kafka
+    participant History as history-service
 
     Note over Gateway: Authorization: Bearer <api_key> already resolved<br/>to an authenticated user_id — identity-auth.md
     Gateway->>WD: POST /withdrawals<br/>{idempotency_key, user_id, asset, amount, to_address}<br/>user_id is server-injected, never client-supplied
@@ -898,6 +899,7 @@ sequenceDiagram
             RPC-->>WD: tx_hash
             WD->>WD: status = broadcast
             WD->>Kafka: publish withdrawals.broadcast
+            Kafka-->>History: withdrawals.broadcast (key withdrawal_id)<br/>history document -> status broadcast
             loop poll for confirmations
                 WD->>RPC: get tx receipt / confirmation count
             end
@@ -906,6 +908,7 @@ sequenceDiagram
             Ledger-->>WD: ok (settled)
             WD->>WD: status = confirmed
             WD->>Kafka: publish withdrawals.confirmed
+            Kafka-->>History: withdrawals.confirmed (key withdrawal_id)<br/>history document -> status confirmed
         end
     end
 ```
@@ -949,9 +952,9 @@ sequenceDiagram
     WD->>WPG: mark requests with nonce >= N disputed (invariant #8)
     WD->>Wallet: POST /v1/wallet/nonce-gap {chain_id, from_nonce: N} — mTLS, CN=withdrawal-service
     Wallet->>Wallet: frozen_from_nonce = LEAST(existing, N)
-    Wallet-->>WD: 200 {frozen_from_nonce, frozen_at} (retried until 200; idempotent)
+    Wallet-->>WD: 200 {frozen_from_nonce, frozen_at} (retried until 200, idempotent)
     Sweeper->>Wallet: POST /v1/sign/hot-wallet (Gas Top-Up, new key)
-    Wallet-->>Sweeper: 503 frozen — transient; ALERT + skip after MAX_ATTEMPTS
+    Wallet-->>Sweeper: 503 frozen — transient, ALERT + skip after MAX_ATTEMPTS
     Op->>Op: resolve each disputed request (rebroadcast or nonce-filler, invariant #9)
     Op->>Wallet: manual SQL on wallet-service Postgres:<br/>SET frozen_from_nonce = NULL (no endpoint)
 ```
