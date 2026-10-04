@@ -1,0 +1,52 @@
+# QA stack: the real infra + the real wallet-service and ledger-service, one compose project.
+include:
+  - path: ../../infra/docker-compose.yml
+
+services:
+  # Host ports shifted (+10000) so the QA stack can coexist with another compose project on the box.
+  postgres: {ports: !override ["15432:5432"]}
+  redis: {ports: !override ["16379:6379"]}
+  kafka: {ports: !override []}
+  anvil: {ports: !override ["18545:8545"]}
+  wallet-service:
+    build: ../../services/wallet-service
+    environment:
+      PORT: "8080"
+      POSTGRES_DSN: postgres://custody:custody@postgres:5432/custody?sslmode=disable
+      REDIS_ADDR: redis:6379
+      MASTER_KEY_HEX: ${MASTER_KEY_HEX:?source tests/e2e/stack.sh env}
+      TLS_CERT_FILE: /certs/cert.pem
+      TLS_KEY_FILE: /certs/key.pem
+      TLS_CA_FILE: /certs/ca-cert.pem
+      RPC_URL: ${RPC_URL:-http://anvil:8545}
+      ASSETS_FILE: /config/assets.yaml
+    volumes:
+      - ../../infra/pki/out/wallet-service:/certs:ro
+      - ./assets.yaml:/config/assets.yaml:ro
+    ports: ["18080:8080", "18443:8443"]
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+      anvil: {condition: service_healthy}
+
+  ledger-service:
+    build:
+      context: ../..
+      dockerfile: services/ledger-service/Dockerfile
+    environment:
+      PORT: "8080"
+      POSTGRES_DSN: postgres://custody:custody@postgres:5432/ledger?sslmode=disable
+      ASSETS_FILE: /config/assets.yaml
+      SCREENING_FILE: /config/screening.yaml
+      TLS_CERT_FILE: /certs/cert.pem
+      TLS_KEY_FILE: /certs/key.pem
+      TLS_CA_FILE: /certs/ca-cert.pem
+      KAFKA_BROKERS: kafka:9092
+    volumes:
+      - ./assets.yaml:/config/assets.yaml:ro
+      - ./screening.yaml:/config/screening.yaml:ro
+      - ../../infra/pki/out/ledger-service:/certs:ro
+    ports: ["18081:8080", "18444:8443"]
+    depends_on:
+      postgres: {condition: service_healthy}
+      kafka: {condition: service_healthy}
