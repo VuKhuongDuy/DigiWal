@@ -108,7 +108,7 @@ func TestC12_DroppedTxIsNotLeftStuckForever(t *testing.T) {
 	t.Logf("after 150s: status %q, ledger total/locked %s/%s, destination %s", final, bl.Total, bl.Locked, ethBal(b.dests[0]))
 	stuck := !terminal(final)
 	if stuck {
-		t.Errorf("W-9 (HIGH, liveness): the withdrawal's tx was dropped from the mempool and 150s later it is still %q with %s wei locked: it was neither re-broadcast (the raw tx is stored) nor failed/released. Fee Bump only fires for stuck AND underpriced txs, and a dropped tx is neither.", final, bl.Locked)
+		t.Errorf("W-9 (MEDIUM, liveness): the withdrawal's tx was dropped from the mempool and 150s later it is still %q with %s wei locked: not re-broadcast automatically (the raw tx is stored); by design only an ALERT after 128 blocks. Fee Bump only fires for stuck AND underpriced txs, and a dropped tx is neither.", final, bl.Locked)
 	}
 	// replay the original signed tx: whichever way the system went, the destination must be paid exactly once in total
 	var tx types.Transaction
