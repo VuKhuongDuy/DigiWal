@@ -12,7 +12,7 @@ It is **not** the production design. It refuses to start unless `AUDITOR_ENV=dev
 
 Skeleton (task A1): the dev-only guard, the `auditor` schema, and a scheduler that records every Audit Run in
 `job_runs` (`ok`, `warn`, `fail`, or `error` — a job that could not complete is never `ok`; a panic is `error`).
-Registered so far: W (A3), D (A4). L (A5), T (A6) and C (A7) each add a `job.Job`.
+Registered so far: W (A3), D (A4), L (A5). T (A6) and C (A7) each add a `job.Job`.
 Read access (task A2) is in place, see below. Not yet done, with the reason:
 - the Prometheus `job_runs` collector and `pkg/jobrun` — they sit on `pkg/metrics` (`monitoring-dashboard.md`
   task 1), which does not exist yet; `store.LastRun` / `store.LastSuccess` are the reads it will use.
@@ -45,6 +45,17 @@ covers blocks up to chain-watcher's watermark and older than the Grace Period, s
 is not "missed". Native transfers made by contracts (internal calls) are not seen: no trace API (same limit as the design).
 The D7 cursor is a block number; `AUDIT_SCAN_START_BLOCK` (default 0) is where it starts; the first run on a long-lived
 chain walks every block once. Needs `WATCHER_RO_DSN` too.
+
+## Ledger integrity (A5)
+
+`ledger_integrity` runs L1-L9 every run, as aggregates over ledger-service's database in one `REPEATABLE READ, READ ONLY`
+transaction (`source.LedgerChecks`): transactions balance (L1), `total_balance` = sum of Entries (L2), `locked_balance` =
+sum of active Locks (L3), no negative Available (L4), each asset sums to zero (L5), corrections exactly negate their target
+once (L6), settled Lock <=> one `withdrawal_settle` (L7), well-formed Gas Fee keys (L8), the `entries` immutability
+triggers exist and are enabled (L9, named in `rules/ledger`). All critical and recorded at once (a snapshot cannot disagree
+with itself, so there is no lag to wait out). Each rule reports at most `source.MaxPerRule` (200) offenders per run; if a
+rule hits the cap, nothing is resolved that run, since absence proves nothing then. Needs only `LEDGER_RO_DSN`. A full scan
+each run is fine at dev size; the design's incremental scan with a nightly full pass is not built.
 
 ## Read access (A2)
 

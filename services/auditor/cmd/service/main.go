@@ -66,7 +66,7 @@ func main() {
 		}
 	}()
 
-	jobs, err := audits(ctx, st, rpc, chainID.Int64()) // A5-A7 register theirs there too
+	jobs, err := audits(ctx, st, rpc, chainID.Int64()) // A6-A7 register theirs there too
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -90,12 +90,17 @@ func audits(ctx context.Context, st *store.Store, rpc *ethclient.Client, chainID
 		}
 		return false
 	}
-	if missing("LEDGER_RO_DSN", "WALLET_RO_DSN", "HISTORY_RO_MONGO_URI") {
+	if missing("LEDGER_RO_DSN") {
 		return nil, nil
 	}
 	led, err := source.OpenPG(ctx, "ledger", env("LEDGER_RO_DSN"))
 	if err != nil {
 		return nil, err
+	}
+	every := envDuration("AUDIT_INTERVAL", 5*time.Minute)
+	jobs := []job.Job{&audit.LedgerIntegrity{Src: &source.LedgerChecks{Ledger: led}, Store: st, Every: every}}
+	if missing("WALLET_RO_DSN", "HISTORY_RO_MONGO_URI") {
+		return jobs, nil // the W and D rules also read wallet-service and history-service
 	}
 	wal, err := source.OpenPG(ctx, "wallet", env("WALLET_RO_DSN"))
 	if err != nil {
@@ -105,12 +110,10 @@ func audits(ctx context.Context, st *store.Store, rpc *ethclient.Client, chainID
 	if err != nil {
 		return nil, err
 	}
-	every := envDuration("AUDIT_INTERVAL", 5*time.Minute)
 	grace := envDuration("AUDIT_GRACE", 2*every) // Objectives: Grace Period = 2 runs
 	escalate := envDuration("AUDIT_ESCALATE", 3*every)
 	chain := source.EthChain{C: rpc}
 
-	var jobs []job.Job
 	if !missing("WITHDRAWAL_RO_DSN") {
 		wd, err := source.OpenPG(ctx, "withdrawal", env("WITHDRAWAL_RO_DSN"))
 		if err != nil {
