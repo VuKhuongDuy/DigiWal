@@ -3,7 +3,7 @@
 -- Apply as a superuser or the database owner, after 00_role.sql and after the service has migrated.
 REVOKE ALL ON ALL TABLES IN SCHEMA public FROM auditor_ro;
 GRANT USAGE ON SCHEMA public TO auditor_ro;
-GRANT SELECT (id, asset_type, symbol, decimals) ON assets TO auditor_ro;
+GRANT SELECT (id, asset_type, contract_address, symbol, decimals) ON assets TO auditor_ro;
 GRANT SELECT (id, asset_id, kind, user_id, total_balance, locked_balance) ON accounts TO auditor_ro;
 GRANT SELECT (id, source_type, idempotency_key, chain_id, tx_hash, log_index, created_at, purpose) ON ledger_transactions TO auditor_ro;
 GRANT SELECT (id, ledger_transaction_id, account_id, amount, corrects_entry_id, created_at) ON entries TO auditor_ro;

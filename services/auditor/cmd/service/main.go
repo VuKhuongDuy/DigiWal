@@ -12,9 +12,12 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
+	"digiwal/services/auditor/internal/audit"
 	"digiwal/services/auditor/internal/guard"
 	"digiwal/services/auditor/internal/job"
+	"digiwal/services/auditor/internal/source"
 	"digiwal/services/auditor/internal/store"
 
 	"github.com/ethereum/go-ethereum/ethclient"
@@ -61,12 +64,67 @@ func main() {
 		}
 	}()
 
-	var jobs []job.Job // A3-A7 register theirs here
+	var jobs []job.Job // A4-A7 register theirs here
+	if j, err := withdrawalAudit(ctx, st, rpc); err != nil {
+		log.Fatal(err)
+	} else if j != nil {
+		jobs = append(jobs, j)
+	}
 	log.Printf("auditor running (dev): chain %d, %d job(s)", chainID, len(jobs))
 	job.Run(ctx, st, jobs)
 	if len(jobs) == 0 {
 		<-ctx.Done()
 	}
+}
+
+// withdrawalAudit wires rules W1-W10 to the stores it reads, as the read-only auditor_ro login
+// (roles/). It is skipped, with a log line, unless all four connection strings are set.
+func withdrawalAudit(ctx context.Context, st *store.Store, rpc *ethclient.Client) (job.Job, error) {
+	dsns := map[string]string{
+		"LEDGER_RO_DSN": os.Getenv("LEDGER_RO_DSN"), "WALLET_RO_DSN": os.Getenv("WALLET_RO_DSN"),
+		"WITHDRAWAL_RO_DSN": os.Getenv("WITHDRAWAL_RO_DSN"), "HISTORY_RO_MONGO_URI": os.Getenv("HISTORY_RO_MONGO_URI"),
+	}
+	for k, v := range dsns {
+		if v == "" {
+			log.Printf("withdrawal_audit disabled: %s is not set", k)
+			return nil, nil
+		}
+	}
+	led, err := source.OpenPG(ctx, "ledger", dsns["LEDGER_RO_DSN"])
+	if err != nil {
+		return nil, err
+	}
+	wal, err := source.OpenPG(ctx, "wallet", dsns["WALLET_RO_DSN"])
+	if err != nil {
+		return nil, err
+	}
+	wd, err := source.OpenPG(ctx, "withdrawal", dsns["WITHDRAWAL_RO_DSN"])
+	if err != nil {
+		return nil, err
+	}
+	hist, err := source.OpenMongo(ctx, dsns["HISTORY_RO_MONGO_URI"], envOr("HISTORY_MONGO_DATABASE", "history"))
+	if err != nil {
+		return nil, err
+	}
+	every := envDuration("AUDIT_INTERVAL", 5*time.Minute)
+	return &audit.WithdrawalAudit{
+		Src:   &source.Withdrawals{Withdrawal: wd, Ledger: led, Wallet: wal, History: hist, Chain: source.EthChain{C: rpc}},
+		Store: st, Every: every,
+		Grace:    envDuration("AUDIT_GRACE", 2*every), // Objectives: Grace Period = 2 runs
+		Escalate: envDuration("AUDIT_ESCALATE", 3*every),
+	}, nil
+}
+
+func envDuration(k string, def time.Duration) time.Duration {
+	v := os.Getenv(k)
+	if v == "" {
+		return def
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		log.Fatalf("%s: %v", k, err)
+	}
+	return d
 }
 
 func requireEnv(k string) string {

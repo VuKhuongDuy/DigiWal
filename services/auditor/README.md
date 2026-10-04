@@ -12,11 +12,27 @@ It is **not** the production design. It refuses to start unless `AUDITOR_ENV=dev
 
 Skeleton (task A1): the dev-only guard, the `auditor` schema, and a scheduler that records every Audit Run in
 `job_runs` (`ok`, `warn`, `fail`, or `error` — a job that could not complete is never `ok`; a panic is `error`).
-No rule sets are registered yet: W (A3), D (A4), L (A5), T (A6) and C (A7) each add a `job.Job`.
+Registered so far: W (A3). D (A4), L (A5), T (A6) and C (A7) each add a `job.Job`.
 Read access (task A2) is in place, see below. Not yet done, with the reason:
 - the Prometheus `job_runs` collector and `pkg/jobrun` — they sit on `pkg/metrics` (`monitoring-dashboard.md`
   task 1), which does not exist yet; `store.LastRun` / `store.LastSuccess` are the reads it will use.
 
+
+## Withdrawal rules (A3)
+
+`withdrawal_audit` applies W1-W10 to every `confirmed`, `failed` or `rejected` request once it has been final for
+the Grace Period (default 2 runs = 10 min). `internal/rules/withdrawal` is pure (Facts in, Violations out, one fixture
+test per rule); `internal/source/withdrawal.go` reads the facts from the stores; `internal/audit` runs it.
+
+Each run re-evaluates every reference that has a pending or open finding, audits requests that became final since the
+cursor, and looks for ledger Settles with no request. A mismatch is remembered in `pending_findings` and becomes a
+`suspicious_transactions` row only when the next run sees it again, except W6 and W8 (signature and tx-hash facts
+cannot be a timing artefact between stores). W5 is a warn that becomes critical after `AUDIT_ESCALATE` (3 runs); W9 is a
+warn. A violation that goes away is `resolved`, never deleted; one that returns reopens. The job's Result counts open
+findings: `warn` if only warns, `fail` if any critical is open (so it stays `fail` until fixed or acknowledged).
+
+Needs `LEDGER_RO_DSN`, `WALLET_RO_DSN`, `WITHDRAWAL_RO_DSN`, `HISTORY_RO_MONGO_URI` (the `auditor_ro` logins from
+`make roles`); `AUDIT_INTERVAL`, `AUDIT_GRACE`, `AUDIT_ESCALATE` override the defaults.
 
 ## Read access (A2)
 

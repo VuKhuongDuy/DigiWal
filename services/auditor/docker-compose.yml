@@ -14,6 +14,11 @@ services:
       AUDITOR_ALLOWED_CHAIN_IDS: ${AUDITOR_ALLOWED_CHAIN_IDS:-31337}
       POSTGRES_DSN: postgres://custody:custody@postgres:5432/auditor?sslmode=disable
       RPC_URL: ${RPC_URL:-http://anvil:8545}
+      # Read-only logins (roles/, `make roles`); without all four the withdrawal audit is skipped.
+      LEDGER_RO_DSN: postgres://auditor_ro:auditor_ro@postgres:5432/ledger?sslmode=disable
+      WALLET_RO_DSN: postgres://auditor_ro:auditor_ro@postgres:5432/custody?sslmode=disable
+      WITHDRAWAL_RO_DSN: postgres://auditor_ro:auditor_ro@postgres:5432/withdrawal?sslmode=disable
+      HISTORY_RO_MONGO_URI: mongodb://auditor_ro:auditor_ro@mongo:27017/?authSource=history
     ports: ["8087:8080"]
     depends_on:
       postgres:

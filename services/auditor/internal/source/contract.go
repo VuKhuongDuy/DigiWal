@@ -26,7 +26,7 @@ var Stores = []Store{
 // payloads, API key hashes.
 var Contract = map[string]map[string][]string{
 	"ledger": {
-		"assets":              {"id", "asset_type", "symbol", "decimals"},
+		"assets":              {"id", "asset_type", "contract_address", "symbol", "decimals"},
 		"accounts":            {"id", "asset_id", "kind", "user_id", "total_balance", "locked_balance"},
 		"ledger_transactions": {"id", "source_type", "idempotency_key", "chain_id", "tx_hash", "log_index", "created_at", "purpose"},
 		"entries":             {"id", "ledger_transaction_id", "account_id", "amount", "corrects_entry_id", "created_at"},

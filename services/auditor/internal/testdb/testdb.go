@@ -7,6 +7,8 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
+	"sort"
 	"sync"
 	"testing"
 	"time"
@@ -95,4 +97,45 @@ func WithUser(t *testing.T, dsn, database, user, password string) string {
 		user, password = cfg.ConnConfig.User, cfg.ConnConfig.Password
 	}
 	return fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=disable", user, password, cfg.ConnConfig.Host, cfg.ConnConfig.Port, database)
+}
+
+// DBName is the database a DSN points at.
+func DBName(t *testing.T, dsn string) string {
+	t.Helper()
+	cfg, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cfg.ConnConfig.Database
+}
+
+// ApplyMigrations runs a directory's *.up.sql files, in order, on the database.
+func ApplyMigrations(t *testing.T, dsn, dir string) {
+	t.Helper()
+	files, err := filepath.Glob(filepath.Join(dir, "*.up.sql"))
+	if err != nil || len(files) == 0 {
+		t.Fatalf("no migrations in %s (%v)", dir, err)
+	}
+	sort.Strings(files)
+	for _, f := range files {
+		ApplyFile(t, dsn, f)
+	}
+}
+
+// ApplyFile runs one SQL file on the database.
+func ApplyFile(t *testing.T, dsn, file string) {
+	t.Helper()
+	b, err := os.ReadFile(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	db, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(ctx, string(b)); err != nil {
+		t.Fatalf("%s: %v", file, err)
+	}
 }
