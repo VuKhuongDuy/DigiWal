@@ -13,6 +13,7 @@ import (
 
 	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethclient"
 )
@@ -166,4 +167,140 @@ func (e EthChain) Scan(ctx context.Context, from, to int64, tokens []string, isD
 		}
 	}
 	return out, nil
+}
+
+// RawMovement is a transfer with a tier address on one side, as found on chain.
+type RawMovement struct {
+	TxHash   string
+	LogIndex int64 // -1 native
+	Token    string
+	From, To string
+	Amount   *big.Int
+	Block    int64
+	Time     time.Time
+}
+
+// SentTx is a mined transaction sent by the Hot address.
+type SentTx struct {
+	Hash  string
+	Nonce uint64
+	Block int64
+}
+
+// TreasuryChain is the chain access the T rules need. Read-only.
+type TreasuryChain interface {
+	Head(ctx context.Context) (int64, error)
+	BlockTime(ctx context.Context, n int64) (time.Time, error)
+	// TxCount is the Hot address's transaction count at the latest block.
+	TxCount(ctx context.Context, addr string) (uint64, error)
+	// ScanTreasury lists, for blocks [from, to]: every tx sent by hot, and every successful transfer
+	// (native value, or ERC-20 Transfer of the given tokens) that has one of tiers as sender or recipient.
+	ScanTreasury(ctx context.Context, from, to int64, hot string, tiers, tokens []string) ([]RawMovement, []SentTx, error)
+	// Sent describes one tx: whether it exists and mined, and if sent by hot, its nonce.
+	Sent(ctx context.Context, hash, hot string) (found, fromHot bool, nonce uint64, err error)
+}
+
+func (e EthChain) Head(ctx context.Context) (int64, error) {
+	n, err := e.C.BlockNumber(ctx)
+	return int64(n), err
+}
+
+func (e EthChain) TxCount(ctx context.Context, addr string) (uint64, error) {
+	return e.C.NonceAt(ctx, common.HexToAddress(addr), nil)
+}
+
+func sender(tx *types.Transaction) (common.Address, bool) {
+	signer := types.LatestSignerForChainID(tx.ChainId())
+	from, err := types.Sender(signer, tx)
+	return from, err == nil
+}
+
+func (e EthChain) Sent(ctx context.Context, hash, hot string) (bool, bool, uint64, error) {
+	h := common.HexToHash(hash)
+	tx, _, err := e.C.TransactionByHash(ctx, h)
+	if errors.Is(err, ethereum.NotFound) {
+		return false, false, 0, nil
+	}
+	if err != nil {
+		return false, false, 0, fmt.Errorf("rpc: transaction %s: %w", hash, err)
+	}
+	if _, err := e.C.TransactionReceipt(ctx, h); errors.Is(err, ethereum.NotFound) {
+		return false, false, 0, nil // not mined: gone (a reorg) or never was
+	} else if err != nil {
+		return false, false, 0, fmt.Errorf("rpc: receipt %s: %w", hash, err)
+	}
+	from, ok := sender(tx)
+	return true, ok && strings.EqualFold(from.Hex(), hot), tx.Nonce(), nil
+}
+
+func (e EthChain) ScanTreasury(ctx context.Context, from, to int64, hot string, tiers, tokens []string) ([]RawMovement, []SentTx, error) {
+	tierSet := map[string]bool{}
+	var tierHashes []common.Hash
+	for _, t := range tiers {
+		tierSet[strings.ToLower(t)] = true
+		tierHashes = append(tierHashes, common.BytesToHash(common.HexToAddress(t).Bytes()))
+	}
+	var moves []RawMovement
+	var sent []SentTx
+	times := map[int64]time.Time{}
+
+	for n := from; n <= to; n++ {
+		b, err := e.C.BlockByNumber(ctx, big.NewInt(n))
+		if err != nil {
+			return nil, nil, fmt.Errorf("rpc: block %d: %w", n, err)
+		}
+		bt := time.Unix(int64(b.Time()), 0).UTC()
+		times[n] = bt
+		for _, tx := range b.Transactions() {
+			f, ok := sender(tx)
+			if !ok {
+				continue
+			}
+			fromAddr := strings.ToLower(f.Hex())
+			if fromAddr == strings.ToLower(hot) {
+				sent = append(sent, SentTx{Hash: strings.ToLower(tx.Hash().Hex()), Nonce: tx.Nonce(), Block: n})
+			}
+			if tx.To() == nil || tx.Value().Sign() <= 0 {
+				continue
+			}
+			toAddr := strings.ToLower(tx.To().Hex())
+			if !tierSet[fromAddr] && !tierSet[toAddr] {
+				continue
+			}
+			r, err := e.C.TransactionReceipt(ctx, tx.Hash())
+			if err != nil {
+				return nil, nil, fmt.Errorf("rpc: receipt %s: %w", tx.Hash().Hex(), err)
+			}
+			if r.Status == 1 {
+				moves = append(moves, RawMovement{TxHash: strings.ToLower(tx.Hash().Hex()), LogIndex: -1, From: fromAddr, To: toAddr,
+					Amount: new(big.Int).Set(tx.Value()), Block: n, Time: bt})
+			}
+		}
+	}
+
+	if len(tokens) > 0 && len(tierHashes) > 0 {
+		var addrs []common.Address
+		for _, t := range tokens {
+			addrs = append(addrs, common.HexToAddress(t))
+		}
+		seen := map[string]bool{}
+		for _, topics := range [][][]common.Hash{{{transferSig}, tierHashes}, {{transferSig}, nil, tierHashes}} {
+			logs, err := e.C.FilterLogs(ctx, ethereum.FilterQuery{FromBlock: big.NewInt(from), ToBlock: big.NewInt(to), Addresses: addrs, Topics: topics})
+			if err != nil {
+				return nil, nil, fmt.Errorf("rpc: logs %d-%d: %w", from, to, err)
+			}
+			for _, l := range logs {
+				k := fmt.Sprintf("%s:%d", l.TxHash.Hex(), l.Index)
+				if l.Removed || len(l.Topics) != 3 || seen[k] {
+					continue
+				}
+				seen[k] = true
+				bn := int64(l.BlockNumber)
+				moves = append(moves, RawMovement{TxHash: strings.ToLower(l.TxHash.Hex()), LogIndex: int64(l.Index), Token: strings.ToLower(l.Address.Hex()),
+					From: strings.ToLower(common.BytesToAddress(l.Topics[1].Bytes()).Hex()), To: strings.ToLower(common.BytesToAddress(l.Topics[2].Bytes()).Hex()),
+					Amount: new(big.Int).SetBytes(l.Data), Block: bn, Time: times[bn]})
+			}
+		}
+	}
+	return moves, sent, nil
 }

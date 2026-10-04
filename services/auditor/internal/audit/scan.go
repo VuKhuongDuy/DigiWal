@@ -53,3 +53,26 @@ func loadCursor(ctx context.Context, st *store.Store, name string) (source.Ref, 
 	at, err := time.Parse(time.RFC3339Nano, ts)
 	return source.Ref{ID: id, At: at}, err
 }
+
+type blockTimer interface {
+	BlockTime(ctx context.Context, n int64) (time.Time, error)
+}
+
+// graceEnd shrinks [next, end] until block `end` is no newer than notAfter, so a batch never reaches into
+// the Grace Period. It returns end < next when even block `next` is too new.
+func graceEnd(ctx context.Context, c blockTimer, next, end int64, notAfter time.Time) (int64, error) {
+	for end >= next {
+		t, err := c.BlockTime(ctx, end)
+		if err != nil {
+			return 0, err
+		}
+		if !t.After(notAfter) {
+			return end, nil
+		}
+		if end == next {
+			return next - 1, nil
+		}
+		end = next + (end-next)/2
+	}
+	return end, nil
+}

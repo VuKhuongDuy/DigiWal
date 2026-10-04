@@ -188,3 +188,44 @@ func (s *Store) Findings(ctx context.Context, flow string) ([]Finding, error) {
 	}
 	return out, rows.Err()
 }
+
+// Movement is a row of treasury_movements.
+type Movement struct {
+	ChainID                int64
+	TxHash                 string
+	LogIndex               int64
+	Asset                  string
+	Amount                 string
+	From, To               string
+	FromTier, ToTier, Kind string
+	Block                  int64
+	Time                   time.Time
+}
+
+// AddMovement records a Treasury Movement; the same transfer scanned again is left as it is.
+func (s *Store) AddMovement(ctx context.Context, m Movement) error {
+	_, err := s.pool.Exec(ctx, `INSERT INTO treasury_movements
+		(chain_id, tx_hash, log_index, asset, amount, from_address, to_address, from_tier, to_tier, kind, block_number, block_time)
+		VALUES ($1,$2,$3,$4,$5::numeric,$6,$7,$8,$9,$10,$11,$12) ON CONFLICT (chain_id, tx_hash, log_index) DO NOTHING`,
+		m.ChainID, m.TxHash, m.LogIndex, m.Asset, m.Amount, m.From, m.To, m.FromTier, m.ToTier, m.Kind, m.Block, m.Time)
+	return err
+}
+
+// Movements lists the recorded Treasury Movements, oldest first.
+func (s *Store) Movements(ctx context.Context) ([]Movement, error) {
+	rows, err := s.pool.Query(ctx, `SELECT chain_id, tx_hash, log_index, asset, amount::text, from_address, to_address,
+		from_tier, to_tier, kind, block_number, block_time FROM treasury_movements ORDER BY block_number, tx_hash, log_index`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Movement
+	for rows.Next() {
+		var m Movement
+		if err := rows.Scan(&m.ChainID, &m.TxHash, &m.LogIndex, &m.Asset, &m.Amount, &m.From, &m.To, &m.FromTier, &m.ToTier, &m.Kind, &m.Block, &m.Time); err != nil {
+			return nil, err
+		}
+		out = append(out, m)
+	}
+	return out, rows.Err()
+}

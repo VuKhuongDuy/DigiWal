@@ -12,7 +12,7 @@ It is **not** the production design. It refuses to start unless `AUDITOR_ENV=dev
 
 Skeleton (task A1): the dev-only guard, the `auditor` schema, and a scheduler that records every Audit Run in
 `job_runs` (`ok`, `warn`, `fail`, or `error` — a job that could not complete is never `ok`; a panic is `error`).
-Registered so far: W (A3), D (A4), L (A5). T (A6) and C (A7) each add a `job.Job`.
+Registered so far: W (A3), D (A4), L (A5), T (A6). C (A7) adds its job.
 Read access (task A2) is in place, see below. Not yet done, with the reason:
 - the Prometheus `job_runs` collector and `pkg/jobrun` — they sit on `pkg/metrics` (`monitoring-dashboard.md`
   task 1), which does not exist yet; `store.LastRun` / `store.LastSuccess` are the reads it will use.
@@ -56,6 +56,28 @@ triggers exist and are enabled (L9, named in `rules/ledger`). All critical and r
 with itself, so there is no lag to wait out). Each rule reports at most `source.MaxPerRule` (200) offenders per run; if a
 rule hits the cap, nothing is resolved that run, since absence proves nothing then. Needs only `LEDGER_RO_DSN`. A full scan
 each run is fine at dev size; the design's incremental scan with a nightly full pass is not built.
+
+## Treasury and Hot Wallet signing (A6)
+
+`treasury_audit` scans blocks (older than the Grace Period, `AUDIT_*` confirmations deep) for every transfer with a Hot, Warm
+or Cold address on one side (ERC-20 `Transfer` logs of the registered tokens, and plain native transfers), records each in
+`treasury_movements` with a kind (`hot_to_warm`, `warm_to_hot`, `sweep`, `gas_topup`, `withdrawal`, `deposit_into_tier`,
+`unexplained`, ...), and applies T1-T5, all recorded at once. Warm and Cold are moved by the offline CLI and recorded nowhere
+else, so the chain is the only source.
+
+- **T1** the Hot address's chain transaction count is not above `hot_wallet_nonces.next_nonce` (chain read first, database
+  second, so a race cannot false-alarm). **T2** every mined Hot tx is one wallet-service signed for its nonce (hash of the
+  stored original, each Fee Bump and cancel). **T3** every Hot signature has a known purpose (`withdrawal:` with a request,
+  `gas-topup:`, `sweep:`, `treasury:`) and an allowed caller (`rules/treasury.SignerPolicy` mirrors wallet-service's authz).
+  **T4** value left Hot in a tx with no signature at all (the movement is then `unexplained`). **T5** a movement out of Warm
+  or Cold is `info` (no operator-side record exists), `warn` if it leaves our tiers (Open Question 5: `info` as the doc proposes).
+- To hash the original signed tx, the auditor reads `hot_wallet_signatures.signed_raw_tx` (a signed tx is not key material;
+  added to the contract and the grants). Nothing else about keys is readable.
+- **Addresses come from configuration**, not wallet-service (it calls no service API, and `system-addresses` is
+  withdrawal-service's until A8): `AUDIT_HOT_ADDRESS` (required; the address `GET /v1/wallet/hot-address` returns),
+  `AUDIT_WARM_ADDRESS` (required; `infra/treasury.yaml`), `AUDIT_COLD_ADDRESS` (optional, not configured anywhere yet).
+  A wrong Hot address makes T1 and T2 quiet or noisy, so check it. Needs `LEDGER_RO_DSN`, `WALLET_RO_DSN`, `WITHDRAWAL_RO_DSN`.
+- Native transfers made inside contract calls are not seen (no trace API). The scan starts at `AUDIT_SCAN_START_BLOCK`.
 
 ## Read access (A2)
 

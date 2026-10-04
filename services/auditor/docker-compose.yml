@@ -20,6 +20,11 @@ services:
       WITHDRAWAL_RO_DSN: postgres://auditor_ro:auditor_ro@postgres:5432/withdrawal?sslmode=disable
       WATCHER_RO_DSN: postgres://auditor_ro:auditor_ro@postgres:5432/chain_watcher?sslmode=disable
       AUDIT_SCAN_START_BLOCK: ${AUDIT_SCAN_START_BLOCK:-0}
+      # Tier addresses (public). Warm is Anvil's default account #9, as in infra/treasury.yaml. Hot is derived by
+      # wallet-service from its seed: set it from `GET /v1/wallet/hot-address` (see README). Cold is optional.
+      AUDIT_HOT_ADDRESS: ${AUDIT_HOT_ADDRESS:-}
+      AUDIT_WARM_ADDRESS: ${AUDIT_WARM_ADDRESS:-0xa0Ee7A142d267C1f36714E4a8F75612F20a79720}
+      AUDIT_COLD_ADDRESS: ${AUDIT_COLD_ADDRESS:-}
       HISTORY_RO_MONGO_URI: mongodb://auditor_ro:auditor_ro@mongo:27017/?authSource=history
     ports: ["8087:8080"]
     depends_on:

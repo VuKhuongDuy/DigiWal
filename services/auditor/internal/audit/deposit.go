@@ -173,16 +173,9 @@ func (a *DepositAudit) scanMissed(ctx context.Context, notAfter time.Time, each 
 		if end > wm {
 			end = wm
 		}
-		// shrink until the batch's last block is older than the Grace Period
-		for end >= next {
-			t, err := a.Src.Chain.BlockTime(ctx, end)
-			if err != nil {
-				return err
-			}
-			if !t.After(notAfter) {
-				break
-			}
-			end = next + (end-next)/2 - boolInt(end == next)
+		end, err = graceEnd(ctx, a.Src.Chain, next, end, notAfter)
+		if err != nil {
+			return err
 		}
 		if end < next {
 			return nil // the next block is still inside the Grace Period
@@ -202,11 +195,4 @@ func (a *DepositAudit) scanMissed(ctx context.Context, notAfter time.Time, each 
 		next = end + 1
 	}
 	return nil
-}
-
-func boolInt(b bool) int64 {
-	if b {
-		return 1
-	}
-	return 0
 }

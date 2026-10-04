@@ -13,12 +13,14 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
 	"digiwal/services/auditor/internal/audit"
 	"digiwal/services/auditor/internal/guard"
 	"digiwal/services/auditor/internal/job"
+	"digiwal/services/auditor/internal/rules/treasury"
 	"digiwal/services/auditor/internal/source"
 	"digiwal/services/auditor/internal/store"
 
@@ -66,7 +68,7 @@ func main() {
 		}
 	}()
 
-	jobs, err := audits(ctx, st, rpc, chainID.Int64()) // A6-A7 register theirs there too
+	jobs, err := audits(ctx, st, rpc, chainID.Int64()) // A7 registers its job there too
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -78,65 +80,104 @@ func main() {
 }
 
 // audits wires the rule sets to the stores they read, as the read-only auditor_ro login (roles/). Each job
-// is skipped, with a log line, unless every connection string it needs is set.
+// is skipped, with a log line, unless every connection string and address it needs is set.
 func audits(ctx context.Context, st *store.Store, rpc *ethclient.Client, chainID int64) ([]job.Job, error) {
-	env := func(k string) string { return os.Getenv(k) }
-	missing := func(keys ...string) bool {
-		for _, k := range keys {
-			if env(k) == "" {
-				log.Printf("audit disabled: %s is not set", k)
-				return true
-			}
+	pgs := map[string]*source.PG{}
+	pg := func(name, envKey string) (*source.PG, error) {
+		if p, ok := pgs[name]; ok {
+			return p, nil
 		}
-		return false
+		dsn := os.Getenv(envKey)
+		if dsn == "" {
+			log.Printf("  %s is not set", envKey)
+			return nil, nil
+		}
+		p, err := source.OpenPG(ctx, name, dsn)
+		if err != nil {
+			return nil, err
+		}
+		pgs[name] = p
+		return p, nil
 	}
-	if missing("LEDGER_RO_DSN") {
-		return nil, nil
+	var hist *source.Mongo
+	mongoDB := func() (*source.Mongo, error) {
+		if hist != nil {
+			return hist, nil
+		}
+		uri := os.Getenv("HISTORY_RO_MONGO_URI")
+		if uri == "" {
+			log.Printf("  HISTORY_RO_MONGO_URI is not set")
+			return nil, nil
+		}
+		var err error
+		hist, err = source.OpenMongo(ctx, uri, envOr("HISTORY_MONGO_DATABASE", "history"))
+		return hist, err
 	}
-	led, err := source.OpenPG(ctx, "ledger", env("LEDGER_RO_DSN"))
-	if err != nil {
-		return nil, err
-	}
+
 	every := envDuration("AUDIT_INTERVAL", 5*time.Minute)
-	jobs := []job.Job{&audit.LedgerIntegrity{Src: &source.LedgerChecks{Ledger: led}, Store: st, Every: every}}
-	if missing("WALLET_RO_DSN", "HISTORY_RO_MONGO_URI") {
-		return jobs, nil // the W and D rules also read wallet-service and history-service
-	}
-	wal, err := source.OpenPG(ctx, "wallet", env("WALLET_RO_DSN"))
-	if err != nil {
-		return nil, err
-	}
-	hist, err := source.OpenMongo(ctx, env("HISTORY_RO_MONGO_URI"), envOr("HISTORY_MONGO_DATABASE", "history"))
-	if err != nil {
-		return nil, err
-	}
 	grace := envDuration("AUDIT_GRACE", 2*every) // Objectives: Grace Period = 2 runs
 	escalate := envDuration("AUDIT_ESCALATE", 3*every)
+	start, err := strconv.ParseInt(envOr("AUDIT_SCAN_START_BLOCK", "0"), 10, 64)
+	if err != nil {
+		return nil, fmt.Errorf("AUDIT_SCAN_START_BLOCK: %w", err)
+	}
 	chain := source.EthChain{C: rpc}
 
-	if !missing("WITHDRAWAL_RO_DSN") {
-		wd, err := source.OpenPG(ctx, "withdrawal", env("WITHDRAWAL_RO_DSN"))
-		if err != nil {
-			return nil, err
-		}
+	var jobs []job.Job
+	skip := func(name string) { log.Printf("%s disabled (see above)", name) }
+
+	led, err := pg("ledger", "LEDGER_RO_DSN")
+	if err != nil {
+		return nil, err
+	}
+	wal, err := pg("wallet", "WALLET_RO_DSN")
+	if err != nil {
+		return nil, err
+	}
+	wd, err := pg("withdrawal", "WITHDRAWAL_RO_DSN")
+	if err != nil {
+		return nil, err
+	}
+	cw, err := pg("chain-watcher", "WATCHER_RO_DSN")
+	if err != nil {
+		return nil, err
+	}
+	h, err := mongoDB()
+	if err != nil {
+		return nil, err
+	}
+
+	if led != nil {
+		jobs = append(jobs, &audit.LedgerIntegrity{Src: &source.LedgerChecks{Ledger: led}, Store: st, Every: every})
+	} else {
+		skip("ledger_integrity")
+	}
+	if led != nil && wal != nil && wd != nil && h != nil {
 		jobs = append(jobs, &audit.WithdrawalAudit{
-			Src:   &source.Withdrawals{Withdrawal: wd, Ledger: led, Wallet: wal, History: hist, Chain: chain},
+			Src:   &source.Withdrawals{Withdrawal: wd, Ledger: led, Wallet: wal, History: h, Chain: chain},
 			Store: st, Every: every, Grace: grace, Escalate: escalate,
 		})
+	} else {
+		skip("withdrawal_audit")
 	}
-	if !missing("WATCHER_RO_DSN") {
-		cw, err := source.OpenPG(ctx, "chain-watcher", env("WATCHER_RO_DSN"))
-		if err != nil {
-			return nil, err
-		}
-		start, err := strconv.ParseInt(envOr("AUDIT_SCAN_START_BLOCK", "0"), 10, 64)
-		if err != nil {
-			return nil, fmt.Errorf("AUDIT_SCAN_START_BLOCK: %w", err)
-		}
+	if led != nil && wal != nil && cw != nil && h != nil {
 		jobs = append(jobs, &audit.DepositAudit{
-			Src:   &source.Deposits{Watcher: cw, Ledger: led, Wallet: wal, History: hist, Chain: chain},
+			Src:   &source.Deposits{Watcher: cw, Ledger: led, Wallet: wal, History: h, Chain: chain},
 			Store: st, ChainID: chainID, Every: every, Grace: grace, Escalate: escalate, StartBlock: start,
 		})
+	} else {
+		skip("deposit_audit")
+	}
+	hot, warm := strings.ToLower(os.Getenv("AUDIT_HOT_ADDRESS")), strings.ToLower(os.Getenv("AUDIT_WARM_ADDRESS"))
+	if led != nil && wal != nil && wd != nil && hot != "" && warm != "" {
+		jobs = append(jobs, &audit.TreasuryAudit{
+			Src:   &source.Treasury{Wallet: wal, Ledger: led, Withdrawal: wd, Chain: chain, ChainID: chainID},
+			Store: st, ChainID: chainID, Every: every, Grace: grace, StartBlock: start,
+			Tiers: treasury.Addresses{Hot: hot, Warm: warm, Cold: strings.ToLower(os.Getenv("AUDIT_COLD_ADDRESS"))},
+		})
+	} else {
+		log.Printf("  AUDIT_HOT_ADDRESS / AUDIT_WARM_ADDRESS must be set for the treasury audit")
+		skip("treasury_audit")
 	}
 	return jobs, nil
 }

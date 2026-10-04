@@ -22,8 +22,9 @@ var Stores = []Store{
 // service's CI, and the role grants nothing beyond it (least privilege).
 //
 // A rule that needs another column adds it here AND to the store's roles file, in the same change.
-// Deliberately absent: wallet_seeds and master_wallet (invariant 9), signed_raw_tx / raw_tx, outbox
-// payloads, API key hashes.
+// Deliberately absent: wallet_seeds and master_wallet (invariant 9), withdrawal-service's signed_raw_tx and
+// raw_tx, outbox payloads, API key hashes. hot_wallet_signatures.signed_raw_tx IS read: a signed tx is not
+// key material, and T2 needs the hash of the original tx, which wallet-service does not store separately.
 var Contract = map[string]map[string][]string{
 	"ledger": {
 		"assets":              {"id", "asset_type", "contract_address", "symbol", "decimals"},
@@ -36,7 +37,7 @@ var Contract = map[string]map[string][]string{
 	"wallet": {
 		"wallet_addresses":        {"user_id", "address"},
 		"hot_wallet_nonces":       {"chain_id", "next_nonce", "frozen_from_nonce"},
-		"hot_wallet_signatures":   {"idempotency_key", "chain_id", "nonce", "caller_cn", "created_at"},
+		"hot_wallet_signatures":   {"idempotency_key", "chain_id", "nonce", "caller_cn", "created_at", "signed_raw_tx"},
 		"hot_wallet_replacements": {"idempotency_key", "replacement_seq", "nonce", "tx_hash", "max_fee_per_gas", "max_priority_fee_per_gas", "kind", "created_at"},
 		"hot_wallet_voids":        {"idempotency_key", "caller_cn", "chain_id"},
 	},
