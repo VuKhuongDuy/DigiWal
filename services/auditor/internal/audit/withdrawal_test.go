@@ -54,13 +54,14 @@ func (c fakeChain) Tx(_ context.Context, h string) (withdrawal.ChainTx, error) {
 }
 
 type env struct {
-	t            *testing.T
-	led, wal, wd *pgxpool.Pool // superuser, to seed and to tamper
-	st           *store.Store
-	hist         fakeHistory
-	chain        fakeChain
-	now          time.Time
-	auditJob     *WithdrawalAudit
+	t                *testing.T
+	led, wal, wd, cw *pgxpool.Pool // superuser, to seed and to tamper
+	st               *store.Store
+	ro               map[string]source.Querier
+	hist             fakeHistory
+	chain            fakeChain
+	now              time.Time
+	auditJob         *WithdrawalAudit
 }
 
 var t0 = time.Date(2026, 10, 4, 12, 0, 0, 0, time.UTC)
@@ -81,7 +82,7 @@ func newEnv(t *testing.T) *env {
 	var ro = map[string]source.Querier{}
 	pools := map[string]*pgxpool.Pool{}
 	for _, st := range source.Stores {
-		if st.Name != "ledger" && st.Name != "wallet" && st.Name != "withdrawal" {
+		if st.Name != "ledger" && st.Name != "wallet" && st.Name != "withdrawal" && st.Name != "chain-watcher" {
 			continue
 		}
 		dsn := testdb.New(t)
@@ -101,7 +102,8 @@ func newEnv(t *testing.T) *env {
 		t.Cleanup(pg.Close)
 		ro[st.Name] = pg
 	}
-	e.led, e.wal, e.wd = pools["ledger"], pools["wallet"], pools["withdrawal"]
+	e.led, e.wal, e.wd, e.cw = pools["ledger"], pools["wallet"], pools["withdrawal"], pools["chain-watcher"]
+	e.ro = ro
 	e.st, err = store.Connect(ctx, testdb.New(t))
 	if err != nil {
 		t.Fatal(err)

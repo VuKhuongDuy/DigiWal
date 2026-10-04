@@ -12,7 +12,7 @@ It is **not** the production design. It refuses to start unless `AUDITOR_ENV=dev
 
 Skeleton (task A1): the dev-only guard, the `auditor` schema, and a scheduler that records every Audit Run in
 `job_runs` (`ok`, `warn`, `fail`, or `error` — a job that could not complete is never `ok`; a panic is `error`).
-Registered so far: W (A3). D (A4), L (A5), T (A6) and C (A7) each add a `job.Job`.
+Registered so far: W (A3), D (A4). L (A5), T (A6) and C (A7) each add a `job.Job`.
 Read access (task A2) is in place, see below. Not yet done, with the reason:
 - the Prometheus `job_runs` collector and `pkg/jobrun` — they sit on `pkg/metrics` (`monitoring-dashboard.md`
   task 1), which does not exist yet; `store.LastRun` / `store.LastSuccess` are the reads it will use.
@@ -33,6 +33,18 @@ findings: `warn` if only warns, `fail` if any critical is open (so it stays `fai
 
 Needs `LEDGER_RO_DSN`, `WALLET_RO_DSN`, `WITHDRAWAL_RO_DSN`, `HISTORY_RO_MONGO_URI` (the `auditor_ro` logins from
 `make roles`); `AUDIT_INTERVAL`, `AUDIT_GRACE`, `AUDIT_ESCALATE` override the defaults.
+
+## Deposit rules (A4)
+
+`deposit_audit` applies D1-D7 to every observed transfer confirmed for the Grace Period. A deposit is identified by
+`chain_id:tx_hash:log_index` (log_index -1 = native coin), the key the ledger and history-service already use.
+Same machinery as W (pure rules in `internal/rules/deposit`, two-pass, resolve/reopen, D6 warn -> critical).
+Two extra scans find what has no starting row: ledger credits with no observed transfer (D2), and **D7**, a chain scan
+for ERC-20 `Transfer` logs and plain native transfers to a deposit address that chain-watcher never recorded. D7 only
+covers blocks up to chain-watcher's watermark and older than the Grace Period, so a transfer the watcher has not reached
+is not "missed". Native transfers made by contracts (internal calls) are not seen: no trace API (same limit as the design).
+The D7 cursor is a block number; `AUDIT_SCAN_START_BLOCK` (default 0) is where it starts; the first run on a long-lived
+chain walks every block once. Needs `WATCHER_RO_DSN` too.
 
 ## Read access (A2)
 

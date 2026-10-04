@@ -103,7 +103,7 @@ func (a *WithdrawalAudit) Run(ctx context.Context) (job.Outcome, error) {
 		}
 	}
 
-	if err := a.scan(ctx, cursorRequests, a.Src.ListFinal, notAfter, eval); err != nil {
+	if err := scanRefs(ctx, a.Store, cursorRequests, a.Src.ListFinal, notAfter, a.batch(), a.now, eval); err != nil {
 		return job.Outcome{}, err
 	}
 	orphans := func(ref string) error {
@@ -116,54 +116,10 @@ func (a *WithdrawalAudit) Run(ctx context.Context) (job.Outcome, error) {
 		}
 		return eval(ref)
 	}
-	if err := a.scan(ctx, cursorSettles, a.Src.ListSettles, notAfter, orphans); err != nil {
+	if err := scanRefs(ctx, a.Store, cursorSettles, a.Src.ListSettles, notAfter, a.batch(), a.now, orphans); err != nil {
 		return job.Outcome{}, err
 	}
 
 	warn, crit, err := a.Store.CountOpen(ctx, finding.FlowWithdrawal)
 	return job.Outcome{Warn: warn, Critical: crit}, err
-}
-
-type lister func(ctx context.Context, after source.Ref, notAfter time.Time, limit int) ([]source.Ref, error)
-
-// scan walks a lister from its stored cursor to notAfter, saving the cursor after every batch so a failure
-// part-way re-reads at most one batch.
-func (a *WithdrawalAudit) scan(ctx context.Context, name string, list lister, notAfter time.Time, each func(ref string) error) error {
-	cur, err := a.cursor(ctx, name)
-	if err != nil {
-		return err
-	}
-	for {
-		refs, err := list(ctx, cur, notAfter, a.batch())
-		if err != nil {
-			return err
-		}
-		for _, r := range refs {
-			if err := each(r.ID); err != nil {
-				return err
-			}
-			cur = r
-		}
-		if len(refs) > 0 {
-			if err := a.Store.SetCursor(ctx, name, cur.At.Format(time.RFC3339Nano)+"|"+cur.ID, a.now()); err != nil {
-				return err
-			}
-		}
-		if len(refs) < a.batch() {
-			return nil
-		}
-	}
-}
-
-func (a *WithdrawalAudit) cursor(ctx context.Context, name string) (source.Ref, error) {
-	s, err := a.Store.Cursor(ctx, name)
-	if err != nil || s == "" {
-		return source.Ref{At: time.Unix(0, 0).UTC()}, err
-	}
-	ts, id, ok := strings.Cut(s, "|")
-	if !ok {
-		return source.Ref{}, fmt.Errorf("corrupt cursor %q for %s", s, name)
-	}
-	at, err := time.Parse(time.RFC3339Nano, ts)
-	return source.Ref{ID: id, At: at}, err
 }

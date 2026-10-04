@@ -7,10 +7,12 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -64,11 +66,9 @@ func main() {
 		}
 	}()
 
-	var jobs []job.Job // A4-A7 register theirs here
-	if j, err := withdrawalAudit(ctx, st, rpc); err != nil {
+	jobs, err := audits(ctx, st, rpc, chainID.Int64()) // A5-A7 register theirs there too
+	if err != nil {
 		log.Fatal(err)
-	} else if j != nil {
-		jobs = append(jobs, j)
 	}
 	log.Printf("auditor running (dev): chain %d, %d job(s)", chainID, len(jobs))
 	job.Run(ctx, st, jobs)
@@ -77,42 +77,65 @@ func main() {
 	}
 }
 
-// withdrawalAudit wires rules W1-W10 to the stores it reads, as the read-only auditor_ro login
-// (roles/). It is skipped, with a log line, unless all four connection strings are set.
-func withdrawalAudit(ctx context.Context, st *store.Store, rpc *ethclient.Client) (job.Job, error) {
-	dsns := map[string]string{
-		"LEDGER_RO_DSN": os.Getenv("LEDGER_RO_DSN"), "WALLET_RO_DSN": os.Getenv("WALLET_RO_DSN"),
-		"WITHDRAWAL_RO_DSN": os.Getenv("WITHDRAWAL_RO_DSN"), "HISTORY_RO_MONGO_URI": os.Getenv("HISTORY_RO_MONGO_URI"),
-	}
-	for k, v := range dsns {
-		if v == "" {
-			log.Printf("withdrawal_audit disabled: %s is not set", k)
-			return nil, nil
+// audits wires the rule sets to the stores they read, as the read-only auditor_ro login (roles/). Each job
+// is skipped, with a log line, unless every connection string it needs is set.
+func audits(ctx context.Context, st *store.Store, rpc *ethclient.Client, chainID int64) ([]job.Job, error) {
+	env := func(k string) string { return os.Getenv(k) }
+	missing := func(keys ...string) bool {
+		for _, k := range keys {
+			if env(k) == "" {
+				log.Printf("audit disabled: %s is not set", k)
+				return true
+			}
 		}
+		return false
 	}
-	led, err := source.OpenPG(ctx, "ledger", dsns["LEDGER_RO_DSN"])
+	if missing("LEDGER_RO_DSN", "WALLET_RO_DSN", "HISTORY_RO_MONGO_URI") {
+		return nil, nil
+	}
+	led, err := source.OpenPG(ctx, "ledger", env("LEDGER_RO_DSN"))
 	if err != nil {
 		return nil, err
 	}
-	wal, err := source.OpenPG(ctx, "wallet", dsns["WALLET_RO_DSN"])
+	wal, err := source.OpenPG(ctx, "wallet", env("WALLET_RO_DSN"))
 	if err != nil {
 		return nil, err
 	}
-	wd, err := source.OpenPG(ctx, "withdrawal", dsns["WITHDRAWAL_RO_DSN"])
-	if err != nil {
-		return nil, err
-	}
-	hist, err := source.OpenMongo(ctx, dsns["HISTORY_RO_MONGO_URI"], envOr("HISTORY_MONGO_DATABASE", "history"))
+	hist, err := source.OpenMongo(ctx, env("HISTORY_RO_MONGO_URI"), envOr("HISTORY_MONGO_DATABASE", "history"))
 	if err != nil {
 		return nil, err
 	}
 	every := envDuration("AUDIT_INTERVAL", 5*time.Minute)
-	return &audit.WithdrawalAudit{
-		Src:   &source.Withdrawals{Withdrawal: wd, Ledger: led, Wallet: wal, History: hist, Chain: source.EthChain{C: rpc}},
-		Store: st, Every: every,
-		Grace:    envDuration("AUDIT_GRACE", 2*every), // Objectives: Grace Period = 2 runs
-		Escalate: envDuration("AUDIT_ESCALATE", 3*every),
-	}, nil
+	grace := envDuration("AUDIT_GRACE", 2*every) // Objectives: Grace Period = 2 runs
+	escalate := envDuration("AUDIT_ESCALATE", 3*every)
+	chain := source.EthChain{C: rpc}
+
+	var jobs []job.Job
+	if !missing("WITHDRAWAL_RO_DSN") {
+		wd, err := source.OpenPG(ctx, "withdrawal", env("WITHDRAWAL_RO_DSN"))
+		if err != nil {
+			return nil, err
+		}
+		jobs = append(jobs, &audit.WithdrawalAudit{
+			Src:   &source.Withdrawals{Withdrawal: wd, Ledger: led, Wallet: wal, History: hist, Chain: chain},
+			Store: st, Every: every, Grace: grace, Escalate: escalate,
+		})
+	}
+	if !missing("WATCHER_RO_DSN") {
+		cw, err := source.OpenPG(ctx, "chain-watcher", env("WATCHER_RO_DSN"))
+		if err != nil {
+			return nil, err
+		}
+		start, err := strconv.ParseInt(envOr("AUDIT_SCAN_START_BLOCK", "0"), 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("AUDIT_SCAN_START_BLOCK: %w", err)
+		}
+		jobs = append(jobs, &audit.DepositAudit{
+			Src:   &source.Deposits{Watcher: cw, Ledger: led, Wallet: wal, History: hist, Chain: chain},
+			Store: st, ChainID: chainID, Every: every, Grace: grace, Escalate: escalate, StartBlock: start,
+		})
+	}
+	return jobs, nil
 }
 
 func envDuration(k string, def time.Duration) time.Duration {
