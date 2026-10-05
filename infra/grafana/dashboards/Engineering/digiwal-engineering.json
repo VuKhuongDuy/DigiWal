@@ -351,7 +351,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum by (severity) (increase(digiwal_suspicious_detected_total[1d]))",
+          "expr": "sum by (severity) (increase(digiwal_suspicious_detected_total[1d] offset -1d))",
           "legendFormat": "{{severity}}",
           "refId": "A",
           "instant": false,
@@ -746,7 +746,7 @@
             "uid": "prometheus"
           },
           "expr": "digiwal_recon_custody{component=\"on_chain\"}",
-          "legendFormat": "on chain \u00b7 {{asset}}",
+          "legendFormat": "on chain · {{asset}}",
           "refId": "A",
           "instant": false,
           "range": true
@@ -757,7 +757,7 @@
             "uid": "prometheus"
           },
           "expr": "digiwal_recon_custody{component=\"ledger\"}",
-          "legendFormat": "ledger \u00b7 {{asset}}",
+          "legendFormat": "ledger · {{asset}}",
           "refId": "B",
           "instant": false,
           "range": true
@@ -768,7 +768,7 @@
             "uid": "prometheus"
           },
           "expr": "digiwal_recon_custody{component=\"explained\"}",
-          "legendFormat": "explained delta \u00b7 {{asset}}",
+          "legendFormat": "explained delta · {{asset}}",
           "refId": "C",
           "instant": false,
           "range": true
@@ -953,7 +953,7 @@
             "uid": "prometheus"
           },
           "expr": "digiwal_chain_head_block",
-          "legendFormat": "head \u00b7 chain {{chain_id}}",
+          "legendFormat": "head · chain {{chain_id}}",
           "refId": "A",
           "instant": false,
           "range": true
@@ -964,7 +964,7 @@
             "uid": "prometheus"
           },
           "expr": "digiwal_chainwatcher_watermark_block",
-          "legendFormat": "watermark \u00b7 chain {{chain_id}}",
+          "legendFormat": "watermark · chain {{chain_id}}",
           "refId": "B",
           "instant": false,
           "range": true
@@ -1525,7 +1525,7 @@
             "uid": "prometheus"
           },
           "expr": "sum by (status, reason) (increase(digiwal_withdrawal_failures_total[1h]))",
-          "legendFormat": "{{status}} \u00b7 {{reason}}",
+          "legendFormat": "{{status}} · {{reason}}",
           "refId": "A",
           "instant": false,
           "range": true,
@@ -1981,7 +1981,7 @@
             "uid": "prometheus"
           },
           "expr": "sum by (kind) (increase(digiwal_sweeper_fee_bumps_total[1h]))",
-          "legendFormat": "fee bumps \u00b7 {{kind}}",
+          "legendFormat": "fee bumps · {{kind}}",
           "refId": "A",
           "instant": false,
           "range": true
@@ -1992,7 +1992,7 @@
             "uid": "prometheus"
           },
           "expr": "sum by (kind) (increase(digiwal_sweeper_alerts_total[1h]))",
-          "legendFormat": "alert \u00b7 {{kind}}",
+          "legendFormat": "alert · {{kind}}",
           "refId": "B",
           "instant": false,
           "range": true
@@ -2339,7 +2339,7 @@
             "uid": "prometheus"
           },
           "expr": "digiwal_wallet_balance{wallet=\"hot\"}",
-          "legendFormat": "Hot \u00b7 {{asset}}",
+          "legendFormat": "Hot · {{asset}}",
           "refId": "A",
           "instant": false,
           "range": true
@@ -2350,7 +2350,7 @@
             "uid": "prometheus"
           },
           "expr": "digiwal_hot_wallet_floor",
-          "legendFormat": "Floor \u00b7 {{asset}}",
+          "legendFormat": "Floor · {{asset}}",
           "refId": "B",
           "instant": false,
           "range": true
@@ -2361,7 +2361,7 @@
             "uid": "prometheus"
           },
           "expr": "digiwal_hot_wallet_ceiling",
-          "legendFormat": "Ceiling \u00b7 {{asset}}",
+          "legendFormat": "Ceiling · {{asset}}",
           "refId": "C",
           "instant": false,
           "range": true
@@ -2474,7 +2474,7 @@
             "uid": "prometheus"
           },
           "expr": "digiwal_wallet_balance{wallet=~\"warm|cold\"}",
-          "legendFormat": "{{wallet}} \u00b7 {{asset}}",
+          "legendFormat": "{{wallet}} · {{asset}}",
           "refId": "A",
           "instant": false,
           "range": true
@@ -3225,7 +3225,7 @@
             "uid": "prometheus"
           },
           "expr": "go_goroutines",
-          "legendFormat": "goroutines \u00b7 {{service}}",
+          "legendFormat": "goroutines · {{service}}",
           "refId": "A",
           "instant": false,
           "range": true
@@ -3236,7 +3236,7 @@
             "uid": "prometheus"
           },
           "expr": "process_resident_memory_bytes / 1048576",
-          "legendFormat": "memory MiB \u00b7 {{service}}",
+          "legendFormat": "memory MiB · {{service}}",
           "refId": "B",
           "instant": false,
           "range": true
