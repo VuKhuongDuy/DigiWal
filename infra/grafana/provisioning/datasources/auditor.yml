@@ -1,0 +1,19 @@
+# The ONE Postgres datasource in Grafana (reconciliation-audit.md, Amendments 2): read-only, on the auditor's own database,
+# for the Engineering dashboard's detail tables only. Never a service database. `make -C services/auditor grafana-role`
+# creates the login (SELECT on four tables, nothing else; see services/auditor/roles/grafana.sql). Dev environment only.
+apiVersion: 1
+datasources:
+  - name: Auditor (read-only)
+    uid: auditor-pg
+    type: grafana-postgresql-datasource
+    access: proxy
+    url: postgres:5432
+    user: grafana_ro
+    secureJsonData:
+      password: grafana_ro
+    jsonData:
+      database: auditor
+      sslmode: disable
+      postgresVersion: 1600
+      maxOpenConns: 3
+    editable: false

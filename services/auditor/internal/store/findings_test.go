@@ -2,12 +2,15 @@ package store
 
 import (
 	"context"
+	"os"
 	"testing"
 	"time"
 
 	"digiwal/services/auditor/internal/finding"
 	"digiwal/services/auditor/internal/job"
 	"digiwal/services/auditor/internal/testdb"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 var (
@@ -263,5 +266,53 @@ func TestMetricsFromTheDatabase(t *testing.T) {
 	m, _ = s.Metrics(ctx)
 	if len(m.Recon) != 1 || m.Recon[0].Asset != "TKN" || m.Recon[0].Residual != -1.5 || m.Recon[0].OnChain != 500 {
 		t.Fatalf("recon: %+v", m.Recon)
+	}
+}
+
+// Grafana's login (roles/grafana.sql) reads the four tables the Engineering dashboard shows and nothing else, and writes nothing.
+func TestGrafanaRoleReadsOnlyTheAuditTables(t *testing.T) {
+	ctx := context.Background()
+	dsn := testdb.New(t)
+	s, err := Connect(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	body, err := os.ReadFile("../../roles/grafana.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.pool.Exec(ctx, string(body)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.pool.Exec(ctx, string(body)); err != nil { // idempotent
+		t.Fatalf("second run: %v", err)
+	}
+
+	g, err := pgxpool.New(ctx, testdb.WithUser(t, dsn, testdb.DBName(t, dsn), "grafana_ro", "grafana_ro"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer g.Close()
+	for _, tbl := range []string{"suspicious_transactions", "treasury_movements", "job_runs", "recon_snapshots"} {
+		if _, err := g.Exec(ctx, "SELECT * FROM "+tbl+" LIMIT 0"); err != nil {
+			t.Errorf("grafana_ro cannot read %s: %v", tbl, err)
+		}
+		for _, w := range []string{"DELETE FROM " + tbl, "TRUNCATE " + tbl} {
+			if _, err := g.Exec(ctx, w); err == nil {
+				t.Errorf("grafana_ro ran %q", w)
+			}
+		}
+	}
+	for _, tbl := range []string{"pending_findings", "audit_cursor", "schema_migrations"} {
+		if _, err := g.Exec(ctx, "SELECT * FROM "+tbl+" LIMIT 0"); err == nil {
+			t.Errorf("grafana_ro can read %s, which the dashboard does not need", tbl)
+		}
+	}
+	if _, err := g.Exec(ctx, "INSERT INTO job_runs (job, started_at) VALUES ('x', now())"); err == nil {
+		t.Error("grafana_ro inserted a row")
+	}
+	if _, err := g.Exec(ctx, "CREATE TABLE grafana_scratch (a int)"); err == nil {
+		t.Error("grafana_ro created a table")
 	}
 }

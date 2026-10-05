@@ -6,7 +6,7 @@ dashboards under `dashboards/<Folder>/`: a subfolder becomes a Grafana folder.
 | Folder | Dashboard | For |
 |---|---|---|
 | `Business` | `digiwal-business.json` (home page) | the manager: what users do, how it ended, where the money is. Plain language, no service names. |
-| `Engineering` | _(A11)_ | the Tech Lead: flows, Sweeper, Reaper, Hot wallet, performance, the auditor's findings. |
+| `Engineering` | `digiwal-engineering.json` | the Tech Lead: firing alerts, the auditor's findings, deposit and withdraw flow, Sweeper, Reaper, wallets, performance. |
 
 Open http://localhost:3000 (anonymous admin in this dev stack).
 
@@ -20,3 +20,18 @@ credit time, which live in different databases; no service exports it, and the a
 
 **Checked against a real Prometheus and Grafana** (sample series, then every panel query evaluated, the "Funds verified" tile in its
 three states, the folder, the datasource and the home page confirmed through Grafana's API), but not yet against the running stack.
+
+**The Engineering dashboard** has one extra datasource, `Auditor (read-only)`, a Postgres login (`grafana_ro`) on the auditor's own database. It is
+the single exception to "Grafana reads only Prometheus" (reconciliation-audit.md, Amendments 2): it can `SELECT` four tables (suspicious
+transactions, treasury movements, run history, reconciliation figures), nothing else and no writes (`services/auditor/roles/grafana.sql`, tested), and
+only this dashboard uses it. Create the login with `make -C services/auditor grafana-role` once the auditor has started. Without it only those four
+tables' panels show an error; the rest work.
+
+Numbers marked *(process)* restart with their service (sweeper keeps no database; the stage histogram, Reaper and ALERT counters are in-process).
+
+**Not on the Engineering dashboard yet:** gas and Fee Bump panels (A12), request-to-credit latency, RPC latency, Kafka consumer lag and Hot coverage
+(no service exports these; coverage is the auditor's C3 finding instead).
+
+**Checked** against a real Prometheus (the real `alerts.yml`, sample series for every metric the dashboard uses), a real Postgres (the auditor's real
+migrations and `grafana.sql`) and a real Grafana: both dashboards load into their folders, the datasource reports "Database Connection OK", and all 61
+panel queries (57 PromQL, 4 SQL, the SQL through Grafana) run and return rows. Not yet against the running dev stack.
