@@ -18,6 +18,7 @@ import (
 
 	"digiwal/pkg/metrics"
 	"digiwal/services/chain-watcher/internal/chain"
+	"digiwal/services/chain-watcher/internal/obs"
 	"digiwal/services/chain-watcher/internal/publisher"
 	"digiwal/services/chain-watcher/internal/registry"
 	"digiwal/services/chain-watcher/internal/resolver"
@@ -90,10 +91,13 @@ func main() {
 		LoadRegistry: func() (*registry.Registry, error) { return registry.Load(assetsFile) },
 	}
 
-	// Metrics on their own internal port: the connection pool and the Go runtime. (The chain lag figures are a separate
-	// change: they need the independent head ticker the design asks for.)
+	// Metrics on their own internal port: the connection pool, the Go runtime, and the lag figures (watermark, head on its
+	// own ticker, confirmation depth).
 	reg := metrics.NewRegistry()
-	reg.MustRegister(metrics.PoolCollector("chain-watcher", func() metrics.PoolStat { return metrics.PoolFromPgx(st.Pool().Stat()) }))
+	heads := &obs.HeadTicker{}
+	reg.MustRegister(metrics.PoolCollector("chain-watcher", func() metrics.PoolStat { return metrics.PoolFromPgx(st.Pool().Stat()) }),
+		obs.Collector(st, heads, chainID, envInt("CONFIRMATION_DEPTH", 32)))
+	go heads.Run(ctx, c, 5*time.Second) // the head on its own ticker, independent of the poll loop
 	go func() {
 		addr := ":" + envOr("METRICS_PORT", metrics.DefaultPort)
 		log.Printf("metrics on %s", addr)
