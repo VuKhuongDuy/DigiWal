@@ -9,7 +9,9 @@ services:
   kafka: {ports: !override []}
   anvil: {ports: !override ["18545:8545"]}
   wallet-service:
-    build: ../../services/wallet-service
+    build:
+      context: ../..
+      dockerfile: services/wallet-service/Dockerfile
     environment:
       PORT: "8080"
       POSTGRES_DSN: postgres://custody:custody@postgres:5432/custody?sslmode=disable

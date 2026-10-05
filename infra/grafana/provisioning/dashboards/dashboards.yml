@@ -1,0 +1,12 @@
+# Dashboards are code: the JSON under infra/grafana/dashboards is the source of truth, a subfolder becomes a
+# Grafana folder (Business for the manager, Engineering for the Tech Lead; reconciliation-audit.md decisions (c), (d)).
+apiVersion: 1
+providers:
+  - name: digiwal
+    type: file
+    allowUiUpdates: false
+    disableDeletion: true
+    updateIntervalSeconds: 30
+    options:
+      path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: true

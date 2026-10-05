@@ -79,3 +79,13 @@ make test    # Postgres via testcontainers/TEST_POSTGRES_DSN; Redis via TEST_RED
   recovery, receipts), a scriptable chain for reorgs and failures, and real Postgres and Redis. The resolver was also run once (throwaway
   check, not committed) against the real `wallet-service` binary over mTLS: Redis hit, endpoint fallback, unknown address `404` = not ours,
   `CN=sweeper` refused with `403` (surfaced as an error, not "not ours").
+
+## Metrics
+
+`GET /metrics` on its own internal port (`METRICS_PORT`, default 9100; never on an API listener, and a test checks that). Go runtime and process
+metrics, and the database pool's saturation (`digiwal_db_pool_*`, see `pkg/metrics`).
+Lag: `digiwal_chainwatcher_watermark_block`, `digiwal_chain_head_block` + `digiwal_chain_head_read_timestamp_seconds`, `digiwal_chainwatcher_confirmation_depth`
+(all `{chain_id}`). The head is read by **its own 5s ticker**, not by the poll loop: if the poll loop hangs the watermark freezes while the head
+keeps moving, so the lag grows instead of both standing still and reading as zero. A failed head read keeps the last value and does not advance
+its read time (staleness shows); a head never read is absent, not 0. It is the head of the RPC node chain-watcher uses, so it cannot show a node
+that is itself behind the network.

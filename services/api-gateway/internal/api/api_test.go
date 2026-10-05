@@ -2,7 +2,9 @@ package api_test
 
 import (
 	"context"
+	"digiwal/pkg/metrics"
 	"encoding/json"
+	"github.com/prometheus/client_golang/prometheus"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -362,5 +364,65 @@ func TestHealthzNeedsNoAuth(t *testing.T) {
 	e := newEnv(t)
 	if code, _ := e.do("GET", "/healthz", "", ""); code != 200 {
 		t.Fatalf("healthz = %d", code)
+	}
+}
+
+// Design invariant 6: /metrics is never served on the public listener (it would be reachable by clients and
+// would disclose the user count). Metrics live on their own internal port.
+func TestMetricsAreNotOnThePublicListener(t *testing.T) {
+	e := newEnv(t)
+	_, key := e.newUser()
+	for _, auth := range []string{"", "Bearer " + key} {
+		for _, path := range []string{"/metrics", "/metrics/"} {
+			code, body := e.do("GET", path, auth, "")
+			if code == 200 || strings.Contains(body, "go_goroutines") || strings.Contains(body, "digiwal_users_total") {
+				t.Errorf("GET %s (auth %q) = %d, metrics must not be served here:\n%.200s", path, auth, code, body)
+			}
+		}
+	}
+}
+
+// The route label comes from the ServeMux pattern. The authenticated routes live in a mux nested behind requireAuth
+// (which copies the request), so without metrics.ReportRoute every authenticated request would read "/".
+func TestMetricsMiddlewareSeesTheRealRoutes(t *testing.T) {
+	e := newEnv(t)
+	_, key := e.newUser()
+	s := &api.Server{Auth: e.st, Users: e.st, Wallet: &api.WalletClient{BaseURL: e.walletSrv.URL, HTTP: e.walletSrv.Client()}}
+	reg := prometheus.NewRegistry()
+	srv := httptest.NewServer(metrics.NewHTTP(reg, "api-gateway").Wrap(s.Routes()))
+	t.Cleanup(srv.Close)
+	for _, req := range [][3]string{
+		{"POST", "/users", ""}, {"POST", "/users", ""},
+		{"GET", "/v1/deposit-address", "Bearer " + key}, {"GET", "/v1/deposit-address", "Bearer " + key},
+		{"GET", "/v1/deposit-address", ""},                  // refused by requireAuth, before the inner mux
+		{"GET", "/definitely/not/a/route", "Bearer " + key}, // authenticated, but no route
+	} {
+		r, err := http.NewRequest(req[0], srv.URL+req[1], strings.NewReader("{}"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if req[2] != "" {
+			r.Header.Set("Authorization", req[2])
+		}
+		resp, err := http.DefaultClient.Do(r)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+	}
+	rec := httptest.NewRecorder()
+	metrics.Handler(reg).ServeHTTP(rec, httptest.NewRequest("GET", "/metrics", nil))
+	out := rec.Body.String()
+	if !strings.Contains(out, `route="POST /users",service="api-gateway"} 2`) {
+		t.Errorf("POST /users under its own route:\n%s", out)
+	}
+	if !strings.Contains(out, `code="201",route="GET /v1/deposit-address",service="api-gateway"} 1`) || !strings.Contains(out, `code="200",route="GET /v1/deposit-address",service="api-gateway"} 1`) {
+		t.Errorf("an authenticated route must be labelled with its own pattern, not \"/\":\n%s", out)
+	}
+	if !strings.Contains(out, `code="401",route="/",service="api-gateway"} 1`) {
+		t.Errorf("a request refused before routing is the root's \"/\":\n%s", out)
+	}
+	if !strings.Contains(out, `code="404",route="/",service="api-gateway"} 1`) || strings.Contains(out, "definitely") {
+		t.Errorf("an authenticated request with no route is a 404 under \"/\", and its path must not leak:\n%s", out)
 	}
 }

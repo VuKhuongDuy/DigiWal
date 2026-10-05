@@ -23,22 +23,22 @@ func (s *Store) ListByStatus(ctx context.Context, status string, limit int) ([]W
 // MarkSigned records wallet-service's signature and moves reserved → signed. The raw tx is kept
 // so that every later broadcast, including after a crash, sends exactly this transaction.
 func (s *Store) MarkSigned(ctx context.Context, id string, chainID int64, nonce uint64, rawTx string) (Withdrawal, error) {
-	return guarded(scan(s.pool.QueryRow(ctx, `
+	return s.timed(s.pool.QueryRow(ctx, `
 		UPDATE withdrawal_requests
 		SET status = 'signed', chain_id = $2, nonce = $3, signed_raw_tx = $4, updated_at = now()
 		WHERE withdrawal_id = $1 AND status = 'reserved'
-		RETURNING `+columns, id, chainID, int64(nonce), rawTx)))
+		RETURNING `+columns+prevAge, id, chainID, int64(nonce), rawTx), StatusReserved, StatusSigned)
 }
 
 // MarkBroadcast moves signed → broadcast with the hash of the version sent and the chain head it
 // was sent at, and writes the withdrawals.broadcast event to the outbox in the same transaction
 // (payload built by the caller from the result).
 func (s *Store) MarkBroadcast(ctx context.Context, id, txHash string, at time.Time, head int64, event func(Withdrawal) (topic string, payload []byte, err error)) (Withdrawal, error) {
-	return s.transitionWithEvent(ctx, event, `
+	return s.transitionWithEvent(ctx, event, StatusSigned, StatusBroadcast, `
 		UPDATE withdrawal_requests
 		SET status = 'broadcast', tx_hash = $2, broadcast_at = $3, sent_head = $4, updated_at = now()
 		WHERE withdrawal_id = $1 AND status = 'signed'
-		RETURNING `+columns, id, txHash, at, head)
+		RETURNING `+columns+prevAge, id, txHash, at, head)
 }
 
 // MarkConfirmed moves broadcast → confirmed after the Settle, recording the hash that was mined
@@ -49,12 +49,12 @@ func (s *Store) MarkBroadcast(ctx context.Context, id, txHash string, at time.Ti
 // is computed from, posted afterwards by the pipeline.
 func (s *Store) MarkConfirmed(ctx context.Context, id, txHash string, block int64, ledgerTxID string, at time.Time, gas *GasRecord, event func(Withdrawal) (string, []byte, error)) (Withdrawal, error) {
 	g := gas.args()
-	return s.transitionWithEvent(ctx, event, `
+	return s.transitionWithEvent(ctx, event, StatusBroadcast, StatusConfirmed, `
 		UPDATE withdrawal_requests
 		SET status = 'confirmed', tx_hash = $5, confirmed_block = $2, settle_ledger_tx_id = $3, confirmed_at = $4, updated_at = now(),
 		    gas_tx_hash = $6, gas_used = $7, gas_price = $8::numeric, gas_purpose = $9
 		WHERE withdrawal_id = $1 AND status = 'broadcast'
-		RETURNING `+columns, id, block, ledgerTxID, at, txHash, g[0], g[1], g[2], g[3])
+		RETURNING `+columns+prevAge, id, block, ledgerTxID, at, txHash, g[0], g[1], g[2], g[3])
 }
 
 // GasRecord is the gas a mined tx of ours spent, as its receipt reports it, waiting to be posted to
@@ -172,10 +172,11 @@ func (s *Store) MarkSent(ctx context.Context, id string, head int64) error {
 	return err
 }
 
-func (s *Store) transitionWithEvent(ctx context.Context, event func(Withdrawal) (string, []byte, error), sql string, args ...any) (Withdrawal, error) {
+func (s *Store) transitionWithEvent(ctx context.Context, event func(Withdrawal) (string, []byte, error), from, to, sql string, args ...any) (Withdrawal, error) {
 	var out Withdrawal
+	var secs float64
 	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
-		w, err := guarded(scan(tx.QueryRow(ctx, sql, args...)))
+		w, err := guarded(scan(timedRow{tx.QueryRow(ctx, sql, args...), &secs}))
 		if err != nil {
 			return err
 		}
@@ -190,6 +191,9 @@ func (s *Store) transitionWithEvent(ctx context.Context, event func(Withdrawal) 
 		out = w
 		return nil
 	})
+	if err == nil {
+		s.tell(from, to, secs) // after the commit, so a rolled-back transition is never reported
+	}
 	return out, err
 }
 
@@ -255,12 +259,13 @@ func (s *Store) StampBroadcastHead(ctx context.Context, id string, head int64) e
 func (s *Store) MarkFailed(ctx context.Context, id, from, reason, blockAddress string, gas *GasRecord, event func(Withdrawal) (topic string, payload []byte, err error)) (Withdrawal, error) {
 	g := gas.args()
 	var out Withdrawal
+	var secs float64
 	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
-		w, err := guarded(scan(tx.QueryRow(ctx, `
+		w, err := guarded(scan(timedRow{tx.QueryRow(ctx, `
 			UPDATE withdrawal_requests SET status = 'failed', reject_reason = $3, updated_at = now(),
 			    gas_tx_hash = $4, gas_used = $5, gas_price = $6::numeric, gas_purpose = $7
 			WHERE withdrawal_id = $1 AND status = $2
-			RETURNING `+columns, id, from, reason, g[0], g[1], g[2], g[3])))
+			RETURNING `+columns+prevAge, id, from, reason, g[0], g[1], g[2], g[3]), &secs}))
 		if err != nil {
 			return err
 		}
@@ -281,5 +286,8 @@ func (s *Store) MarkFailed(ctx context.Context, id, from, reason, blockAddress s
 		out = w
 		return nil
 	})
+	if err == nil {
+		s.tell(from, StatusFailed, secs)
+	}
 	return out, err
 }

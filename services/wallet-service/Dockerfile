@@ -1,8 +1,12 @@
+# Build context is the REPO ROOT (it needs pkg/metrics):
+#   docker build -f services/wallet-service/Dockerfile .
 FROM golang:1.26-alpine AS build
 WORKDIR /src
-COPY go.mod go.sum ./
+COPY pkg/metrics pkg/metrics
+COPY services/wallet-service/go.mod services/wallet-service/go.sum services/wallet-service/
+WORKDIR /src/services/wallet-service
 RUN go mod download
-COPY . .
+COPY services/wallet-service/ .
 RUN CGO_ENABLED=0 go build -o /out/service ./cmd/service
 
 FROM alpine:3.20

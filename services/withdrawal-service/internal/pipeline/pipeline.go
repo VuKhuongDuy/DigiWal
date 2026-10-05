@@ -102,6 +102,9 @@ type Pipeline struct {
 	Alert      func(msg string)
 	AlertEvery time.Duration
 	alerts     alerter
+
+	// Observer receives the ALERTs raised, for metrics; nil observes nothing.
+	Observer Observer
 }
 
 // Run polls until ctx ends. A failed step is logged and retried on the next tick.
@@ -232,7 +235,9 @@ func (p *Pipeline) recheck(ctx context.Context, w store.Withdrawal) (handled boo
 }
 
 func (p *Pipeline) alert(w store.Withdrawal, kind, msg string) {
-	p.alerts.raise(p.now(), p.AlertEvery, p.Alert, w, kind, msg)
+	if p.alerts.raise(p.now(), p.AlertEvery, p.Alert, w, kind, msg) {
+		orNop(p.Observer).Alerted(kind)
+	}
 }
 
 // version is one signed form of a request's tx: the original (seq 0) or a Fee Bump (invariant #21).

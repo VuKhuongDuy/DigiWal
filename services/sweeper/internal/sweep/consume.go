@@ -63,10 +63,12 @@ func Run(ctx context.Context, r Reader, s *Sweeper, maxAttempts int) error {
 			}
 			if errors.Is(err, ErrPermanent) {
 				log.Printf("ALERT: not sweeping %s record %q, it can never succeed: %v", m.Topic, m.Key, err)
+				orNop(s.Observer).Abandoned()
 				break
 			}
 			if attempt >= maxAttempts {
 				log.Printf("ALERT: giving up sweeping %s record %q after %d attempts, funds stay at the user address: %v", m.Topic, m.Key, attempt, err)
+				orNop(s.Observer).Abandoned()
 				break
 			}
 			log.Printf("sweep %s record %q failed (attempt %d/%d, will retry): %v", m.Topic, m.Key, attempt, maxAttempts, err)

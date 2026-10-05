@@ -52,7 +52,9 @@ func underpriced(err error) bool {
 	return strings.Contains(m, "underpriced") || strings.Contains(m, "fee too low") || strings.Contains(m, "less than block base fee")
 }
 
-func (s *Sweeper) alert(msg string) {
+// alert raises an ALERT of the given kind (a closed set, also the metrics label).
+func (s *Sweeper) alert(kind, msg string) {
+	orNop(s.Observer).Alerted(kind)
 	if s.Alert != nil {
 		s.Alert(msg)
 		return
@@ -87,7 +89,7 @@ func (s *Sweeper) sendHotTx(ctx context.Context, key string, raw []byte) (common
 		}
 	}
 	if versions[len(versions)-1].cancel {
-		s.alert(fmt.Sprintf("%s %s was cancelled by an operator's Nonce Filler: it will never land", what, key))
+		s.alert("cancelled_by_operator", fmt.Sprintf("%s %s was cancelled by an operator's Nonce Filler: it will never land", what, key))
 	}
 
 	head, err := s.Chain.Head(ctx)
@@ -101,14 +103,14 @@ func (s *Sweeper) sendHotTx(ctx context.Context, key string, raw []byte) (common
 			return nil
 		}
 		if bumps >= s.maxBumps() {
-			s.alert(fmt.Sprintf("%s %s is still not mined after %d Fee Bumps (Hot Wallet nonce held); not bumping again", what, key, bumps))
+			s.alert("bump_exhausted", fmt.Sprintf("%s %s is still not mined after %d Fee Bumps (Hot Wallet nonce held); not bumping again", what, key, bumps))
 			bumpingOff = true
 			return nil
 		}
 		rawN, hashN, err := s.Wallet.ReplaceHotWallet(ctx, key, bumps+1)
 		switch {
 		case errors.Is(err, wallet.ErrPermanent): // the fee ceiling, a Nonce Filler, an unknown key
-			s.alert(fmt.Sprintf("wallet-service refused Fee Bump %d of %s %s: %v", bumps+1, what, key, err))
+			s.alert("bump_refused", fmt.Sprintf("wallet-service refused Fee Bump %d of %s %s: %v", bumps+1, what, key, err))
 			bumpingOff = true
 			return nil
 		case err != nil:
@@ -116,6 +118,7 @@ func (s *Sweeper) sendHotTx(ctx context.Context, key string, raw []byte) (common
 			return nil
 		}
 		bumps++
+		orNop(s.Observer).FeeBump("gas_topup")
 		versions = append(versions, hotVersion{hash: common.HexToHash(hashN), raw: rawN})
 		sentHead = head
 		if _, err := s.Chain.Broadcast(ctx, rawN); err != nil {
@@ -189,12 +192,12 @@ func (s *Sweeper) postGas(ctx context.Context, hash common.Hash, rc *chain.Recei
 			return
 		}
 		if errors.Is(err, ledger.ErrRefused) {
-			s.alert(fmt.Sprintf("ledger-service refused the %s Gas Fee of tx %s: %v", purpose, g.TxHash, err))
+			s.alert("gas_fee_report_failed", fmt.Sprintf("ledger-service refused the %s Gas Fee of tx %s: %v", purpose, g.TxHash, err))
 			return
 		}
 		if sleep(ctx, time.Duration(attempt)*s.Config.PollInterval) != nil {
 			return
 		}
 	}
-	s.alert(fmt.Sprintf("could not record the %s Gas Fee of tx %s after 3 attempts (not retried later: sweeper keeps no state): %v", purpose, g.TxHash, err))
+	s.alert("gas_fee_report_failed", fmt.Sprintf("could not record the %s Gas Fee of tx %s after 3 attempts (not retried later: sweeper keeps no state): %v", purpose, g.TxHash, err))
 }

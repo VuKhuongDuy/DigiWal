@@ -17,10 +17,12 @@ import (
 	"syscall"
 
 	"digiwal/pkg/events"
+	"digiwal/pkg/metrics"
 	"digiwal/services/ledger-service/internal/api"
 	"digiwal/services/ledger-service/internal/authz"
 	"digiwal/services/ledger-service/internal/consumer"
 	"digiwal/services/ledger-service/internal/ledger"
+	"digiwal/services/ledger-service/internal/obs"
 	"digiwal/services/ledger-service/internal/screening"
 )
 
@@ -33,6 +35,11 @@ func main() {
 		log.Fatal(err)
 	}
 	defer store.Close()
+
+	// Metrics (monitoring-dashboard.md decision (d)): one registry; both API listeners are measured, and neither serves it.
+	reg := metrics.NewRegistry()
+	reg.MustRegister(obs.Collector(store), metrics.PoolCollector("ledger-service", func() metrics.PoolStat { return metrics.PoolFromPgx(store.PoolStat()) }))
+	httpm := metrics.NewHTTP(reg, "ledger-service")
 
 	// Fail startup on any registry problem rather than boot half-usable.
 	assets, err := ledger.LoadRegistry(requireEnv("ASSETS_FILE"))
@@ -58,7 +65,7 @@ func main() {
 			log.Fatalf("configuring mTLS: %v", err)
 		}
 		port := envOr("MTLS_PORT", "8443")
-		srv := &http.Server{Addr: ":" + port, Handler: server.MTLSRoutes(), TLSConfig: tlsCfg}
+		srv := &http.Server{Addr: ":" + port, Handler: httpm.Wrap(server.MTLSRoutes()), TLSConfig: tlsCfg}
 		go func() {
 			log.Printf("ledger-service mTLS listening on :%s", port)
 			log.Fatal(srv.ListenAndServeTLS("", ""))
@@ -83,8 +90,16 @@ func main() {
 		log.Println("KAFKA_BROKERS not set: deposit consumer disabled")
 	}
 
+	go func() {
+		addr := ":" + envOr("METRICS_PORT", metrics.DefaultPort)
+		log.Printf("metrics on %s", addr)
+		if err := metrics.Serve(ctx, addr, reg); err != nil {
+			log.Printf("metrics listener: %v", err)
+		}
+	}()
+
 	port := envOr("PORT", "8080")
-	plain := &http.Server{Addr: ":" + port, Handler: server.Routes()}
+	plain := &http.Server{Addr: ":" + port, Handler: httpm.Wrap(server.Routes())}
 	go func() {
 		<-ctx.Done()
 		_ = plain.Shutdown(context.Background())

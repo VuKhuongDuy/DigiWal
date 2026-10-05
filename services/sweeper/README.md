@@ -71,3 +71,12 @@ event for that address sweeps its whole balance.
   and the wallet client against an HTTP stub. The wallet client was also run once (throwaway check, not committed) against the real
   `wallet-service` binary over mTLS with a mock RPC: top-up signed by the Hot Wallet and identical on replay, token and native-`max` sweeps signed by
   the user's derived key, wrong destination `403`, unknown user `404`, `CN=chain-watcher` refused.
+
+## Metrics
+
+`GET /metrics` on its own internal port (`METRICS_PORT`, default 9100). sweeper has no database ("keeps no state"), so these are **process
+metrics that restart with it** (fine: in-flight work is short-lived and a restart re-consumes Kafka): `digiwal_sweeper_inflight{kind}` and
+`..._inflight_oldest_age_seconds{kind}` (`gas_topup`, `sweep`; the age is read at scrape time), `digiwal_sweeper_completion_seconds{kind}` (sent to
+mined, successful ones only), `digiwal_sweeper_fee_bumps_total{kind}`, `digiwal_sweeper_alerts_total{kind}` (`bump_exhausted`, `bump_refused`,
+`cancelled_by_operator`, `gas_fee_report_failed`) and `digiwal_sweeper_events_abandoned_total` (records given up on; funds stay at the user address).
+They come from `sweep.Observer`, a hook that only receives facts. See `pkg/metrics`.

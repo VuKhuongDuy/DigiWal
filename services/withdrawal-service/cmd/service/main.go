@@ -22,10 +22,12 @@ import (
 	"syscall"
 	"time"
 
+	"digiwal/pkg/metrics"
 	"digiwal/services/withdrawal-service/internal/api"
 	"digiwal/services/withdrawal-service/internal/authz"
 	"digiwal/services/withdrawal-service/internal/chain"
 	"digiwal/services/withdrawal-service/internal/ledger"
+	"digiwal/services/withdrawal-service/internal/obs"
 	"digiwal/services/withdrawal-service/internal/pipeline"
 	"digiwal/services/withdrawal-service/internal/publisher"
 	"digiwal/services/withdrawal-service/internal/registry"
@@ -52,6 +54,13 @@ func main() {
 		log.Fatal(err)
 	}
 	defer st.Close()
+
+	// Metrics (monitoring-dashboard.md decision (d)): one registry, created first so the store can report each status
+	// change's duration from the very first request. The API listeners are measured and never serve it.
+	reg := metrics.NewRegistry()
+	st.ObserveStages(obs.Stages(reg))
+	httpm := metrics.NewHTTP(reg, "withdrawal-service")
+	loops := obs.NewReaper(reg) // what the Reaper and the pipeline do
 
 	// Fail startup on a bad registry or screening list rather than validate against a half one.
 	assets, err := registry.Load(requireEnv("ASSETS_FILE"))
@@ -109,35 +118,50 @@ func main() {
 		// voids the key.
 		Recheck: validator.Recheck, Voider: walletClient,
 		// Nonce Gap detection (task 3.4): confirmed txs of the last NONCE_GAP_WINDOW blocks are re-checked.
-		Gaps: &pipeline.GapWatch{Store: st, Reporter: walletClient, Window: envInt("NONCE_GAP_WINDOW", 256)}}
+		Gaps:     &pipeline.GapWatch{Store: st, Reporter: walletClient, Window: envInt("NONCE_GAP_WINDOW", 256)},
+		Observer: loops}
 	go pipe.Run(ctx, envDuration("POLL_INTERVAL", 3*time.Second))
 	log.Printf("withdrawal pipeline running: chain %d, confirmation depth %d", system.ChainID, pipe.ConfirmationDepth)
 
 	// The Reaper (task 3.9, invariant #17). Decided (Tech Lead): 5 minutes, 5 minutes, 128 blocks.
 	// A stuck `reserved` row is Released only once wallet-service has voided its key (task 3.13,
 	// invariant #22); if the void fails it is ALERTed and retried.
+	// One definition of "stuck": the same values build the Reaper and the metrics (monitoring-dashboard.md invariant 2).
+	stuck := store.StuckThresholds{Request: envDuration("STUCK_REQUEST_TIMEOUT", 5*time.Minute),
+		Reservation: envDuration("STUCK_RESERVATION_TIMEOUT", 5*time.Minute), BroadcastBlocks: envInt("STUCK_BROADCAST_BLOCKS", 128)}
 	reaper := &pipeline.Reaper{Store: st, Ledger: ledgerClient, Chain: rpc, ChainID: system.ChainID,
 		Voider: walletClient, Fillers: walletClient, Recheck: validator.Recheck,
-		StuckRequestTimeout:     envDuration("STUCK_REQUEST_TIMEOUT", 5*time.Minute),
-		StuckReservationTimeout: envDuration("STUCK_RESERVATION_TIMEOUT", 5*time.Minute),
-		StuckBroadcastBlocks:    envInt("STUCK_BROADCAST_BLOCKS", 128)}
+		StuckRequestTimeout:     stuck.Request,
+		StuckReservationTimeout: stuck.Reservation,
+		StuckBroadcastBlocks:    stuck.BroadcastBlocks, Observer: loops}
 	go reaper.Run(ctx, envDuration("REAPER_INTERVAL", 30*time.Second))
 	log.Printf("withdrawal reaper running: requested %s, reserved %s, broadcast %d blocks",
 		reaper.StuckRequestTimeout, reaper.StuckReservationTimeout, reaper.StuckBroadcastBlocks)
+
+	// The collectors, and the metrics on their own internal port.
+	reg.MustRegister(metrics.PoolCollector("withdrawal-service", func() metrics.PoolStat { return metrics.PoolFromPgx(st.PoolStat()) }), obs.Collector(st, assets, stuck), obs.BroadcastCollector(st, rpc, stuck.BroadcastBlocks),
+		obs.Limits(assets), obs.WalletCollector(rpc, assets, obs.Wallets{Hot: system.Hot, Warm: system.Warm, Cold: system.Cold}))
+	go func() {
+		addr := ":" + envOr("METRICS_PORT", metrics.DefaultPort)
+		log.Printf("metrics on %s", addr)
+		if err := metrics.Serve(ctx, addr, reg); err != nil {
+			log.Printf("metrics listener: %v", err)
+		}
+	}()
 
 	tlsCfg, err := authz.ServerTLSConfig(requireEnv("TLS_CERT_FILE"), requireEnv("TLS_KEY_FILE"), requireEnv("TLS_CA_FILE"))
 	if err != nil {
 		log.Fatalf("configuring mTLS: %v", err)
 	}
 	mtlsPort := envOr("MTLS_PORT", "8443")
-	srv := &http.Server{Addr: ":" + mtlsPort, Handler: server.MTLSRoutes(), TLSConfig: tlsCfg}
+	srv := &http.Server{Addr: ":" + mtlsPort, Handler: httpm.Wrap(server.MTLSRoutes()), TLSConfig: tlsCfg}
 	go func() {
 		log.Printf("withdrawal-service mTLS listening on :%s", mtlsPort)
 		log.Fatal(srv.ListenAndServeTLS("", ""))
 	}()
 
 	port := envOr("PORT", "8080")
-	plain := &http.Server{Addr: ":" + port, Handler: server.Routes()}
+	plain := &http.Server{Addr: ":" + port, Handler: httpm.Wrap(server.Routes())}
 	go func() {
 		<-ctx.Done()
 		_ = plain.Shutdown(context.Background())

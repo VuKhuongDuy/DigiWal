@@ -1,7 +1,7 @@
 # docker-compose.yml pulls in ../../infra/docker-compose.yml via `include:` — don't also pass it with -f.
 COMPOSE = docker compose
 
-.PHONY: up down logs test contract roles certs
+.PHONY: up down logs test contract roles certs grafana-role
 
 # Issues the auditor's leaf cert (CN=auditor; wallet-service admits it on system-addresses only) and
 # wallet-service's, plus the CA once.
@@ -45,3 +45,8 @@ roles:
 	$(PSQL) -d chain_watcher < roles/chain_watcher.sql
 	$(PSQL) -d api_gateway < roles/api_gateway.sql
 	@echo "MongoDB: mongosh -u custody -p custody --authenticationDatabase admin < roles/mongo.js"
+
+# Grafana's read-only login on the auditor's own database (the Engineering dashboard's detail tables). The auditor
+# must have started once, so its tables exist.
+grafana-role:
+	$(PSQL) -d auditor < roles/grafana.sql

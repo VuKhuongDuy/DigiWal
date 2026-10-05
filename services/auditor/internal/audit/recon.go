@@ -154,7 +154,7 @@ func (a *Reconciliation) Run(ctx context.Context) (job.Outcome, error) {
 		}
 		if err := a.Store.AddSnapshot(ctx, store.Snapshot{RunID: runID, AssetID: as.ID, Symbol: as.Symbol, Block: block,
 			OnChain: comp(in.OnChain), LedgerCustody: res.LedgerCustody.String(), Explained: res.Explained.String(), Residual: res.Residual.String(), Tolerance: comp(in.Tolerance),
-			Components: map[string]string{"hot": comp(in.HotOnChain), "user_balances": comp(in.UserTotal), "active_locks": comp(in.ActiveLocks),
+			Components: map[string]string{"decimals": fmt.Sprint(as.Decimals), "hot": comp(in.HotOnChain), "user_balances": comp(in.UserTotal), "active_locks": comp(in.ActiveLocks),
 				"observed": comp(in.ObservedUpToB), "credited": comp(in.Credited), "flagged_held": comp(in.FlaggedHeld),
 				"unsettled_withdrawals": comp(in.UnsettledWithdrawn), "unposted_gas": comp(in.UnpostedGas), "capital": comp(in.Capital)},
 			At: now}); err != nil {

@@ -2,6 +2,7 @@
 #   docker build -f services/auditor/Dockerfile .
 FROM golang:1.26-alpine AS build
 WORKDIR /src
+COPY pkg/metrics pkg/metrics
 COPY services/auditor/go.mod services/auditor/go.sum services/auditor/
 WORKDIR /src/services/auditor
 RUN go mod download

@@ -27,6 +27,23 @@ func serve(t *testing.T, h http.HandlerFunc) *Client {
 	return &Client{BaseURL: srv.URL + "/", HTTP: srv.Client()}
 }
 
+// Cold is optional: absent means no Cold Wallet is declared, and the answer parses as before.
+func TestSystemAddressesWithAndWithoutCold(t *testing.T) {
+	cold := common.HexToAddress("0x70997970C51812dc3A010C7d01b50e0d17dc79C8")
+	c := serve(t, func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"chain_id":31337,"cold":"` + cold.Hex() + `","hot":"` + hot.Hex() + `","warm":"` + warm.Hex() + `"}`))
+	})
+	if got, err := c.SystemAddresses(context.Background()); err != nil || got.Cold != cold || got.Hot != hot || got.Warm != warm {
+		t.Fatalf("with cold: %+v, %v", got, err)
+	}
+	c = serve(t, func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"chain_id":31337,"hot":"` + hot.Hex() + `","warm":"` + warm.Hex() + `"}`))
+	})
+	if got, err := c.SystemAddresses(context.Background()); err != nil || got.Cold != (common.Address{}) {
+		t.Fatalf("without cold: %+v, %v", got, err)
+	}
+}
+
 func TestSystemAddresses(t *testing.T) {
 	c := serve(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/wallet/system-addresses" {
@@ -48,6 +65,9 @@ func TestSystemAddresses(t *testing.T) {
 		"garbage":         {200, `{"hot":"nope","warm":"nope"}`},
 		"zero warm":       {200, `{"hot":"` + hot.Hex() + `","warm":"0x0000000000000000000000000000000000000000"}`},
 		"hot equals warm": {200, `{"hot":"` + hot.Hex() + `","warm":"` + hot.Hex() + `"}`},
+		"bad cold":        {200, `{"hot":"` + hot.Hex() + `","warm":"` + warm.Hex() + `","cold":"0x12"}`},
+		"zero cold":       {200, `{"hot":"` + hot.Hex() + `","warm":"` + warm.Hex() + `","cold":"0x0000000000000000000000000000000000000000"}`},
+		"cold equals hot": {200, `{"hot":"` + hot.Hex() + `","warm":"` + warm.Hex() + `","cold":"` + hot.Hex() + `"}`},
 	} {
 		c := serve(t, func(w http.ResponseWriter, _ *http.Request) {
 			w.WriteHeader(resp.code)

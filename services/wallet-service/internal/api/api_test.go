@@ -5,8 +5,10 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"digiwal/pkg/metrics"
 	"encoding/json"
 	"errors"
+	"github.com/prometheus/client_golang/prometheus"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -363,5 +365,44 @@ func TestNonceGap(t *testing.T) {
 		if rec.Code != 405 {
 			t.Errorf("%s: %d, want 405", m, rec.Code)
 		}
+	}
+}
+
+// The signing service exports only operational numbers, on its own internal port. Neither API listener serves
+// /metrics, and the mTLS routes are measured under their own patterns (never a raw path, never a key).
+func TestMetricsAreNotOnTheAPIListenersAndRoutesAreLabelled(t *testing.T) {
+	srv := (&Server{hotSigner: &fakeHot{}}).WithSystemAddresses(SystemAddresses{
+		ChainID: 31337,
+		Hot:     common.HexToAddress("0x3d0290A916B57AE48a2840E7d3547fA317F976c3"),
+		Warm:    common.HexToAddress("0xa0Ee7A142d267C1f36714E4a8F75612F20a79720"),
+	})
+	reg := prometheus.NewRegistry()
+	httpm := metrics.NewHTTP(reg, "wallet-service")
+	mtls, plain := httpm.Wrap(srv.MTLSRoutes()), httpm.Wrap(srv.Routes())
+
+	for _, h := range []http.Handler{mtls, plain} {
+		for _, cn := range []string{"", "auditor", "withdrawal-service"} {
+			req := httptest.NewRequest("GET", "/metrics", nil)
+			if cn != "" {
+				req = withPeer(req, cn)
+			}
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+			if rec.Code == 200 || strings.Contains(rec.Body.String(), "go_goroutines") {
+				t.Errorf("CN=%q: /metrics answered %d on an API listener", cn, rec.Code)
+			}
+		}
+	}
+	mtls.ServeHTTP(httptest.NewRecorder(), withPeer(httptest.NewRequest("GET", "/v1/wallet/system-addresses", nil), "auditor"))
+	mtls.ServeHTTP(httptest.NewRecorder(), withPeer(httptest.NewRequest("GET", "/v1/sign/hot-wallet/withdrawal:secret-key-1", nil), "withdrawal-service"))
+
+	rec := httptest.NewRecorder()
+	metrics.Handler(reg).ServeHTTP(rec, httptest.NewRequest("GET", "/metrics", nil))
+	out := rec.Body.String()
+	if !strings.Contains(out, `route="GET /v1/wallet/system-addresses",service="wallet-service"} 1`) {
+		t.Errorf("an mTLS route should be labelled with its pattern:\n%s", out)
+	}
+	if strings.Contains(out, "secret-key-1") || strings.Contains(out, "withdrawal:") {
+		t.Errorf("an idempotency key leaked into a label:\n%s", out)
 	}
 }

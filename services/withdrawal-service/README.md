@@ -233,3 +233,36 @@ make test               # store tests on a real Postgres (testcontainers or TEST
   The automated e2e test is task 3.8.
 - `internal/authz` is a copy of wallet-service's, as in ledger-service (a shared package needs a
   repo-root Docker build context).
+
+## Metrics
+
+`GET /metrics` on its own internal port (`METRICS_PORT`, default 9100; never on the API listeners). Scrape-time
+collectors over this service's own database (`digiwal_collector_up{collector}` 0 and no series if a read fails):
+`digiwal_withdrawals_total{status}` (requested / confirmed / failed / rejected, ever), `digiwal_withdrawal_amount_total{asset}`
+(confirmed, whole units, display only), `digiwal_withdrawal_failures_total{status,reason}` (a closed set of reasons, anything
+else is `other`), `digiwal_withdrawal_processing_seconds_sum` / `..._chain_wait_seconds_sum` / `..._timed_total` (our time vs
+waiting for the chain: divide the rates for an average), `digiwal_withdrawal_requests{status}`, `digiwal_withdrawal_stuck{status}`,
+`digiwal_withdrawal_oldest_age_seconds{status}`, `digiwal_nonce_gaps{state}`, `digiwal_whitelist_blocked`.
+"Stuck" uses the very thresholds the Reaper is built with (`STUCK_REQUEST_TIMEOUT`, `STUCK_RESERVATION_TIMEOUT`,
+`STUCK_BROADCAST_BLOCKS`), and a test compares it with the Reaper's own query at the boundary. `broadcast` stuck needs the chain
+head, so it is a separate collector: an RPC failure drops that one series only. See `pkg/metrics`.
+
+**Treasury balances.** `digiwal_wallet_balance{wallet,asset}` (hot / warm / cold, whole asset units, **on-chain**: read from the
+RPC at scrape time, cached 10s) with `digiwal_wallet_balance_read_timestamp_seconds`. The Hot and Warm addresses come from
+wallet-service as before; Cold is added if `infra/treasury.yaml` declares one (it restricts nothing), else there is no cold
+series. One balance that cannot be read (say a token contract not deployed on this chain) is one missing series, not a zero:
+the others are still served and `digiwal_collector_up{collector="wallets"}` is 0. Not done here: Hot Floor/Ceiling gauges,
+because this service's Asset Registry does not carry them yet (the Engineering dashboard needs them).
+
+**Performance metrics.** Both API listeners are measured server-side: `digiwal_http_request_duration_seconds{service="withdrawal-service",route,code}`
+(route = the ServeMux pattern, never the raw path) and the database pool's saturation, `digiwal_db_pool_*` (see `pkg/metrics`).
+`digiwal_withdrawal_stage_duration_seconds{stage}` is the time a request spent in a status before leaving it (`requested_to_validated`,
+`reserved_to_signed`, `signed_to_broadcast`, `broadcast_to_confirmed`, `..._to_failed`), observed after each committed change; it restarts
+with the process. `digiwal_outbox_unpublished` and `digiwal_outbox_oldest_unpublished_age_seconds` show whether Kafka publishing is behind.
+
+**Reaper and ALERTs.** `digiwal_reaper_actions_total{rule}` (stuck requests the Reaper failed: `stale_request`, `stale_reservation`,
+`replaced_or_dropped`), `digiwal_withdrawal_alerts_total{kind}` (ALERTs actually emitted after de-duplication, from the Reaper and the
+pipeline: `signed-stuck`, `broadcast-stuck`, `bump-ceiling`, ...) and `digiwal_reaper_last_pass_timestamp_seconds` (absent until the first
+pass; a `ReaperDead` alert fires when it stops advancing). They come from `pipeline.Observer`, a hook that can only receive facts. In-process, so they
+restart with the service. `digiwal_hot_wallet_floor` / `..._ceiling{asset}` are the Asset Registry's `hot_floor` / `hot_ceiling` (read at startup;
+an edit needs a restart); they are display and alerting only and never affect a withdrawal.

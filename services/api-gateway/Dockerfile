@@ -1,8 +1,12 @@
+# Build context is the REPO ROOT (it needs pkg/metrics):
+#   docker build -f services/api-gateway/Dockerfile .
 FROM golang:1.26-alpine AS build
 WORKDIR /src
-COPY go.mod go.sum ./
+COPY pkg/metrics pkg/metrics
+COPY services/api-gateway/go.mod services/api-gateway/go.sum services/api-gateway/
+WORKDIR /src/services/api-gateway
 RUN go mod download
-COPY . .
+COPY services/api-gateway/ .
 RUN CGO_ENABLED=0 go build -o /out/service ./cmd/service
 
 FROM alpine:3.20

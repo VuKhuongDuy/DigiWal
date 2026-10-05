@@ -1,0 +1,465 @@
+# promtool test rules alerts_test.yml  (infra/prometheus/check.sh)
+# Each alert fires when it should, stays quiet when it should not, and renders the text an operator will read.
+rule_files:
+- alerts.yml
+evaluation_interval: 1m
+tests:
+- interval: 1m
+  input_series:
+  - series: digiwal_suspicious_open{flow="withdrawal",rule="W1",severity="critical"}
+    values: 0 0 1 1 1
+  - series: digiwal_suspicious_open{flow="deposit",rule="D6",severity="warn"}
+    values: 5 5 5 5 5
+  alert_rule_test:
+  - eval_time: 1m
+    alertname: SuspiciousOpen
+    exp_alerts: []
+  - eval_time: 4m
+    alertname: SuspiciousOpen
+    exp_alerts:
+    - exp_labels:
+        severity: critical
+      exp_annotations:
+        summary: 1 critical suspicious transaction(s) open
+        description: The auditor holds critical findings nobody has resolved or acknowledged. Open Engineering > Auditor for the detail.
+- interval: 1m
+  input_series:
+  - series: digiwal_suspicious_open{flow="deposit",rule="D6",severity="warn"}
+    values: 3 3 3 3
+  alert_rule_test:
+  - eval_time: 3m
+    alertname: SuspiciousOpen
+    exp_alerts: []
+- interval: 1m
+  input_series:
+  - series: digiwal_job_last_result{job="ledger_integrity",result="fail"}
+    values: 0 1 1
+  - series: digiwal_job_last_result{job="ledger_integrity",result="ok"}
+    values: 1 0 0
+  alert_rule_test:
+  - eval_time: 0m
+    alertname: JobFailed
+    exp_alerts: []
+  - eval_time: 2m
+    alertname: JobFailed
+    exp_alerts:
+    - exp_labels:
+        severity: critical
+        job: ledger_integrity
+        result: fail
+      exp_annotations:
+        summary: Audit job ledger_integrity found a critical problem
+        description: The last run of ledger_integrity ended in fail (a critical finding is open).
+- interval: 1m
+  input_series:
+  - series: digiwal_job_last_result{job="reconciliation",result="error"}
+    values: 1 1 1 1 1 1 1 1 1 1 1 1 1
+  alert_rule_test:
+  - eval_time: 5m
+    alertname: JobError
+    exp_alerts: []
+  - eval_time: 12m
+    alertname: JobError
+    exp_alerts:
+    - exp_labels:
+        severity: warning
+        job: reconciliation
+        result: error
+      exp_annotations:
+        summary: Audit job reconciliation cannot complete
+        description: 'The last runs of reconciliation ended in error (RPC or a store down?). An error is never a pass: this job is not checking anything.'
+- interval: 1m
+  input_series:
+  - series: digiwal_job_last_result{job="reconciliation",result="error"}
+    values: 1 1 1 1 1 1 0 0 0 0 0 0 0
+  alert_rule_test:
+  - eval_time: 12m
+    alertname: JobError
+    exp_alerts: []
+- interval: 1m
+  input_series:
+  - series: digiwal_job_last_run_timestamp_seconds{job="stale"}
+    values: 0+0x30
+  - series: digiwal_job_interval_seconds{job="stale"}
+    values: 300+0x30
+  - series: digiwal_job_last_run_timestamp_seconds{job="alive"}
+    values: 0+60x30
+  - series: digiwal_job_interval_seconds{job="alive"}
+    values: 300+0x30
+  alert_rule_test:
+  - eval_time: 10m
+    alertname: JobStale
+    exp_alerts: []
+  - eval_time: 20m
+    alertname: JobStale
+    exp_alerts:
+    - exp_labels:
+        severity: warning
+        job: stale
+      exp_annotations:
+        summary: Audit job stale has not run for 3 intervals
+        description: No run of stale has finished for more than 3 intervals. The auditor may be down or stuck.
+- interval: 1m
+  input_series:
+  - series: digiwal_job_interval_seconds{job="never"}
+    values: 300+0x30
+  - series: digiwal_job_interval_seconds{job="ran"}
+    values: 300+0x30
+  - series: digiwal_job_last_run_timestamp_seconds{job="ran"}
+    values: 0+60x30
+  alert_rule_test:
+  - eval_time: 10m
+    alertname: JobNeverRan
+    exp_alerts: []
+  - eval_time: 20m
+    alertname: JobNeverRan
+    exp_alerts:
+    - exp_labels:
+        severity: warning
+        job: never
+      exp_annotations:
+        summary: Audit job never never completed a run
+        description: never is registered but has no finished run on record.
+- interval: 1m
+  input_series:
+  - series: digiwal_wallet_balance{wallet="hot",asset="ETH"}
+    values: 10+0x10
+  - series: digiwal_hot_wallet_floor{asset="ETH"}
+    values: 30+0x10
+  - series: digiwal_wallet_balance{wallet="hot",asset="TKN"}
+    values: 500+0x10
+  - series: digiwal_hot_wallet_floor{asset="TKN"}
+    values: 100+0x10
+  - series: digiwal_wallet_balance{wallet="hot",asset="NOLIMIT"}
+    values: 1+0x10
+  - series: digiwal_wallet_balance{wallet="warm",asset="ETH"}
+    values: 1+0x10
+  alert_rule_test:
+  - eval_time: 1m
+    alertname: HotWalletBelowFloor
+    exp_alerts: []
+  - eval_time: 3m
+    alertname: HotWalletBelowFloor
+    exp_alerts:
+    - exp_labels:
+        severity: warning
+        asset: ETH
+      exp_annotations:
+        summary: Hot wallet ETH is below its Floor
+        description: Withdrawals may soon not be payable from Hot. Move funds from Warm (wallet-tiering.md invariant 4).
+- interval: 1m
+  input_series:
+  - series: digiwal_wallet_balance{wallet="hot",asset="ETH"}
+    values: 200+0x20
+  - series: digiwal_hot_wallet_ceiling{asset="ETH"}
+    values: 120+0x20
+  alert_rule_test:
+  - eval_time: 5m
+    alertname: HotWalletAboveCeiling
+    exp_alerts: []
+  - eval_time: 11m
+    alertname: HotWalletAboveCeiling
+    exp_alerts:
+    - exp_labels:
+        severity: warning
+        asset: ETH
+      exp_annotations:
+        summary: Hot wallet ETH is above its Ceiling
+        description: A Treasury Sweep should have moved the excess to Warm.
+- interval: 1m
+  input_series:
+  - series: digiwal_hot_wallet_frozen{chain_id="31337"}
+    values: 0 0 1 1
+  - series: digiwal_hot_wallet_frozen{chain_id="1"}
+    values: 0 0 0 0
+  alert_rule_test:
+  - eval_time: 1m
+    alertname: HotWalletFrozen
+    exp_alerts: []
+  - eval_time: 3m
+    alertname: HotWalletFrozen
+    exp_alerts:
+    - exp_labels:
+        severity: critical
+        chain_id: '31337'
+      exp_annotations:
+        summary: Hot Wallet signing is frozen on chain 31337 (Nonce Gap)
+        description: wallet-service signs nothing new until an operator resolves the gap.
+- interval: 1m
+  input_series:
+  - series: digiwal_nonce_gaps{state="unreported"}
+    values: 0 1 1 1 1
+  - series: digiwal_nonce_gaps{state="total"}
+    values: 4 4 4 4 4
+  alert_rule_test:
+  - eval_time: 2m
+    alertname: NonceGapUnreported
+    exp_alerts: []
+  - eval_time: 4m
+    alertname: NonceGapUnreported
+    exp_alerts:
+    - exp_labels:
+        severity: critical
+        state: unreported
+      exp_annotations:
+        summary: A Nonce Gap was detected but wallet-service has not been told
+        description: withdrawal-service cannot report the gap, so Hot Wallet signing is not frozen. Check the call to wallet-service.
+- interval: 1m
+  input_series:
+  - series: digiwal_withdrawal_stuck{status="reserved"}
+    values: 0 1 1 1
+  - series: digiwal_withdrawal_stuck{status="requested"}
+    values: 5 5 5 5
+  alert_rule_test:
+  - eval_time: 1m
+    alertname: WithdrawalStuck
+    exp_alerts: []
+  - eval_time: 3m
+    alertname: WithdrawalStuck
+    exp_alerts:
+    - exp_labels:
+        severity: warning
+        status: reserved
+      exp_annotations:
+        summary: Withdrawals are stuck in reserved
+        description: 1 withdrawal(s) past the Reaper's timeout, or disputed. These need an operator.
+- interval: 1m
+  input_series:
+  - series: digiwal_withdrawal_requests{status="disputed"}
+    values: 0 2 2 2
+  alert_rule_test:
+  - eval_time: 3m
+    alertname: WithdrawalStuck
+    exp_alerts:
+    - exp_labels:
+        severity: warning
+        status: disputed
+      exp_annotations:
+        summary: Withdrawals are stuck in disputed
+        description: 2 withdrawal(s) past the Reaper's timeout, or disputed. These need an operator.
+- interval: 1m
+  input_series:
+  - series: digiwal_withdrawal_alerts_total{kind="signed-stuck"}
+    values: 0 0 0 1 1 1 1 1 1 1 1 1 1 1 1 1
+  - series: digiwal_withdrawal_alerts_total{kind="bump-limit"}
+    values: 2+0x15
+  alert_rule_test:
+  - eval_time: 2m
+    alertname: WithdrawalAlert
+    exp_alerts: []
+  - eval_time: 4m
+    alertname: WithdrawalAlert
+    exp_alerts:
+    - exp_labels:
+        severity: warning
+        kind: signed-stuck
+      exp_annotations:
+        summary: withdrawal-service raised an ALERT (signed-stuck)
+        description: See the withdrawal-service log line starting with ALERT:.
+  - eval_time: 20m
+    alertname: WithdrawalAlert
+    exp_alerts: []
+- interval: 1m
+  input_series:
+  - series: digiwal_reaper_last_pass_timestamp_seconds{}
+    values: 0+0x10
+  alert_rule_test:
+  - eval_time: 1m
+    alertname: ReaperDead
+    exp_alerts: []
+  - eval_time: 3m
+    alertname: ReaperDead
+    exp_alerts:
+    - exp_labels:
+        severity: critical
+      exp_annotations:
+        summary: The withdrawal Reaper has not completed a pass for over 2.5 minutes
+        description: Stuck requests are not being reclaimed.
+- interval: 1m
+  input_series:
+  - series: digiwal_reaper_last_pass_timestamp_seconds{}
+    values: 0+60x10
+  alert_rule_test:
+  - eval_time: 8m
+    alertname: ReaperDead
+    exp_alerts: []
+- interval: 1m
+  input_series:
+  - series: digiwal_outbox_oldest_unpublished_age_seconds{}
+    values: 5 45 45 45 45
+  alert_rule_test:
+  - eval_time: 2m
+    alertname: OutboxBacklog
+    exp_alerts: []
+  - eval_time: 4m
+    alertname: OutboxBacklog
+    exp_alerts:
+    - exp_labels:
+        severity: warning
+      exp_annotations:
+        summary: withdrawal events are waiting to be published (oldest 45s)
+        description: Kafka or the publisher is behind; history-service and ledger-service see events late.
+- interval: 1m
+  input_series:
+  - series: digiwal_chain_head_block{chain_id="31337"}
+    values: 1000+0x20
+  - series: digiwal_chainwatcher_watermark_block{chain_id="31337"}
+    values: 900+0x20
+  - series: digiwal_chainwatcher_confirmation_depth{chain_id="31337"}
+    values: 2+0x20
+  - series: digiwal_chain_head_block{chain_id="1"}
+    values: 1000+0x20
+  - series: digiwal_chainwatcher_watermark_block{chain_id="1"}
+    values: 980+0x20
+  - series: digiwal_chainwatcher_confirmation_depth{chain_id="1"}
+    values: 2+0x20
+  alert_rule_test:
+  - eval_time: 3m
+    alertname: ChainWatcherLag
+    exp_alerts: []
+  - eval_time: 6m
+    alertname: ChainWatcherLag
+    exp_alerts:
+    - exp_labels:
+        severity: warning
+        chain_id: '31337'
+      exp_annotations:
+        summary: chain-watcher is 100 blocks behind the head on chain 31337
+        description: The expected lag is the confirmation depth plus 20 blocks of margin (initial).
+- interval: 1m
+  input_series:
+  - series: digiwal_sweeper_alerts_total{kind="bump_refused"}
+    values: 0 0 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1
+  - series: digiwal_sweeper_alerts_total{kind="bump_exhausted"}
+    values: 0+0x24
+  alert_rule_test:
+  - eval_time: 1m
+    alertname: SweeperAlert
+    exp_alerts: []
+  - eval_time: 3m
+    alertname: SweeperAlert
+    exp_alerts:
+    - exp_labels:
+        severity: warning
+        kind: bump_refused
+      exp_annotations:
+        summary: sweeper raised an ALERT (bump_refused)
+        description: A Fee Bump gave up, wallet-service refused one, an operator cancelled a top-up, or a Gas Fee could not be recorded.
+  - eval_time: 20m
+    alertname: SweeperAlert
+    exp_alerts: []
+- interval: 1m
+  input_series:
+  - series: up{service="sweeper",instance="sweeper:9100",job="digiwal"}
+    values: 1 0 0 0 0
+  - series: up{service="ledger-service",instance="ledger-service:9100",job="digiwal"}
+    values: 1 1 1 1 1
+  alert_rule_test:
+  - eval_time: 2m
+    alertname: TargetDown
+    exp_alerts: []
+  - eval_time: 4m
+    alertname: TargetDown
+    exp_alerts:
+    - exp_labels:
+        severity: warning
+        service: sweeper
+        instance: sweeper:9100
+        job: digiwal
+      exp_annotations:
+        summary: sweeper (sweeper:9100) is not being scraped
+        description: The service is down or its metrics port is unreachable.
+- interval: 1m
+  input_series:
+  - series: digiwal_collector_up{collector="wallets"}
+    values: 1 0 0 0 0
+  - series: digiwal_collector_up{collector="auditor"}
+    values: 1 1 1 1 1
+  alert_rule_test:
+  - eval_time: 2m
+    alertname: CollectorDown
+    exp_alerts: []
+  - eval_time: 4m
+    alertname: CollectorDown
+    exp_alerts:
+    - exp_labels:
+        severity: warning
+        collector: wallets
+      exp_annotations:
+        summary: wallets cannot read what it reports
+        description: Its database or RPC read is failing, so its series are missing (not zero).
+- interval: 1m
+  input_series:
+  - series: digiwal_http_request_duration_seconds_count{service="ledger-service",route="POST /x",code="500"}
+    values: 0+2x20
+  - series: digiwal_http_request_duration_seconds_count{service="ledger-service",route="POST /x",code="200"}
+    values: 0+98x20
+  - series: digiwal_http_request_duration_seconds_count{service="api-gateway",route="GET /y",code="200"}
+    values: 0+100x20
+  alert_rule_test:
+  - eval_time: 4m
+    alertname: HTTPServerErrors
+    exp_alerts: []
+  - eval_time: 12m
+    alertname: HTTPServerErrors
+    exp_alerts:
+    - exp_labels:
+        severity: warning
+        service: ledger-service
+      exp_annotations:
+        summary: 'ledger-service: more than 0.1% of requests fail with a 5xx'
+        description: 'Objective: 5xx rate below 0.1%.'
+- interval: 1m
+  input_series:
+  - series: digiwal_http_request_duration_seconds_bucket{service="wallet-service",route="POST /sign",code="200",le="1"}
+    values: 0+0x20
+  - series: digiwal_http_request_duration_seconds_bucket{service="wallet-service",route="POST /sign",code="200",le="5"}
+    values: 0+60x20
+  - series: digiwal_http_request_duration_seconds_bucket{service="wallet-service",route="POST /sign",code="200",le="+Inf"}
+    values: 0+60x20
+  - series: digiwal_http_request_duration_seconds_bucket{service="api-gateway",route="GET /healthz",code="200",le="1"}
+    values: 0+0x20
+  - series: digiwal_http_request_duration_seconds_bucket{service="api-gateway",route="GET /healthz",code="200",le="+Inf"}
+    values: 0+60x20
+  - series: digiwal_http_request_duration_seconds_bucket{service="ledger-service",route="GET /z",code="200",le="0.1"}
+    values: 0+60x20
+  - series: digiwal_http_request_duration_seconds_bucket{service="ledger-service",route="GET /z",code="200",le="+Inf"}
+    values: 0+60x20
+  alert_rule_test:
+  - eval_time: 4m
+    alertname: HTTPLatencyP99
+    exp_alerts: []
+  - eval_time: 12m
+    alertname: HTTPLatencyP99
+    exp_alerts:
+    - exp_labels:
+        severity: warning
+        service: wallet-service
+      exp_annotations:
+        summary: 'wallet-service: p99 latency over 2s'
+        description: 'Objective: p50 50ms, p95 200ms, p99 2s on every synchronous endpoint, server-side, health excluded.'
+- interval: 1m
+  input_series:
+  - series: digiwal_db_pool_connections{service="ledger-service",state="acquired"}
+    values: 9+0x20
+  - series: digiwal_db_pool_max_connections{service="ledger-service"}
+    values: 10+0x20
+  - series: digiwal_db_pool_connections{service="api-gateway",state="acquired"}
+    values: 3+0x20
+  - series: digiwal_db_pool_max_connections{service="api-gateway"}
+    values: 10+0x20
+  - series: digiwal_db_pool_connections{service="ledger-service",state="idle"}
+    values: 1+0x20
+  alert_rule_test:
+  - eval_time: 3m
+    alertname: DBPoolSaturated
+    exp_alerts: []
+  - eval_time: 8m
+    alertname: DBPoolSaturated
+    exp_alerts:
+    - exp_labels:
+        severity: warning
+        service: ledger-service
+      exp_annotations:
+        summary: 'ledger-service: database pool over 80% in use'
+        description: 'Objective: pool saturation below 80%.'

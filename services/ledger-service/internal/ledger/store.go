@@ -40,6 +40,9 @@ func Connect(ctx context.Context, dsn string) (*Store, error) {
 
 func (s *Store) Close() { s.pool.Close() }
 
+// PoolStat is the connection pool's state, for the saturation metrics.
+func (s *Store) PoolStat() *pgxpool.Stat { return s.pool.Stat() }
+
 // NewMigrator returns a golang-migrate instance over the embedded migrations.
 func NewMigrator(dsn string) (*migrate.Migrate, error) {
 	src, err := iofs.New(migrations.FS, ".")

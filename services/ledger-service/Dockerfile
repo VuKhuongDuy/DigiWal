@@ -1,8 +1,9 @@
-# Build context is the REPO ROOT (it needs pkg/events):
+# Build context is the REPO ROOT (it needs pkg/events and pkg/metrics):
 #   docker build -f services/ledger-service/Dockerfile .
 FROM golang:1.26-alpine AS build
 WORKDIR /src
 COPY pkg/events pkg/events
+COPY pkg/metrics pkg/metrics
 COPY services/ledger-service/go.mod services/ledger-service/go.sum services/ledger-service/
 WORKDIR /src/services/ledger-service
 RUN go mod download
