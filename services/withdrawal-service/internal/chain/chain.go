@@ -135,6 +135,20 @@ func (e *Eth) Balance(ctx context.Context, addr common.Address) (*big.Int, error
 	return e.c.BalanceAt(ctx, addr, nil)
 }
 
+// TokenBalance is the ERC-20 balance of addr at the latest block (balanceOf). A node that returns nothing means
+// there is no contract at that address: an error, never a silent zero.
+func (e *Eth) TokenBalance(ctx context.Context, token, addr common.Address) (*big.Int, error) {
+	data := append([]byte{0x70, 0xa0, 0x82, 0x31}, common.LeftPadBytes(addr.Bytes(), 32)...)
+	out, err := e.c.CallContract(ctx, ethereum.CallMsg{To: &token, Data: data}, nil)
+	if err != nil {
+		return nil, fmt.Errorf("balanceOf on %s: %w", token.Hex(), err)
+	}
+	if len(out) < 32 {
+		return nil, fmt.Errorf("balanceOf on %s returned %d bytes: no ERC-20 contract there?", token.Hex(), len(out))
+	}
+	return new(big.Int).SetBytes(out[:32]), nil
+}
+
 func (e *Eth) RevertReason(ctx context.Context, hash common.Hash, block int64) (string, error) {
 	tx, _, err := e.c.TransactionByHash(ctx, hash)
 	if err != nil {

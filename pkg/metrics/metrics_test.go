@@ -108,6 +108,36 @@ func TestFailureIsNotCached(t *testing.T) {
 	}
 }
 
+// One failed balance among several costs one series, not all of them.
+func TestPartialReadServesWhatItHasAndDropsUp(t *testing.T) {
+	calls := 0
+	c := NewCached("bal", time.Hour, time.Second, func(context.Context) ([]prometheus.Metric, error) {
+		calls++
+		if calls == 1 {
+			return []prometheus.Metric{Gauge(testDesc, 1, "ETH")}, Partial(errors.New("TKN: no contract"))
+		}
+		return []prometheus.Metric{Gauge(testDesc, 1, "ETH"), Gauge(testDesc, 2, "TKN")}, nil
+	})
+	r := prometheus.NewRegistry()
+	r.MustRegister(c)
+	out := scrape(t, r)
+	if !strings.Contains(out, `digiwal_test_things{asset="ETH"} 1`) || strings.Contains(out, `asset="TKN"`) || !strings.Contains(out, `up{collector="bal"} 0`) {
+		t.Fatalf("partial:\n%s", out)
+	}
+	// not cached: the next scrape retries, and recovers fully
+	out = scrape(t, r)
+	if !strings.Contains(out, `digiwal_test_things{asset="TKN"} 2`) || !strings.Contains(out, `up{collector="bal"} 1`) || calls != 2 {
+		t.Fatalf("recovery (calls %d):\n%s", calls, out)
+	}
+	// a hard failure after a partial one serves nothing
+	c2 := NewCached("bal2", 0, time.Second, func(context.Context) ([]prometheus.Metric, error) { return nil, errors.New("down") })
+	r2 := prometheus.NewRegistry()
+	r2.MustRegister(c2)
+	if out := scrape(t, r2); strings.Contains(out, "digiwal_test_things") || !strings.Contains(out, `up{collector="bal2"} 0`) {
+		t.Fatalf("\n%s", out)
+	}
+}
+
 func TestReadTimeout(t *testing.T) {
 	c := NewCached("slow", 0, 30*time.Millisecond, func(ctx context.Context) ([]prometheus.Metric, error) {
 		select {

@@ -99,6 +99,17 @@ func NewDesc(name, help string, labels ...string) *prometheus.Desc {
 // UpDesc is digiwal_collector_up{collector}: 1 if the collector's last read succeeded, else 0.
 var UpDesc = NewDesc("digiwal_collector_up", "1 if the scrape-time collector's last read succeeded, 0 if it failed (its series are then omitted).", "collector")
 
+// PartialError is what a Read returns, together with the samples it did manage to read, when only some of its reads
+// failed (one balance among many). The collector serves those samples, omits the rest, and reports
+// digiwal_collector_up 0; it does not cache the result, so the failed reads are retried on the next scrape.
+type PartialError struct{ Err error }
+
+func (p *PartialError) Error() string { return "partial read: " + p.Err.Error() }
+func (p *PartialError) Unwrap() error { return p.Err }
+
+// Partial wraps err as a PartialError.
+func Partial(err error) error { return &PartialError{Err: err} }
+
 // Read is what a scrape-time collector does: query its own store (or the RPC) and return the samples. It must
 // respect ctx: the collector gives it a deadline.
 type Read func(ctx context.Context) ([]prometheus.Metric, error)
@@ -117,6 +128,7 @@ type Cached struct {
 
 	mu      chan struct{} // 1-slot semaphore: one read at a time, scrapers wait for it
 	samples []prometheus.Metric
+	partial []prometheus.Metric // what a partially failed read did return
 	at      time.Time
 	ok      bool
 }
@@ -139,16 +151,25 @@ func (c *Cached) Collect(out chan<- prometheus.Metric) {
 		ctx, cancel := context.WithTimeout(context.Background(), c.timeout)
 		samples, err := c.read(ctx)
 		cancel()
-		if err != nil {
-			c.samples, c.ok = nil, false
-		} else {
-			c.samples, c.ok, c.at = samples, true, c.now()
+		var partial *PartialError
+		switch {
+		case err == nil:
+			c.samples, c.ok, c.at, c.partial = samples, true, c.now(), nil
+		case errors.As(err, &partial):
+			// serve what was read, but report the failure and read again next time
+			c.samples, c.ok, c.partial = samples, false, samples
+		default:
+			c.samples, c.ok, c.partial = nil, false, nil
 		}
 	}
 	up := 0.0
 	if c.ok {
 		up = 1
 		for _, m := range c.samples {
+			out <- m
+		}
+	} else {
+		for _, m := range c.partial {
 			out <- m
 		}
 	}

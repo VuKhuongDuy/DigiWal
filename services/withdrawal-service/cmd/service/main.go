@@ -132,7 +132,8 @@ func main() {
 
 	// Metrics on their own internal port (monitoring-dashboard.md decision (d)), never the API listeners.
 	reg := metrics.NewRegistry()
-	reg.MustRegister(obs.Collector(st, assets, stuck), obs.BroadcastCollector(st, rpc, stuck.BroadcastBlocks))
+	reg.MustRegister(obs.Collector(st, assets, stuck), obs.BroadcastCollector(st, rpc, stuck.BroadcastBlocks),
+		obs.WalletCollector(rpc, assets, obs.Wallets{Hot: system.Hot, Warm: system.Warm, Cold: system.Cold}))
 	go func() {
 		addr := ":" + envOr("METRICS_PORT", metrics.DefaultPort)
 		log.Printf("metrics on %s", addr)

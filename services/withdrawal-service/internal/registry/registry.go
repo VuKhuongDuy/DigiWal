@@ -9,6 +9,7 @@ import (
 	"math/big"
 	"os"
 	"regexp"
+	"sort"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -109,4 +110,19 @@ func New(assets ...Asset) *Registry {
 		r.byID[strings.ToLower(a.ID)] = a
 	}
 	return r
+}
+
+// All lists the registered assets, ordered by symbol then id.
+func (r *Registry) All() []Asset {
+	out := make([]Asset, 0, len(r.byID))
+	for _, a := range r.byID {
+		out = append(out, a)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Symbol != out[j].Symbol {
+			return out[i].Symbol < out[j].Symbol
+		}
+		return out[i].ID < out[j].ID
+	})
+	return out
 }

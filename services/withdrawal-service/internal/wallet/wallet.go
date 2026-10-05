@@ -44,11 +44,14 @@ func ClientTLSConfig(certFile, keyFile, caFile string) (*tls.Config, error) {
 	return &tls.Config{Certificates: []tls.Certificate{cert}, RootCAs: pool, MinVersion: tls.VersionTLS13}, nil
 }
 
-// SystemAddresses are the Hot and Warm Wallet addresses (GET /v1/wallet/system-addresses).
+// SystemAddresses are the Hot and Warm Wallet addresses, and the Cold Wallet's if the operator declared one
+// (GET /v1/wallet/system-addresses). Cold is the zero address when there is none. It is read for the balance
+// metrics only: withdrawals to Cold stay allowed (withdrawal-flow.md invariant #18).
 type SystemAddresses struct {
 	ChainID int64
 	Hot     common.Address
 	Warm    common.Address
+	Cold    common.Address
 }
 
 func (c *Client) get(ctx context.Context, path string) (int, []byte, error) {
@@ -88,11 +91,18 @@ func (c *Client) SystemAddresses(ctx context.Context) (SystemAddresses, error) {
 		ChainID int64  `json:"chain_id"`
 		Hot     string `json:"hot"`
 		Warm    string `json:"warm"`
+		Cold    string `json:"cold"`
 	}
-	if err := json.Unmarshal(body, &out); err != nil || !common.IsHexAddress(out.Hot) || !common.IsHexAddress(out.Warm) {
+	if err := json.Unmarshal(body, &out); err != nil || !common.IsHexAddress(out.Hot) || !common.IsHexAddress(out.Warm) || (out.Cold != "" && !common.IsHexAddress(out.Cold)) {
 		return SystemAddresses{}, fmt.Errorf("wallet-service returned unusable system addresses: %q", body)
 	}
 	a := SystemAddresses{ChainID: out.ChainID, Hot: common.HexToAddress(out.Hot), Warm: common.HexToAddress(out.Warm)}
+	if out.Cold != "" {
+		a.Cold = common.HexToAddress(out.Cold)
+		if a.Cold == (common.Address{}) || a.Cold == a.Hot || a.Cold == a.Warm {
+			return SystemAddresses{}, fmt.Errorf("wallet-service returned unusable system addresses: %q", body)
+		}
+	}
 	if a.Hot == (common.Address{}) || a.Warm == (common.Address{}) || a.Hot == a.Warm {
 		return SystemAddresses{}, fmt.Errorf("wallet-service returned unusable system addresses: %q", body)
 	}
