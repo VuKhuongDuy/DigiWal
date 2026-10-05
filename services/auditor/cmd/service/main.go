@@ -187,8 +187,8 @@ func audits(ctx context.Context, st *store.Store, rpc *ethclient.Client, chainID
 	}
 	if led != nil && wal != nil && cw != nil && h != nil {
 		jobs = append(jobs, &audit.DepositAudit{
-			Src:   &source.Deposits{Watcher: cw, Ledger: led, Wallet: wal, History: h, Chain: chain},
-			Store: st, ChainID: chainID, Every: every, Grace: grace, Escalate: escalate, StartBlock: start, Hot: hot,
+			Src:   &source.Deposits{Watcher: cw, Ledger: led, Wallet: wal, History: h, Chain: chain, Hot: hot},
+			Store: st, ChainID: chainID, Every: every, Grace: grace, Escalate: escalate, StartBlock: start,
 		})
 	} else {
 		skip("deposit_audit")

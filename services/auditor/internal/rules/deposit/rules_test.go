@@ -158,4 +158,15 @@ func TestD7(t *testing.T) {
 	expect(t, "reverted tx moved nothing", f)
 	f = Facts{Owner: "u1", Chain: OnChain{Found: true, Success: true, Amount: bi(0)}}
 	expect(t, "zero value", f)
+
+	// A Gas Top-Up: the Hot Wallet funds a deposit address with native coin. chain-watcher never counts it (#17).
+	hot := "0x00000000000000000000000000000000000000A1"
+	f = Facts{Owner: "u1", Hot: hot, Chain: OnChain{Found: true, Success: true, From: strings.ToLower(hot), To: addr, Amount: bi(500)}}
+	expect(t, "gas top-up from the Hot Wallet", f)
+	f.Chain.From = "0x00000000000000000000000000000000000000b2"
+	expect(t, "same transfer from a stranger", f, "D7")
+	f.Chain.From, f.Chain.Token = strings.ToLower(hot), "0xtoken"
+	expect(t, "a token transfer is not a top-up", f, "D7")
+	f.Chain.From, f.Chain.Token, f.Hot = strings.ToLower(hot), "", ""
+	expect(t, "Hot address unknown", f, "D7")
 }

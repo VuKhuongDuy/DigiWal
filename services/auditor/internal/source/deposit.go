@@ -20,6 +20,7 @@ type Deposits struct {
 	Watcher, Ledger, Wallet Querier
 	History                 HistoryReader
 	Chain                   DepositChain
+	Hot                     string // wallet-service's Hot Wallet address; its Gas Top-Ups are not deposits (D7)
 }
 
 // DepositKey is the reference of a deposit.
@@ -146,6 +147,7 @@ func (d *Deposits) Gather(ctx context.Context, ref string) (deposit.Facts, error
 			return f, err
 		}
 	}
+	f.Hot = d.Hot
 	f.History, err = d.history(ctx, "deposit:"+ref)
 	return f, err
 }

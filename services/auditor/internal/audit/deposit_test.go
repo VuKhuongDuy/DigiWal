@@ -215,7 +215,7 @@ func TestMissedByTheWatcher(t *testing.T) {
 func TestGasTopUpIsNotAMissedDeposit(t *testing.T) {
 	d := newDepEnv(t)
 	hot := "0x00000000000000000000000000000000000000a1"
-	d.job.Hot = hot
+	d.job.Src.Hot = hot
 	topUp := "0xdee0000000000000000000000000000000000000000000000000000000000003"
 	other := "0xdee0000000000000000000000000000000000000000000000000000000000004"
 	d.chain.cands[20] = []source.Candidate{

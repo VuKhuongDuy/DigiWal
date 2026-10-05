@@ -102,6 +102,9 @@ func (e EthChain) Transfer(ctx context.Context, txHash string, logIndex int64) (
 
 	if logIndex < 0 {
 		out.Found, out.Amount = true, new(big.Int).Set(tx.Value())
+		if f, ok := sender(tx); ok {
+			out.From = strings.ToLower(f.Hex())
+		}
 		if tx.To() != nil {
 			out.To = strings.ToLower(tx.To().Hex())
 		}
