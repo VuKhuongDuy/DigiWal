@@ -5,6 +5,7 @@ package api
 
 import (
 	"context"
+	"digiwal/pkg/metrics"
 	"encoding/json"
 	"errors"
 	"io"
@@ -67,7 +68,9 @@ func (s *Server) Routes() http.Handler {
 	root := http.NewServeMux()
 	root.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
 	root.HandleFunc("POST /users", s.handleCreateUser)
-	root.Handle("/", s.requireAuth(authed))
+	// ReportRoute: the authenticated routes sit in a mux nested behind requireAuth, which copies the request; this hands
+	// the matched pattern to the metrics wrapper outside, so per-route latency is not folded into "/".
+	root.Handle("/", s.requireAuth(metrics.ReportRoute(authed)))
 	return root
 }
 

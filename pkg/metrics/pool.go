@@ -45,3 +45,19 @@ func (c *poolCollector) Collect(out chan<- prometheus.Metric) {
 	out <- Counter(poolWaited, float64(s.EmptyAcquireCount), c.service)
 	out <- Counter(poolWait, s.AcquireDuration.Seconds(), c.service)
 }
+
+// PgxStat is the method set of pgxpool.Stat, so a service passes pool.Stat() without pkg/metrics importing pgx.
+type PgxStat interface {
+	MaxConns() int32
+	IdleConns() int32
+	AcquiredConns() int32
+	AcquireCount() int64
+	EmptyAcquireCount() int64
+	AcquireDuration() time.Duration
+}
+
+// PoolFromPgx converts a pgxpool.Stat.
+func PoolFromPgx(s PgxStat) PoolStat {
+	return PoolStat{Max: s.MaxConns(), Idle: s.IdleConns(), Acquired: s.AcquiredConns(), Total: s.IdleConns() + s.AcquiredConns(),
+		AcquireCount: s.AcquireCount(), EmptyAcquireCount: s.EmptyAcquireCount(), AcquireDuration: s.AcquireDuration()}
+}

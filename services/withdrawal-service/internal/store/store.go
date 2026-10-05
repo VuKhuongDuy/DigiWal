@@ -87,7 +87,10 @@ func (w Withdrawal) SameRequest(r NewRequest) bool {
 	return w.AssetID == r.AssetID && w.Amount.Cmp(r.Amount) == 0 && w.ToAddress == r.ToAddress
 }
 
-type Store struct{ pool *pgxpool.Pool }
+type Store struct {
+	pool  *pgxpool.Pool
+	stage func(from, to string, took time.Duration) // optional: how long a request spent in `from` before moving to `to`
+}
 
 // Connect opens the pool and applies any pending migrations.
 func Connect(ctx context.Context, dsn string) (*Store, error) {
@@ -107,6 +110,47 @@ func Connect(ctx context.Context, dsn string) (*Store, error) {
 }
 
 func (s *Store) Close() { s.pool.Close() }
+
+// PoolStat is the connection pool's state, for the saturation metrics.
+func (s *Store) PoolStat() *pgxpool.Stat { return s.pool.Stat() }
+
+// ObserveStages registers f to be told, after each committed status change, how long the request had been in its
+// previous status (the time since its updated_at, which every transition sets). It feeds a duration-per-transition
+// histogram; nil turns it off. Set it before the store is used.
+func (s *Store) ObserveStages(f func(from, to string, took time.Duration)) { s.stage = f }
+
+// prevAge is appended to the RETURNING list of a guarded status UPDATE keyed on $1 = withdrawal_id. A sub-select in
+// that statement sees the row as it was BEFORE the update, so this is now() minus the previous updated_at: the time
+// spent in the status the request is leaving.
+const prevAge = `, extract(epoch FROM now() - (SELECT p.updated_at FROM withdrawal_requests p WHERE p.withdrawal_id = $1))::float8`
+
+// timedRow lets scan() read the extra prevAge column.
+type timedRow struct {
+	row  pgx.Row
+	secs *float64
+}
+
+func (t timedRow) Scan(dest ...any) error { return t.row.Scan(append(dest, t.secs)...) }
+
+func (s *Store) tell(from, to string, secs float64) {
+	if s.stage == nil {
+		return
+	}
+	if secs < 0 {
+		secs = 0
+	}
+	s.stage(from, to, time.Duration(secs*float64(time.Second)))
+}
+
+// timed scans a guarded status UPDATE ... RETURNING columns+prevAge and reports the stage once it succeeded.
+func (s *Store) timed(row pgx.Row, from, to string) (Withdrawal, error) {
+	var secs float64
+	w, err := guarded(scan(timedRow{row, &secs}))
+	if err == nil {
+		s.tell(from, to, secs)
+	}
+	return w, err
+}
 
 // MigrateUp applies every pending embedded migration; a no-op when up to date.
 func MigrateUp(dsn string) error {
@@ -166,10 +210,10 @@ func (s *Store) Transition(ctx context.Context, id, from, to string, reason *str
 	if to == StatusFailed {
 		return Withdrawal{}, errors.New("use MarkFailed to fail a request: it publishes withdrawals.failed")
 	}
-	return guarded(scan(s.pool.QueryRow(ctx, `
+	return s.timed(s.pool.QueryRow(ctx, `
 		UPDATE withdrawal_requests SET status = $3, reject_reason = $4, updated_at = now()
 		WHERE withdrawal_id = $1 AND status = $2
-		RETURNING `+columns, id, from, to, reason)))
+		RETURNING `+columns+prevAge, id, from, to, reason), from, to)
 }
 
 // GetByID reads a request by its withdrawal_id (operator tooling; never exposed to clients).

@@ -253,3 +253,9 @@ wallet-service as before; Cold is added if `infra/treasury.yaml` declares one (i
 series. One balance that cannot be read (say a token contract not deployed on this chain) is one missing series, not a zero:
 the others are still served and `digiwal_collector_up{collector="wallets"}` is 0. Not done here: Hot Floor/Ceiling gauges,
 because this service's Asset Registry does not carry them yet (the Engineering dashboard needs them).
+
+**Performance metrics.** Both API listeners are measured server-side: `digiwal_http_request_duration_seconds{service="withdrawal-service",route,code}`
+(route = the ServeMux pattern, never the raw path) and the database pool's saturation, `digiwal_db_pool_*` (see `pkg/metrics`).
+`digiwal_withdrawal_stage_duration_seconds{stage}` is the time a request spent in a status before leaving it (`requested_to_validated`,
+`reserved_to_signed`, `signed_to_broadcast`, `broadcast_to_confirmed`, `..._to_failed`), observed after each committed change; it restarts
+with the process. `digiwal_outbox_unpublished` and `digiwal_outbox_oldest_unpublished_age_seconds` show whether Kafka publishing is behind.

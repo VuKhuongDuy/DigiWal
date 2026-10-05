@@ -82,3 +82,6 @@ units, display only), `digiwal_ledger_active_user_days_total` (monotonic; its in
 users, a user active in two assets counts once), `digiwal_ledger_user_liabilities{asset}`, `digiwal_ledger_failed_events`,
 `digiwal_ledger_flagged_deposits{status}`, `digiwal_ledger_active_locks` and `..._oldest_age_seconds`. An unreadable
 database omits the series (`digiwal_collector_up` 0), it never exports a zero. See `pkg/metrics`.
+
+**Performance metrics.** Both API listeners are measured server-side: `digiwal_http_request_duration_seconds{service="ledger-service",route,code}`
+(route = the ServeMux pattern, never the raw path) and the database pool's saturation, `digiwal_db_pool_*` (see `pkg/metrics`).

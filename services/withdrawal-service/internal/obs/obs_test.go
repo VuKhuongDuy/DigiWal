@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"digiwal/pkg/metrics"
 	"digiwal/services/withdrawal-service/internal/obs"
@@ -59,7 +60,7 @@ func sample() store.Stats {
 			{Status: "rejected", Reason: "destination_not_whitelisted", Count: 4}, {Status: "failed", Reason: "", Count: 1}},
 		TimedCount: 2, ProcessingSecs: 30, ChainWaitSecs: 400,
 		Stuck: map[string]int64{"requested": 0, "reserved": 1}, OldestAge: map[string]float64{"reserved": 77},
-		NonceGaps: 2, NonceGapsUnreported: 1, WhitelistBlocked: 3,
+		NonceGaps: 2, NonceGapsUnreported: 1, WhitelistBlocked: 3, OutboxUnpublished: 4, OutboxOldestAge: 42,
 	}
 	for _, s := range store.AllStatuses {
 		st.ByStatus[s] = 0
@@ -81,6 +82,7 @@ func TestExports(t *testing.T) {
 		`digiwal_withdrawal_requests{status="disputed"} 1`, `digiwal_withdrawal_requests{status="signed"} 0`,
 		`digiwal_withdrawal_stuck{status="reserved"} 1`, `digiwal_withdrawal_oldest_age_seconds{status="reserved"} 77`,
 		`digiwal_nonce_gaps{state="unreported"} 1`, `digiwal_nonce_gaps{state="total"} 2`, "digiwal_whitelist_blocked 3",
+		"digiwal_outbox_unpublished 4", "digiwal_outbox_oldest_unpublished_age_seconds 42",
 		`digiwal_collector_up{collector="withdrawal-service"} 1`,
 	} {
 		if !strings.Contains(out, want) {
@@ -122,5 +124,26 @@ func TestBroadcastStuckUsesTheChainHeadAndFailsOnItsOwn(t *testing.T) {
 	// the database collector is unaffected by it
 	if out := scrape(obs.Collector(&fake{st: sample()}, assets(), th)); !strings.Contains(out, `collector="withdrawal-service"} 1`) {
 		t.Fatal("independent collectors")
+	}
+}
+
+func TestStageHistogram(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	observe := obs.Stages(reg)
+	observe("signed", "broadcast", 2*time.Second)
+	observe("broadcast", "confirmed", 200*time.Second)
+	observe("broadcast", "confirmed", 400*time.Second)
+	rec := httptest.NewRecorder()
+	metrics.Handler(reg).ServeHTTP(rec, httptest.NewRequest("GET", "/metrics", nil))
+	out := rec.Body.String()
+	for _, want := range []string{
+		`digiwal_withdrawal_stage_duration_seconds_count{stage="signed_to_broadcast"} 1`,
+		`digiwal_withdrawal_stage_duration_seconds_count{stage="broadcast_to_confirmed"} 2`,
+		`digiwal_withdrawal_stage_duration_seconds_sum{stage="broadcast_to_confirmed"} 600`,
+		`digiwal_withdrawal_stage_duration_seconds_bucket{stage="broadcast_to_confirmed",le="300"} 1`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in:\n%s", want, out)
+		}
 	}
 }

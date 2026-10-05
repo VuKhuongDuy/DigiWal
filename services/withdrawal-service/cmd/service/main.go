@@ -55,6 +55,12 @@ func main() {
 	}
 	defer st.Close()
 
+	// Metrics (monitoring-dashboard.md decision (d)): one registry, created first so the store can report each status
+	// change's duration from the very first request. The API listeners are measured and never serve it.
+	reg := metrics.NewRegistry()
+	st.ObserveStages(obs.Stages(reg))
+	httpm := metrics.NewHTTP(reg, "withdrawal-service")
+
 	// Fail startup on a bad registry or screening list rather than validate against a half one.
 	assets, err := registry.Load(requireEnv("ASSETS_FILE"))
 	if err != nil {
@@ -130,9 +136,8 @@ func main() {
 	log.Printf("withdrawal reaper running: requested %s, reserved %s, broadcast %d blocks",
 		reaper.StuckRequestTimeout, reaper.StuckReservationTimeout, reaper.StuckBroadcastBlocks)
 
-	// Metrics on their own internal port (monitoring-dashboard.md decision (d)), never the API listeners.
-	reg := metrics.NewRegistry()
-	reg.MustRegister(obs.Collector(st, assets, stuck), obs.BroadcastCollector(st, rpc, stuck.BroadcastBlocks),
+	// The collectors, and the metrics on their own internal port.
+	reg.MustRegister(metrics.PoolCollector("withdrawal-service", func() metrics.PoolStat { return metrics.PoolFromPgx(st.PoolStat()) }), obs.Collector(st, assets, stuck), obs.BroadcastCollector(st, rpc, stuck.BroadcastBlocks),
 		obs.WalletCollector(rpc, assets, obs.Wallets{Hot: system.Hot, Warm: system.Warm, Cold: system.Cold}))
 	go func() {
 		addr := ":" + envOr("METRICS_PORT", metrics.DefaultPort)
@@ -147,14 +152,14 @@ func main() {
 		log.Fatalf("configuring mTLS: %v", err)
 	}
 	mtlsPort := envOr("MTLS_PORT", "8443")
-	srv := &http.Server{Addr: ":" + mtlsPort, Handler: server.MTLSRoutes(), TLSConfig: tlsCfg}
+	srv := &http.Server{Addr: ":" + mtlsPort, Handler: httpm.Wrap(server.MTLSRoutes()), TLSConfig: tlsCfg}
 	go func() {
 		log.Printf("withdrawal-service mTLS listening on :%s", mtlsPort)
 		log.Fatal(srv.ListenAndServeTLS("", ""))
 	}()
 
 	port := envOr("PORT", "8080")
-	plain := &http.Server{Addr: ":" + port, Handler: server.Routes()}
+	plain := &http.Server{Addr: ":" + port, Handler: httpm.Wrap(server.Routes())}
 	go func() {
 		<-ctx.Done()
 		_ = plain.Shutdown(context.Background())

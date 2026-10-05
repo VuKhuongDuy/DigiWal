@@ -150,3 +150,99 @@ func TestStatsNonceGapsAndBlockedWhitelist(t *testing.T) {
 		t.Fatalf("%+v", st)
 	}
 }
+
+type stageLog struct {
+	from, to string
+	took     time.Duration
+}
+
+// Every status change reports how long the request had been in the status it left (the time since its updated_at).
+func TestStageDurationIsTheTimeSpentInThePreviousStatus(t *testing.T) {
+	s := newStore(t)
+	ctx := context.Background()
+	var got []stageLog
+	s.ObserveStages(func(from, to string, took time.Duration) { got = append(got, stageLog{from, to, took}) })
+
+	id := insert(t, s, "k1", "requested", assetA, "1")
+	exec(t, s, `UPDATE withdrawal_requests SET updated_at = now() - interval '90 seconds' WHERE withdrawal_id = $1`, id)
+	if _, err := s.Transition(ctx, id, "requested", "validated", nil); err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].from != "requested" || got[0].to != "validated" || got[0].took < 89*time.Second || got[0].took > 95*time.Second {
+		t.Fatalf("requested -> validated: %+v", got)
+	}
+
+	// the clock restarts at each change: a second transition right after is fast, not 90s
+	if _, err := s.Transition(ctx, id, "validated", "reserved", nil); err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[1].took > 5*time.Second {
+		t.Fatalf("validated -> reserved should have taken ~0: %+v", got)
+	}
+
+	exec(t, s, `UPDATE withdrawal_requests SET updated_at = now() - interval '12 seconds' WHERE withdrawal_id = $1`, id)
+	if _, err := s.MarkSigned(ctx, id, 31337, 7, "0xraw"); err != nil {
+		t.Fatal(err)
+	}
+	if got[2].from != "reserved" || got[2].to != "signed" || got[2].took < 11*time.Second || got[2].took > 20*time.Second {
+		t.Fatalf("reserved -> signed: %+v", got[2])
+	}
+
+	exec(t, s, `UPDATE withdrawal_requests SET updated_at = now() - interval '30 seconds' WHERE withdrawal_id = $1`, id)
+	ev := func(w Withdrawal) (string, []byte, error) { return "withdrawals.broadcast", []byte("{}"), nil }
+	if _, err := s.MarkBroadcast(ctx, id, "0xhash", time.Now(), 100, ev); err != nil {
+		t.Fatal(err)
+	}
+	exec(t, s, `UPDATE withdrawal_requests SET updated_at = now() - interval '300 seconds' WHERE withdrawal_id = $1`, id)
+	ev2 := func(w Withdrawal) (string, []byte, error) { return "withdrawals.confirmed", []byte("{}"), nil }
+	if _, err := s.MarkConfirmed(ctx, id, "0xhash", 120, "ledger-tx", time.Now(), nil, ev2); err != nil {
+		t.Fatal(err)
+	}
+	if got[3].from != "signed" || got[3].to != "broadcast" || got[3].took < 29*time.Second ||
+		got[4].from != "broadcast" || got[4].to != "confirmed" || got[4].took < 299*time.Second || got[4].took > 310*time.Second {
+		t.Fatalf("signed -> broadcast -> confirmed: %+v", got[3:])
+	}
+
+	// failing goes through MarkFailed and reports the status it left
+	id2 := insert(t, s, "k2", "reserved", assetA, "1")
+	exec(t, s, `UPDATE withdrawal_requests SET updated_at = now() - interval '600 seconds' WHERE withdrawal_id = $1`, id2)
+	if _, err := s.MarkFailed(ctx, id2, "reserved", "stale_reservation", "", nil, ev2); err != nil {
+		t.Fatal(err)
+	}
+	if last := got[len(got)-1]; last.from != "reserved" || last.to != "failed" || last.took < 599*time.Second {
+		t.Fatalf("reserved -> failed: %+v", last)
+	}
+}
+
+// A change that lost the race (the row had already moved) reports nothing and is still ErrStateChanged.
+func TestNoStageIsReportedForALostRace(t *testing.T) {
+	s := newStore(t)
+	called := 0
+	s.ObserveStages(func(string, string, time.Duration) { called++ })
+	id := insert(t, s, "k", "confirmed", assetA, "1")
+	if _, err := s.Transition(context.Background(), id, "requested", "validated", nil); err != ErrStateChanged {
+		t.Fatalf("got %v", err)
+	}
+	if _, err := s.MarkSigned(context.Background(), id, 1, 1, "x"); err != ErrStateChanged {
+		t.Fatalf("got %v", err)
+	}
+	if called != 0 {
+		t.Fatalf("reported %d stages for changes that did not happen", called)
+	}
+}
+
+func TestOutboxBacklogAndOldestAge(t *testing.T) {
+	s := newStore(t)
+	if st := stats(t, s); st.OutboxUnpublished != 0 || st.OutboxOldestAge != 0 {
+		t.Fatalf("empty: %+v", st)
+	}
+	id := insert(t, s, "k", "confirmed", assetA, "1")
+	exec(t, s, `INSERT INTO withdrawal_outbox (withdrawal_id, topic, payload, created_at) VALUES
+		($1, 'withdrawals.broadcast', '{}', now() - interval '120 seconds'), ($1, 'withdrawals.confirmed', '{}', now() - interval '10 seconds'),
+		($1, 'withdrawals.failed', '{}', now() - interval '900 seconds')`, id)
+	exec(t, s, `UPDATE withdrawal_outbox SET published_at = now() WHERE topic = 'withdrawals.failed'`) // the oldest is already out
+	st := stats(t, s)
+	if st.OutboxUnpublished != 2 || st.OutboxOldestAge < 119 || st.OutboxOldestAge > 130 {
+		t.Fatalf("a published event must not count: %+v", st)
+	}
+}

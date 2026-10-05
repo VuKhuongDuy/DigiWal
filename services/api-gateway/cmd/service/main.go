@@ -45,7 +45,8 @@ func main() {
 	}
 	// Metrics: their own internal port, never the public listener (monitoring-dashboard.md invariant 6).
 	reg := metrics.NewRegistry()
-	reg.MustRegister(obs.Collector(st))
+	reg.MustRegister(obs.Collector(st), metrics.PoolCollector("api-gateway", func() metrics.PoolStat { return metrics.PoolFromPgx(st.Pool().Stat()) }))
+	httpm := metrics.NewHTTP(reg, "api-gateway")
 	go func() {
 		addr := ":" + envOr("METRICS_PORT", metrics.DefaultPort)
 		log.Printf("metrics on %s", addr)
@@ -55,7 +56,7 @@ func main() {
 	}()
 
 	port := envOr("PORT", "8080")
-	srv := &http.Server{Addr: ":" + port, Handler: s.Routes(), ReadHeaderTimeout: 10 * time.Second}
+	srv := &http.Server{Addr: ":" + port, Handler: httpm.Wrap(s.Routes()), ReadHeaderTimeout: 10 * time.Second}
 	go func() {
 		<-ctx.Done()
 		_ = srv.Shutdown(context.Background())

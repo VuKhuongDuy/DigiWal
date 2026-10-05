@@ -48,3 +48,8 @@ listener, which has a test for that). One scrape-time collector reading this ser
 `digiwal_users_total` (users ever created; monotonic, so new users per day is `increase(...[1d])`) and
 `digiwal_collector_up{collector="api-gateway"}`. If the database cannot be read the series is omitted, not zero.
 See `pkg/metrics` and `docs/design/monitoring-dashboard.md`.
+
+**Performance metrics.** Both API listeners are measured server-side: `digiwal_http_request_duration_seconds{service="api-gateway",route,code}`
+(route = the ServeMux pattern, never the raw path) and the database pool's saturation, `digiwal_db_pool_*` (see `pkg/metrics`).
+Its authenticated routes sit in a mux nested behind the authentication middleware, so that mux is wrapped with `metrics.ReportRoute`
+(otherwise every authenticated request would be labelled with the root's catch-all `/`).

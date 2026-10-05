@@ -44,6 +44,11 @@ type Stats struct {
 
 	NonceGaps, NonceGapsUnreported int64
 	WhitelistBlocked               int64
+
+	// The outbox: events written with a state change and not yet acknowledged by Kafka. A growing backlog or a rising
+	// oldest age means the publisher (or Kafka) is behind, and history-service / ledger-service see events late.
+	OutboxUnpublished int64
+	OutboxOldestAge   float64 // seconds; 0 when nothing is waiting
 }
 
 var nonTerminal = []string{StatusRequested, StatusValidated, StatusReserved, StatusSigned, StatusBroadcast, StatusDisputed}
@@ -155,6 +160,13 @@ func (s *Store) Stats(ctx context.Context, th StuckThresholds) (Stats, error) {
 	}
 	if err := tx.QueryRow(ctx, `SELECT count(*) FROM whitelist_entries WHERE blocked_at IS NOT NULL`).Scan(&st.WhitelistBlocked); err != nil {
 		return st, fmt.Errorf("blocked whitelist entries: %w", err)
+	}
+	var oldestOutbox *float64
+	if err := tx.QueryRow(ctx, `SELECT count(*), extract(epoch FROM now() - min(created_at)) FROM withdrawal_outbox WHERE published_at IS NULL`).Scan(&st.OutboxUnpublished, &oldestOutbox); err != nil {
+		return st, fmt.Errorf("outbox: %w", err)
+	}
+	if oldestOutbox != nil && *oldestOutbox > 0 {
+		st.OutboxOldestAge = *oldestOutbox
 	}
 	return st, nil
 }

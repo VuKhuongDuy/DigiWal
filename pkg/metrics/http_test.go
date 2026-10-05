@@ -1,6 +1,7 @@
 package metrics
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -122,5 +123,49 @@ func TestWrapperStaysTransparent(t *testing.T) {
 func TestRouteAndCodeAreAllowedLabels(t *testing.T) {
 	if err := CheckLabels("route", "code", "stage"); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// A mux nested behind a middleware that copies the request: the outer wrapper alone would see only "/".
+func TestNestedMuxReportsItsRoute(t *testing.T) {
+	inner := http.NewServeMux()
+	inner.HandleFunc("GET /v1/balances", func(w http.ResponseWriter, r *http.Request) {})
+	inner.HandleFunc("GET /v1/withdrawals/{key}", func(w http.ResponseWriter, r *http.Request) {})
+	root := http.NewServeMux()
+	root.HandleFunc("POST /users", func(w http.ResponseWriter, r *http.Request) {})
+	root.Handle("/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { // "authentication": copies the request
+		if r.Header.Get("Authorization") == "" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		ReportRoute(inner).ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), struct{}{}, "user")))
+	}))
+	reg := prometheus.NewRegistry()
+	h := NewHTTP(reg, "gw").Wrap(root)
+
+	get := func(path, auth string) {
+		req := httptest.NewRequest("GET", path, nil)
+		if auth != "" {
+			req.Header.Set("Authorization", auth)
+		}
+		h.ServeHTTP(httptest.NewRecorder(), req)
+	}
+	get("/v1/balances", "Bearer k")
+	get("/v1/withdrawals/abc", "Bearer k")
+	get("/v1/withdrawals/def", "Bearer k")
+	get("/v1/balances", "")         // refused before the inner mux: the root's "/"
+	get("/nope/at/all", "Bearer k") // the inner mux has nothing for it either
+	do(h, "POST", "/users")
+	out := exposition(reg)
+	for _, want := range []string{
+		`code="200",route="GET /v1/balances",service="gw"} 1`, `code="200",route="GET /v1/withdrawals/{key}",service="gw"} 2`,
+		`code="401",route="/",service="gw"} 1`, `code="200",route="POST /users",service="gw"} 1`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "abc") || strings.Contains(out, "def") || strings.Contains(out, "nope") {
+		t.Errorf("a path leaked:\n%s", out)
 	}
 }

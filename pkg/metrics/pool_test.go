@@ -29,3 +29,19 @@ func TestPoolCollector(t *testing.T) {
 		t.Errorf("not live:\n%s", out)
 	}
 }
+
+type fakePgx struct{}
+
+func (fakePgx) MaxConns() int32                { return 4 }
+func (fakePgx) IdleConns() int32               { return 1 }
+func (fakePgx) AcquiredConns() int32           { return 3 }
+func (fakePgx) AcquireCount() int64            { return 50 }
+func (fakePgx) EmptyAcquireCount() int64       { return 2 }
+func (fakePgx) AcquireDuration() time.Duration { return time.Second }
+
+func TestPoolFromPgx(t *testing.T) {
+	s := PoolFromPgx(fakePgx{})
+	if s.Max != 4 || s.Idle != 1 || s.Acquired != 3 || s.Total != 4 || s.AcquireCount != 50 || s.EmptyAcquireCount != 2 || s.AcquireDuration != time.Second {
+		t.Fatalf("%+v", s)
+	}
+}

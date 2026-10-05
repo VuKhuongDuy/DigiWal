@@ -39,7 +39,28 @@ var (
 	oldest           = metrics.NewDesc("digiwal_withdrawal_oldest_age_seconds", "Age of the oldest request in each non-terminal status; 0 when none.", "status")
 	nonceGaps        = metrics.NewDesc("digiwal_nonce_gaps", "Nonce Gaps recorded: state total, or unreported to wallet-service.", "state")
 	whitelistBlocked = metrics.NewDesc("digiwal_whitelist_blocked", "Whitelist entries blocked by a screening re-check.")
+	outboxBacklog    = metrics.NewDesc("digiwal_outbox_unpublished", "Events written with a state change that Kafka has not acknowledged yet.")
+	outboxOldest     = metrics.NewDesc("digiwal_outbox_oldest_unpublished_age_seconds", "Age of the oldest unpublished event; 0 when none. Rising means the publisher or Kafka is behind.")
 )
+
+// stageBuckets run from a database round trip to an hour: the in-line stages take milliseconds, the wait for the chain minutes.
+var stageBuckets = []float64{.01, .05, .1, .5, 1, 5, 15, 30, 60, 120, 300, 600, 1200, 3600}
+
+// Stages registers digiwal_withdrawal_stage_duration_seconds{stage} on reg and returns the function the store calls
+// after each committed status change (Store.ObserveStages). stage is "<from>_to_<to>", a closed set; the value is the
+// time spent in <from>. Observed in-process, so it restarts from zero with the service (a counter reset to Prometheus).
+func Stages(reg prometheus.Registerer) func(from, to string, took time.Duration) {
+	h := prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Name: "digiwal_withdrawal_stage_duration_seconds", Help: "Time a withdrawal spent in a status before moving to the next one.", Buckets: stageBuckets,
+	}, []string{"stage"})
+	if err := metrics.CheckLabels("stage"); err != nil {
+		panic(err)
+	}
+	reg.MustRegister(h)
+	return func(from, to string, took time.Duration) {
+		h.WithLabelValues(from + "_to_" + to).Observe(took.Seconds())
+	}
+}
 
 // knownReasons is the closed set of reject_reason values; the label is bounded by it (design invariant 3).
 var knownReasons = map[string]bool{
@@ -85,7 +106,8 @@ func Collector(s Source, assets *registry.Registry, th store.StuckThresholds) pr
 			metrics.Counter(withdrawalsTotal, float64(st.ByStatus[store.StatusRejected]), "rejected"),
 			metrics.Counter(procSum, st.ProcessingSecs), metrics.Counter(chainSum, st.ChainWaitSecs), metrics.Counter(timedCount, float64(st.TimedCount)),
 			metrics.Gauge(nonceGaps, float64(st.NonceGaps), "total"), metrics.Gauge(nonceGaps, float64(st.NonceGapsUnreported), "unreported"),
-			metrics.Gauge(whitelistBlocked, float64(st.WhitelistBlocked)))
+			metrics.Gauge(whitelistBlocked, float64(st.WhitelistBlocked)),
+			metrics.Gauge(outboxBacklog, float64(st.OutboxUnpublished)), metrics.Gauge(outboxOldest, st.OutboxOldestAge))
 
 		amounts := map[string]float64{}
 		for id, amt := range st.Confirmed {
