@@ -10,6 +10,10 @@ scrape_configs:
     static_configs:
       - targets: ["localhost:9090"]
   - job_name: digiwal
+    # The auditor's metrics carry their own `job` label (digiwal_job_*{job="reconciliation"}). Without this, Prometheus
+    # would rename it to exported_job because it clashes with the scrape job's `job`, and every query on it would fail.
+    # `up` and the other synthetic series are unaffected.
+    honor_labels: true
     static_configs:
       - targets: ["api-gateway:9100"]
         labels: {service: api-gateway}
