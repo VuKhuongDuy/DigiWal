@@ -233,3 +233,16 @@ make test               # store tests on a real Postgres (testcontainers or TEST
   The automated e2e test is task 3.8.
 - `internal/authz` is a copy of wallet-service's, as in ledger-service (a shared package needs a
   repo-root Docker build context).
+
+## Metrics
+
+`GET /metrics` on its own internal port (`METRICS_PORT`, default 9100; never on the API listeners). Scrape-time
+collectors over this service's own database (`digiwal_collector_up{collector}` 0 and no series if a read fails):
+`digiwal_withdrawals_total{status}` (requested / confirmed / failed / rejected, ever), `digiwal_withdrawal_amount_total{asset}`
+(confirmed, whole units, display only), `digiwal_withdrawal_failures_total{status,reason}` (a closed set of reasons, anything
+else is `other`), `digiwal_withdrawal_processing_seconds_sum` / `..._chain_wait_seconds_sum` / `..._timed_total` (our time vs
+waiting for the chain: divide the rates for an average), `digiwal_withdrawal_requests{status}`, `digiwal_withdrawal_stuck{status}`,
+`digiwal_withdrawal_oldest_age_seconds{status}`, `digiwal_nonce_gaps{state}`, `digiwal_whitelist_blocked`.
+"Stuck" uses the very thresholds the Reaper is built with (`STUCK_REQUEST_TIMEOUT`, `STUCK_RESERVATION_TIMEOUT`,
+`STUCK_BROADCAST_BLOCKS`), and a test compares it with the Reaper's own query at the boundary. `broadcast` stuck needs the chain
+head, so it is a separate collector: an RPC failure drops that one series only. See `pkg/metrics`.

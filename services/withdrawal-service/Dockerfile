@@ -1,8 +1,9 @@
-# Build context is the REPO ROOT (it needs pkg/events):
+# Build context is the REPO ROOT (it needs pkg/events and pkg/metrics):
 #   docker build -f services/withdrawal-service/Dockerfile .
 FROM golang:1.26-alpine AS build
 WORKDIR /src
 COPY pkg/events pkg/events
+COPY pkg/metrics pkg/metrics
 COPY services/withdrawal-service/go.mod services/withdrawal-service/go.sum services/withdrawal-service/
 WORKDIR /src/services/withdrawal-service
 RUN go mod download

@@ -22,10 +22,12 @@ import (
 	"syscall"
 	"time"
 
+	"digiwal/pkg/metrics"
 	"digiwal/services/withdrawal-service/internal/api"
 	"digiwal/services/withdrawal-service/internal/authz"
 	"digiwal/services/withdrawal-service/internal/chain"
 	"digiwal/services/withdrawal-service/internal/ledger"
+	"digiwal/services/withdrawal-service/internal/obs"
 	"digiwal/services/withdrawal-service/internal/pipeline"
 	"digiwal/services/withdrawal-service/internal/publisher"
 	"digiwal/services/withdrawal-service/internal/registry"
@@ -116,14 +118,28 @@ func main() {
 	// The Reaper (task 3.9, invariant #17). Decided (Tech Lead): 5 minutes, 5 minutes, 128 blocks.
 	// A stuck `reserved` row is Released only once wallet-service has voided its key (task 3.13,
 	// invariant #22); if the void fails it is ALERTed and retried.
+	// One definition of "stuck": the same values build the Reaper and the metrics (monitoring-dashboard.md invariant 2).
+	stuck := store.StuckThresholds{Request: envDuration("STUCK_REQUEST_TIMEOUT", 5*time.Minute),
+		Reservation: envDuration("STUCK_RESERVATION_TIMEOUT", 5*time.Minute), BroadcastBlocks: envInt("STUCK_BROADCAST_BLOCKS", 128)}
 	reaper := &pipeline.Reaper{Store: st, Ledger: ledgerClient, Chain: rpc, ChainID: system.ChainID,
 		Voider: walletClient, Fillers: walletClient, Recheck: validator.Recheck,
-		StuckRequestTimeout:     envDuration("STUCK_REQUEST_TIMEOUT", 5*time.Minute),
-		StuckReservationTimeout: envDuration("STUCK_RESERVATION_TIMEOUT", 5*time.Minute),
-		StuckBroadcastBlocks:    envInt("STUCK_BROADCAST_BLOCKS", 128)}
+		StuckRequestTimeout:     stuck.Request,
+		StuckReservationTimeout: stuck.Reservation,
+		StuckBroadcastBlocks:    stuck.BroadcastBlocks}
 	go reaper.Run(ctx, envDuration("REAPER_INTERVAL", 30*time.Second))
 	log.Printf("withdrawal reaper running: requested %s, reserved %s, broadcast %d blocks",
 		reaper.StuckRequestTimeout, reaper.StuckReservationTimeout, reaper.StuckBroadcastBlocks)
+
+	// Metrics on their own internal port (monitoring-dashboard.md decision (d)), never the API listeners.
+	reg := metrics.NewRegistry()
+	reg.MustRegister(obs.Collector(st, assets, stuck), obs.BroadcastCollector(st, rpc, stuck.BroadcastBlocks))
+	go func() {
+		addr := ":" + envOr("METRICS_PORT", metrics.DefaultPort)
+		log.Printf("metrics on %s", addr)
+		if err := metrics.Serve(ctx, addr, reg); err != nil {
+			log.Printf("metrics listener: %v", err)
+		}
+	}()
 
 	tlsCfg, err := authz.ServerTLSConfig(requireEnv("TLS_CERT_FILE"), requireEnv("TLS_KEY_FILE"), requireEnv("TLS_CA_FILE"))
 	if err != nil {

@@ -1,0 +1,136 @@
+// Package obs is withdrawal-service's metrics (monitoring-dashboard.md section 5; reconciliation-audit.md decision
+// (c)). It reads only withdrawal-service's own database, plus the chain head for the one figure that needs it.
+package obs
+
+import (
+	"context"
+	"math/big"
+	"time"
+
+	"digiwal/pkg/metrics"
+	"digiwal/services/withdrawal-service/internal/pipeline"
+	"digiwal/services/withdrawal-service/internal/registry"
+	"digiwal/services/withdrawal-service/internal/store"
+	"digiwal/services/withdrawal-service/internal/validate"
+
+	"github.com/prometheus/client_golang/prometheus"
+)
+
+// Source is the store.
+type Source interface {
+	Stats(ctx context.Context, th store.StuckThresholds) (store.Stats, error)
+	StuckBroadcast(ctx context.Context, head, blocks int64) (int64, error)
+}
+
+// Head is the chain head the Reaper reads.
+type Head interface {
+	Head(ctx context.Context) (int64, error)
+}
+
+var (
+	withdrawalsTotal = metrics.NewDesc("digiwal_withdrawals_total", "Withdrawal requests that reached a status, ever: requested (all recorded), confirmed, failed, rejected. A confirmed request later refunded moves to failed, the one case a figure can fall.", "status")
+	amountTotal      = metrics.NewDesc("digiwal_withdrawal_amount_total", "Amount of confirmed withdrawals, whole asset units. Display only.", "asset")
+	failuresTotal    = metrics.NewDesc("digiwal_withdrawal_failures_total", "Failed and rejected requests by reason (a closed set; anything else is 'other').", "status", "reason")
+	procSum          = metrics.NewDesc("digiwal_withdrawal_processing_seconds_sum", "Sum, over confirmed withdrawals, of our own time (recorded to broadcast).")
+	chainSum         = metrics.NewDesc("digiwal_withdrawal_chain_wait_seconds_sum", "Sum, over confirmed withdrawals, of the time waiting for the blockchain (broadcast to confirmed to depth).")
+	timedCount       = metrics.NewDesc("digiwal_withdrawal_timed_total", "Confirmed withdrawals with both timings; divide the two _sum series by this (rate over rate) for averages.")
+	requests         = metrics.NewDesc("digiwal_withdrawal_requests", "Requests currently in each status.", "status")
+	stuck            = metrics.NewDesc("digiwal_withdrawal_stuck", "Requests past the Reaper's own timeout for their status (broadcast: blocks since first seen).", "status")
+	oldest           = metrics.NewDesc("digiwal_withdrawal_oldest_age_seconds", "Age of the oldest request in each non-terminal status; 0 when none.", "status")
+	nonceGaps        = metrics.NewDesc("digiwal_nonce_gaps", "Nonce Gaps recorded: state total, or unreported to wallet-service.", "state")
+	whitelistBlocked = metrics.NewDesc("digiwal_whitelist_blocked", "Whitelist entries blocked by a screening re-check.")
+)
+
+// knownReasons is the closed set of reject_reason values; the label is bounded by it (design invariant 3).
+var knownReasons = map[string]bool{
+	pipeline.ReasonSignRefused: true, pipeline.ReasonTxReverted: true, pipeline.ReasonStaleRequest: true, pipeline.ReasonStaleReservation: true,
+	pipeline.ReasonReplacedOrDropped: true, pipeline.ReasonAbandoned: true, pipeline.ReasonAbandonedRefunded: true,
+	validate.AssetNotRegistered: true, validate.InvalidToAddress: true, validate.AmountTooLarge: true, validate.BelowMinimum: true,
+	validate.NotWhitelisted: true, validate.OnScreeningList: true, validate.DestinationIsDeposit: true, validate.DestinationIsSystem: true,
+}
+
+func reasonLabel(r string) string {
+	switch {
+	case r == "":
+		return "none"
+	case knownReasons[r]:
+		return r
+	}
+	return "other"
+}
+
+// Whole turns minor units into whole asset units for display (design invariant 5: never feeds logic).
+func Whole(minor *big.Int, decimals int) float64 {
+	if minor == nil {
+		return 0
+	}
+	f := new(big.Float).SetInt(minor)
+	f.Quo(f, new(big.Float).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(decimals)), nil)))
+	v, _ := f.Float64()
+	return v
+}
+
+// Collector exports the database figures. th must be the very values the Reaper is built with.
+func Collector(s Source, assets *registry.Registry, th store.StuckThresholds) prometheus.Collector {
+	return metrics.NewCached("withdrawal-service", 30*time.Second, 5*time.Second, func(ctx context.Context) ([]prometheus.Metric, error) {
+		st, err := s.Stats(ctx, th)
+		if err != nil {
+			return nil, err
+		}
+		var out []prometheus.Metric
+		out = append(out,
+			metrics.Counter(withdrawalsTotal, float64(st.Created), "requested"),
+			metrics.Counter(withdrawalsTotal, float64(st.ByStatus[store.StatusConfirmed]), "confirmed"),
+			metrics.Counter(withdrawalsTotal, float64(st.ByStatus[store.StatusFailed]), "failed"),
+			metrics.Counter(withdrawalsTotal, float64(st.ByStatus[store.StatusRejected]), "rejected"),
+			metrics.Counter(procSum, st.ProcessingSecs), metrics.Counter(chainSum, st.ChainWaitSecs), metrics.Counter(timedCount, float64(st.TimedCount)),
+			metrics.Gauge(nonceGaps, float64(st.NonceGaps), "total"), metrics.Gauge(nonceGaps, float64(st.NonceGapsUnreported), "unreported"),
+			metrics.Gauge(whitelistBlocked, float64(st.WhitelistBlocked)))
+
+		amounts := map[string]float64{}
+		for id, amt := range st.Confirmed {
+			label, dec := "unknown", 0
+			if a, ok := assets.Get(id); ok {
+				label, dec = a.Symbol, a.Decimals
+			}
+			amounts[label] += Whole(amt, dec)
+		}
+		for label, v := range amounts {
+			out = append(out, metrics.Counter(amountTotal, v, label))
+		}
+
+		byReason := map[[2]string]int64{}
+		for _, f := range st.Failures {
+			byReason[[2]string{f.Status, reasonLabel(f.Reason)}] += f.Count
+		}
+		for k, n := range byReason {
+			out = append(out, metrics.Counter(failuresTotal, float64(n), k[0], k[1]))
+		}
+		for _, status := range store.AllStatuses {
+			out = append(out, metrics.Gauge(requests, float64(st.ByStatus[status]), status))
+		}
+		for status, n := range st.Stuck {
+			out = append(out, metrics.Gauge(stuck, float64(n), status))
+		}
+		for status, age := range st.OldestAge {
+			out = append(out, metrics.Gauge(oldest, age, status))
+		}
+		return out, nil
+	})
+}
+
+// BroadcastCollector exports the stuck count for `broadcast`, which needs the chain head. It is separate so a
+// failing RPC drops only this series, not the database ones.
+func BroadcastCollector(s Source, h Head, blocks int64) prometheus.Collector {
+	return metrics.NewCached("withdrawal-service-broadcast", 15*time.Second, 5*time.Second, func(ctx context.Context) ([]prometheus.Metric, error) {
+		head, err := h.Head(ctx)
+		if err != nil {
+			return nil, err
+		}
+		n, err := s.StuckBroadcast(ctx, head, blocks)
+		if err != nil {
+			return nil, err
+		}
+		return []prometheus.Metric{metrics.Gauge(stuck, float64(n), store.StatusBroadcast)}, nil
+	})
+}
