@@ -28,7 +28,7 @@ const DefaultPort = "9100"
 var AllowedLabels = map[string]bool{
 	"asset": true, "wallet": true, "status": true, "kind": true, "rule": true, "day": true, "chain_id": true,
 	"service": true, "job": true, "result": true, "flow": true, "severity": true, "component": true,
-	"collector": true, "reason": true, "state": true, "caller": true, "purpose": true,
+	"collector": true, "reason": true, "state": true, "caller": true, "purpose": true, "route": true, "code": true, "stage": true,
 }
 
 // CheckLabels returns an error if any name is not on the allow-list.

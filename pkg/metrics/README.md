@@ -24,3 +24,7 @@ go metrics.Serve(ctx, ":"+envOr("METRICS_PORT", metrics.DefaultPort), reg)  // G
   `purpose`. `NewDesc` panics on anything else, so an identifier (user id, address, tx hash) can never become a label.
 - **`Serve` serves `GET /metrics` only.** Never put it on a public listener (`api-gateway`'s especially); the port
   (`METRICS_PORT`, default 9100) is not published to the host.
+
+**Performance.** `metrics.NewHTTP(reg, "service").Wrap(handler)` records `digiwal_http_request_duration_seconds{service,route,code}`
+(server-side, p50/p95/p99 and the request count from one histogram). `route` is the ServeMux pattern, never the raw path.
+`metrics.PoolCollector("service", func() metrics.PoolStat{...})` exports connection-pool saturation without pulling a driver in.
