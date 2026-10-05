@@ -40,3 +40,11 @@ make test    # Postgres via testcontainers or TEST_POSTGRES_DSN
 curl -s -XPOST localhost:8084/users -d '{}'                          # {"user_id":...,"api_key":...}
 curl -s -H "Authorization: Bearer $KEY" localhost:8084/v1/deposit-address
 ```
+
+## Metrics
+
+`GET /metrics` on its own internal port (`METRICS_PORT`, default 9100; not published, **never** on the public
+listener, which has a test for that). One scrape-time collector reading this service's own database:
+`digiwal_users_total` (users ever created; monotonic, so new users per day is `increase(...[1d])`) and
+`digiwal_collector_up{collector="api-gateway"}`. If the database cannot be read the series is omitted, not zero.
+See `pkg/metrics` and `docs/design/monitoring-dashboard.md`.

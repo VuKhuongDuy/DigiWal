@@ -125,3 +125,10 @@ func (s *Store) RevokeKey(ctx context.Context, apiKey string) (bool, error) {
 
 // Pool exposes the pool for tests.
 func (s *Store) Pool() *pgxpool.Pool { return s.pool }
+
+// CountUsers is the number of users ever created. Users are never deleted, so it only grows.
+func (s *Store) CountUsers(ctx context.Context) (int64, error) {
+	var n int64
+	err := s.pool.QueryRow(ctx, `SELECT count(*) FROM users`).Scan(&n)
+	return n, err
+}

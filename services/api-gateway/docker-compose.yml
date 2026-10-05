@@ -4,7 +4,9 @@ include:
 
 services:
   api-gateway:
-    build: .
+    build:
+      context: ../..            # repo root: the image needs pkg/metrics
+      dockerfile: services/api-gateway/Dockerfile
     environment:
       PORT: "8080"
       POSTGRES_DSN: postgres://custody:custody@postgres:5432/api_gateway?sslmode=disable

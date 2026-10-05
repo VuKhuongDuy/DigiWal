@@ -364,3 +364,18 @@ func TestHealthzNeedsNoAuth(t *testing.T) {
 		t.Fatalf("healthz = %d", code)
 	}
 }
+
+// Design invariant 6: /metrics is never served on the public listener (it would be reachable by clients and
+// would disclose the user count). Metrics live on their own internal port.
+func TestMetricsAreNotOnThePublicListener(t *testing.T) {
+	e := newEnv(t)
+	_, key := e.newUser()
+	for _, auth := range []string{"", "Bearer " + key} {
+		for _, path := range []string{"/metrics", "/metrics/"} {
+			code, body := e.do("GET", path, auth, "")
+			if code == 200 || strings.Contains(body, "go_goroutines") || strings.Contains(body, "digiwal_users_total") {
+				t.Errorf("GET %s (auth %q) = %d, metrics must not be served here:\n%.200s", path, auth, code, body)
+			}
+		}
+	}
+}

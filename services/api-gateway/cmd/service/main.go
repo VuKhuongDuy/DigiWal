@@ -12,7 +12,9 @@ import (
 	"syscall"
 	"time"
 
+	"digiwal/pkg/metrics"
 	"digiwal/services/api-gateway/internal/api"
+	"digiwal/services/api-gateway/internal/obs"
 	"digiwal/services/api-gateway/internal/store"
 )
 
@@ -41,6 +43,17 @@ func main() {
 		Withdrawals: &api.WithdrawalClient{BaseURL: requireEnv("WITHDRAWAL_SERVICE_URL"),
 			HTTP: &http.Client{Timeout: 15 * time.Second, Transport: &http.Transport{TLSClientConfig: tlsCfg}}},
 	}
+	// Metrics: their own internal port, never the public listener (monitoring-dashboard.md invariant 6).
+	reg := metrics.NewRegistry()
+	reg.MustRegister(obs.Collector(st))
+	go func() {
+		addr := ":" + envOr("METRICS_PORT", metrics.DefaultPort)
+		log.Printf("metrics on %s", addr)
+		if err := metrics.Serve(ctx, addr, reg); err != nil {
+			log.Printf("metrics listener: %v", err)
+		}
+	}()
+
 	port := envOr("PORT", "8080")
 	srv := &http.Server{Addr: ":" + port, Handler: s.Routes(), ReadHeaderTimeout: 10 * time.Second}
 	go func() {
