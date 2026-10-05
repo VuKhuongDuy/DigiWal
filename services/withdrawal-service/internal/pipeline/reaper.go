@@ -78,6 +78,9 @@ type Reaper struct {
 	// Alert is where ALERTs go; default: the log, prefixed "ALERT:".
 	Alert func(msg string)
 
+	// Observer receives what the Reaper does, for metrics; nil observes nothing.
+	Observer Observer
+
 	alerts alerter
 }
 
@@ -99,6 +102,7 @@ func (r *Reaper) Run(ctx context.Context, every time.Duration) {
 
 // Step makes one pass over every rule. Rules are independent: one failing does not stop the others.
 func (r *Reaper) Step(ctx context.Context) error {
+	defer func() { orNop(r.Observer).ReaperPass(r.now()) }()
 	return errors.Join(
 		r.each(ctx, store.StatusRequested, r.StuckRequestTimeout, r.requested),
 		r.each(ctx, store.StatusValidated, r.StuckReservationTimeout, r.validated),
@@ -145,6 +149,7 @@ func (r *Reaper) requested(ctx context.Context, w store.Withdrawal) error {
 	err := failWith(ctx, r.Store, w, store.StatusRequested, failure{reason: ReasonStaleRequest}, r.ChainID, r.now())
 	if err == nil {
 		log.Printf("withdrawal %s: stuck in requested, failed (%s)", w.ID, ReasonStaleRequest)
+		orNop(r.Observer).Reclaimed(ReasonStaleRequest)
 	}
 	return err
 }
@@ -153,6 +158,7 @@ func (r *Reaper) validated(ctx context.Context, w store.Withdrawal) error {
 	err := releaseAndFail(ctx, r.Store, r.Ledger, w, store.StatusValidated, failure{reason: ReasonStaleReservation}, r.ChainID, r.now())
 	if err == nil {
 		log.Printf("withdrawal %s: stuck in validated, Lock released, failed (%s)", w.ID, ReasonStaleReservation)
+		orNop(r.Observer).Reclaimed(ReasonStaleReservation)
 	}
 	return err
 }
@@ -171,6 +177,7 @@ func (r *Reaper) reserved(ctx context.Context, w store.Withdrawal) error {
 		err := releaseAndFail(ctx, r.Store, r.Ledger, w, store.StatusReserved, failure{reason: ReasonStaleReservation}, r.ChainID, r.now())
 		if err == nil {
 			log.Printf("withdrawal %s: stuck in reserved, key voided, Lock released, failed (%s)", w.ID, ReasonStaleReservation)
+			orNop(r.Observer).Reclaimed(ReasonStaleReservation)
 		}
 		return err
 	}
@@ -327,6 +334,7 @@ func (r *Reaper) releaseDead(ctx context.Context, w store.Withdrawal, from strin
 	if err == nil {
 		log.Printf("withdrawal %s: nonce %d consumed by another tx (mined nonce %d), none of ours mined; Lock released, failed (%s)",
 			w.ID, *w.Nonce, mined, ReasonReplacedOrDropped)
+		orNop(r.Observer).Reclaimed(ReasonReplacedOrDropped)
 	}
 	return err
 }
@@ -358,7 +366,9 @@ func (r *Reaper) diagnose(ctx context.Context, w store.Withdrawal, hot common.Ad
 
 // alert reports a stuck request an operator must look at, at most once per AlertEvery per kind.
 func (r *Reaper) alert(w store.Withdrawal, kind, msg string) {
-	r.alerts.raise(r.now(), r.AlertEvery, r.Alert, w, kind, msg)
+	if r.alerts.raise(r.now(), r.AlertEvery, r.Alert, w, kind, msg) {
+		orNop(r.Observer).Alerted(kind)
+	}
 }
 
 // Fillers is wallet-service's list of the Nonce Fillers it signed for a key (task 3.13).

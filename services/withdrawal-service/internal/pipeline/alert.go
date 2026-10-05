@@ -13,7 +13,8 @@ import (
 // "ALERT:". Not safe for concurrent use: each Pipeline and Reaper loop owns one.
 type alerter struct{ seen map[string]time.Time }
 
-func (a *alerter) raise(now time.Time, every time.Duration, sink func(string), w store.Withdrawal, kind, msg string) {
+// raise reports whether the ALERT was actually emitted (false: de-duplicated).
+func (a *alerter) raise(now time.Time, every time.Duration, sink func(string), w store.Withdrawal, kind, msg string) bool {
 	if every <= 0 {
 		every = 10 * time.Minute
 	}
@@ -22,13 +23,14 @@ func (a *alerter) raise(now time.Time, every time.Duration, sink func(string), w
 		a.seen = map[string]time.Time{}
 	}
 	if last, ok := a.seen[k]; ok && now.Sub(last) < every {
-		return
+		return false
 	}
 	a.seen[k] = now
 	m := fmt.Sprintf("withdrawal %s: %s", w.ID, msg)
 	if sink != nil {
 		sink(m)
-		return
+		return true
 	}
 	log.Print("ALERT: " + m)
+	return true
 }

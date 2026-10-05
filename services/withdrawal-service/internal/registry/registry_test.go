@@ -48,3 +48,37 @@ func TestRejectsBadFiles(t *testing.T) {
 		}
 	}
 }
+
+func TestHotLimitsAreReadForDisplayOnly(t *testing.T) {
+	write := func(extra string) string {
+		p := filepath.Join(t.TempDir(), "assets.yaml")
+		body := "assets:\n  - id: 11111111-1111-1111-1111-111111111111\n    asset_type: native\n    symbol: ETH\n    decimals: 18\n    min_withdrawal_amount: \"1\"\n" + extra
+		if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	r, err := Load(write("    hot_floor: \"30\"\n    hot_ceiling: \"120\"\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, _ := r.Get("11111111-1111-1111-1111-111111111111")
+	if a.HotFloor.String() != "30" || a.HotCeiling.String() != "120" {
+		t.Fatalf("%+v", a)
+	}
+	// absent: nil, and it is not an error (the limits do not affect any withdrawal)
+	r, err = Load(write(""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a, _ := r.Get("11111111-1111-1111-1111-111111111111"); a.HotFloor != nil || a.HotCeiling != nil {
+		t.Fatalf("%+v", a)
+	}
+	for name, extra := range map[string]string{
+		"ceiling below floor": "    hot_floor: \"120\"\n    hot_ceiling: \"30\"\n", "not a number": "    hot_floor: \"lots\"\n", "negative": "    hot_floor: \"-1\"\n",
+	} {
+		if _, err := Load(write(extra)); err == nil {
+			t.Errorf("%s accepted", name)
+		}
+	}
+}

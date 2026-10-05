@@ -60,6 +60,7 @@ func main() {
 	reg := metrics.NewRegistry()
 	st.ObserveStages(obs.Stages(reg))
 	httpm := metrics.NewHTTP(reg, "withdrawal-service")
+	loops := obs.NewReaper(reg) // what the Reaper and the pipeline do
 
 	// Fail startup on a bad registry or screening list rather than validate against a half one.
 	assets, err := registry.Load(requireEnv("ASSETS_FILE"))
@@ -117,7 +118,8 @@ func main() {
 		// voids the key.
 		Recheck: validator.Recheck, Voider: walletClient,
 		// Nonce Gap detection (task 3.4): confirmed txs of the last NONCE_GAP_WINDOW blocks are re-checked.
-		Gaps: &pipeline.GapWatch{Store: st, Reporter: walletClient, Window: envInt("NONCE_GAP_WINDOW", 256)}}
+		Gaps:     &pipeline.GapWatch{Store: st, Reporter: walletClient, Window: envInt("NONCE_GAP_WINDOW", 256)},
+		Observer: loops}
 	go pipe.Run(ctx, envDuration("POLL_INTERVAL", 3*time.Second))
 	log.Printf("withdrawal pipeline running: chain %d, confirmation depth %d", system.ChainID, pipe.ConfirmationDepth)
 
@@ -131,14 +133,14 @@ func main() {
 		Voider: walletClient, Fillers: walletClient, Recheck: validator.Recheck,
 		StuckRequestTimeout:     stuck.Request,
 		StuckReservationTimeout: stuck.Reservation,
-		StuckBroadcastBlocks:    stuck.BroadcastBlocks}
+		StuckBroadcastBlocks:    stuck.BroadcastBlocks, Observer: loops}
 	go reaper.Run(ctx, envDuration("REAPER_INTERVAL", 30*time.Second))
 	log.Printf("withdrawal reaper running: requested %s, reserved %s, broadcast %d blocks",
 		reaper.StuckRequestTimeout, reaper.StuckReservationTimeout, reaper.StuckBroadcastBlocks)
 
 	// The collectors, and the metrics on their own internal port.
 	reg.MustRegister(metrics.PoolCollector("withdrawal-service", func() metrics.PoolStat { return metrics.PoolFromPgx(st.PoolStat()) }), obs.Collector(st, assets, stuck), obs.BroadcastCollector(st, rpc, stuck.BroadcastBlocks),
-		obs.WalletCollector(rpc, assets, obs.Wallets{Hot: system.Hot, Warm: system.Warm, Cold: system.Cold}))
+		obs.Limits(assets), obs.WalletCollector(rpc, assets, obs.Wallets{Hot: system.Hot, Warm: system.Warm, Cold: system.Cold}))
 	go func() {
 		addr := ":" + envOr("METRICS_PORT", metrics.DefaultPort)
 		log.Printf("metrics on %s", addr)

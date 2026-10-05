@@ -5,6 +5,7 @@ package obs
 import (
 	"context"
 	"math/big"
+	"sync/atomic"
 	"time"
 
 	"digiwal/pkg/metrics"
@@ -155,4 +156,72 @@ func BroadcastCollector(s Source, h Head, blocks int64) prometheus.Collector {
 		}
 		return []prometheus.Metric{metrics.Gauge(stuck, float64(n), store.StatusBroadcast)}, nil
 	})
+}
+
+// Reaper counts what the Reaper and the pipeline do, from the hooks in pipeline.Observer. In-process, so the
+// counters restart with the process (a counter reset to Prometheus). It implements pipeline.Observer.
+type Reaper struct {
+	actions *prometheus.CounterVec
+	alerts  *prometheus.CounterVec
+	lastAt  atomic.Int64 // unix seconds
+	desc    *prometheus.Desc
+}
+
+// NewReaper registers digiwal_reaper_actions_total{rule}, digiwal_withdrawal_alerts_total{kind} and
+// digiwal_reaper_last_pass_timestamp_seconds on reg. The label values come from constants in the pipeline package,
+// so the sets are closed.
+func NewReaper(reg prometheus.Registerer) *Reaper {
+	if err := metrics.CheckLabels("rule", "kind"); err != nil {
+		panic(err)
+	}
+	r := &Reaper{
+		actions: prometheus.NewCounterVec(prometheus.CounterOpts{Name: "digiwal_reaper_actions_total", Help: "Stuck requests the Reaper failed, by the reason it recorded."}, []string{"rule"}),
+		alerts:  prometheus.NewCounterVec(prometheus.CounterOpts{Name: "digiwal_withdrawal_alerts_total", Help: "ALERTs raised for an operator (after de-duplication), by kind. Reaper and pipeline."}, []string{"kind"}),
+		desc:    metrics.NewDesc("digiwal_reaper_last_pass_timestamp_seconds", "When the Reaper last finished a pass (Unix seconds). Absent until its first pass."),
+	}
+	// every known series exists from the start, so increase() over a window that begins before the first event is right
+	for _, rule := range []string{pipeline.ReasonStaleRequest, pipeline.ReasonStaleReservation, pipeline.ReasonReplacedOrDropped} {
+		r.actions.WithLabelValues(rule)
+	}
+	reg.MustRegister(r.actions, r.alerts, r)
+	return r
+}
+
+func (r *Reaper) Reclaimed(rule string)   { r.actions.WithLabelValues(rule).Inc() }
+func (r *Reaper) Alerted(kind string)     { r.alerts.WithLabelValues(kind).Inc() }
+func (r *Reaper) ReaperPass(at time.Time) { r.lastAt.Store(at.Unix()) }
+
+func (r *Reaper) Describe(chan<- *prometheus.Desc) {}
+func (r *Reaper) Collect(out chan<- prometheus.Metric) {
+	if v := r.lastAt.Load(); v != 0 {
+		out <- metrics.Gauge(r.desc, float64(v))
+	}
+}
+
+var _ pipeline.Observer = (*Reaper)(nil)
+
+// Limits exports the Hot Wallet's Floor and Ceiling from the Asset Registry, so a registry edit moves the lines on
+// the dashboard (monitoring-dashboard.md invariant 7) and the "below Floor" alert has something to compare to. The
+// registry is read once at startup: an edit takes effect on restart.
+func Limits(assets *registry.Registry) prometheus.Collector {
+	floorDesc := metrics.NewDesc("digiwal_hot_wallet_floor", "Hot Wallet Floor from the Asset Registry, whole asset units.", "asset")
+	ceilDesc := metrics.NewDesc("digiwal_hot_wallet_ceiling", "Hot Wallet Ceiling from the Asset Registry, whole asset units.", "asset")
+	return &limits{assets: assets, floor: floorDesc, ceil: ceilDesc}
+}
+
+type limits struct {
+	assets      *registry.Registry
+	floor, ceil *prometheus.Desc
+}
+
+func (l *limits) Describe(chan<- *prometheus.Desc) {}
+func (l *limits) Collect(out chan<- prometheus.Metric) {
+	for _, a := range l.assets.All() {
+		if a.HotFloor != nil {
+			out <- metrics.Gauge(l.floor, Whole(a.HotFloor, a.Decimals), a.Symbol)
+		}
+		if a.HotCeiling != nil {
+			out <- metrics.Gauge(l.ceil, Whole(a.HotCeiling, a.Decimals), a.Symbol)
+		}
+	}
 }

@@ -1,7 +1,7 @@
 // Package registry loads the canonical Asset Registry (infra/assets.yaml, ledger.md "Decided: one
 // canonical Asset Registry file") for what withdrawal-service needs from it: which assets exist and
-// each one's Minimum Withdrawal Amount (withdrawal-flow.md invariant #10). Fields other services
-// own (hot_floor, hot_ceiling) are ignored.
+// each one's Minimum Withdrawal Amount (withdrawal-flow.md invariant #10). hot_floor and hot_ceiling
+// are read only to be shown against the Hot balance (metrics); they never affect a withdrawal.
 package registry
 
 import (
@@ -22,6 +22,8 @@ type Asset struct {
 	Symbol              string
 	Decimals            int
 	MinWithdrawalAmount *big.Int
+	// HotFloor and HotCeiling are the Hot Wallet limits (wallet-tiering.md), nil if the registry does not carry them.
+	HotFloor, HotCeiling *big.Int
 }
 
 type Registry struct{ byID map[string]Asset }
@@ -56,6 +58,8 @@ func Load(path string) (*Registry, error) {
 			Symbol              string `yaml:"symbol"`
 			Decimals            *int   `yaml:"decimals"`
 			MinWithdrawalAmount string `yaml:"min_withdrawal_amount"`
+			HotFloor            string `yaml:"hot_floor"`
+			HotCeiling          string `yaml:"hot_ceiling"`
 		} `yaml:"assets"`
 	}
 	if err := yaml.Unmarshal(raw, &f); err != nil {
@@ -97,6 +101,21 @@ func Load(path string) (*Registry, error) {
 		a.MinWithdrawalAmount, _ = new(big.Int).SetString(e.MinWithdrawalAmount, 10)
 		if a.MinWithdrawalAmount.Cmp(maxAmount) > 0 {
 			return nil, fmt.Errorf("%s: min_withdrawal_amount exceeds uint256", where)
+		}
+		for _, f := range []struct {
+			name, val string
+			dst       **big.Int
+		}{{"hot_floor", e.HotFloor, &a.HotFloor}, {"hot_ceiling", e.HotCeiling, &a.HotCeiling}} {
+			if f.val == "" {
+				continue
+			}
+			if !uintString.MatchString(f.val) {
+				return nil, fmt.Errorf("%s: %s %q must be a non-negative integer in minor units (quote it in YAML)", where, f.name, f.val)
+			}
+			*f.dst, _ = new(big.Int).SetString(f.val, 10)
+		}
+		if a.HotFloor != nil && a.HotCeiling != nil && a.HotCeiling.Cmp(a.HotFloor) < 0 {
+			return nil, fmt.Errorf("%s: hot_ceiling is below hot_floor", where)
 		}
 		r.byID[id] = a
 	}

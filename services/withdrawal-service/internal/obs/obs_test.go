@@ -147,3 +147,47 @@ func TestStageHistogram(t *testing.T) {
 		}
 	}
 }
+
+func TestReaperAndAlertCounters(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	rp := obs.NewReaper(reg)
+	scrape := func() string {
+		rec := httptest.NewRecorder()
+		metrics.Handler(reg).ServeHTTP(rec, httptest.NewRequest("GET", "/metrics", nil))
+		return rec.Body.String()
+	}
+	out := scrape()
+	// every Reaper rule exists at 0 from the start, and "last pass" is absent until the first pass (not a 1970 timestamp)
+	for _, want := range []string{`digiwal_reaper_actions_total{rule="stale_request"} 0`, `digiwal_reaper_actions_total{rule="replaced_or_dropped"} 0`} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "digiwal_reaper_last_pass_timestamp_seconds") {
+		t.Errorf("no pass yet, no timestamp:\n%s", out)
+	}
+	rp.Reclaimed("stale_reservation")
+	rp.Reclaimed("stale_reservation")
+	rp.Alerted("signed-stuck")
+	rp.ReaperPass(time.Unix(1_800_000_000, 0))
+	out = scrape()
+	for _, want := range []string{`digiwal_reaper_actions_total{rule="stale_reservation"} 2`, `digiwal_withdrawal_alerts_total{kind="signed-stuck"} 1`, "digiwal_reaper_last_pass_timestamp_seconds 1.8e+09"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestHotLimitsFollowTheRegistry(t *testing.T) {
+	oneEth := new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)
+	reg := prometheus.NewRegistry()
+	reg.MustRegister(obs.Limits(registry.New(
+		registry.Asset{ID: "e", Symbol: "ETH", Decimals: 18, HotFloor: new(big.Int).Mul(oneEth, big.NewInt(30)), HotCeiling: new(big.Int).Mul(oneEth, big.NewInt(120))},
+		registry.Asset{ID: "t", Symbol: "TKN", Decimals: 6}))) // no limits declared: no series
+	rec := httptest.NewRecorder()
+	metrics.Handler(reg).ServeHTTP(rec, httptest.NewRequest("GET", "/metrics", nil))
+	out := rec.Body.String()
+	if !strings.Contains(out, `digiwal_hot_wallet_floor{asset="ETH"} 30`) || !strings.Contains(out, `digiwal_hot_wallet_ceiling{asset="ETH"} 120`) || strings.Contains(out, `asset="TKN"`) {
+		t.Fatalf("\n%s", out)
+	}
+}

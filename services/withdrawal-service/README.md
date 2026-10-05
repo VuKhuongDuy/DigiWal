@@ -259,3 +259,10 @@ because this service's Asset Registry does not carry them yet (the Engineering d
 `digiwal_withdrawal_stage_duration_seconds{stage}` is the time a request spent in a status before leaving it (`requested_to_validated`,
 `reserved_to_signed`, `signed_to_broadcast`, `broadcast_to_confirmed`, `..._to_failed`), observed after each committed change; it restarts
 with the process. `digiwal_outbox_unpublished` and `digiwal_outbox_oldest_unpublished_age_seconds` show whether Kafka publishing is behind.
+
+**Reaper and ALERTs.** `digiwal_reaper_actions_total{rule}` (stuck requests the Reaper failed: `stale_request`, `stale_reservation`,
+`replaced_or_dropped`), `digiwal_withdrawal_alerts_total{kind}` (ALERTs actually emitted after de-duplication, from the Reaper and the
+pipeline: `signed-stuck`, `broadcast-stuck`, `bump-ceiling`, ...) and `digiwal_reaper_last_pass_timestamp_seconds` (absent until the first
+pass; a `ReaperDead` alert fires when it stops advancing). They come from `pipeline.Observer`, a hook that can only receive facts. In-process, so they
+restart with the service. `digiwal_hot_wallet_floor` / `..._ceiling{asset}` are the Asset Registry's `hot_floor` / `hot_ceiling` (read at startup;
+an edit needs a restart); they are display and alerting only and never affect a withdrawal.
