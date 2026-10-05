@@ -1,0 +1,154 @@
+# Alert rules (docs/design/monitoring-dashboard.md decision (e); reconciliation-audit.md decision (d)). There is no
+# Alertmanager and no email for now: a firing alert shows on Prometheus /alerts and in the Engineering dashboard's alert list.
+#
+# Every threshold is either an Objective of the design (50ms/200ms/2s, 5xx < 0.1%, outbox 30s, DB pool 80%, lag depth + 20 blocks,
+# Reaper 5 x REAPER_INTERVAL, job stale after 3 intervals) or marked "initial" for the Tech Lead to tune. They are tested
+# with `promtool test rules` (alerts_test.yml); run infra/prometheus/check.sh after any change.
+groups:
+  - name: auditor
+    rules:
+      - alert: SuspiciousOpen
+        expr: sum(digiwal_suspicious_open{severity="critical"}) > 0
+        labels: {severity: critical}
+        annotations:
+          summary: "{{ $value }} critical suspicious transaction(s) open"
+          description: "The auditor holds critical findings nobody has resolved or acknowledged. Open Engineering > Auditor for the detail."
+      - alert: JobFailed
+        expr: digiwal_job_last_result{result="fail"} == 1
+        labels: {severity: critical}
+        annotations:
+          summary: "Audit job {{ $labels.job }} found a critical problem"
+          description: "The last run of {{ $labels.job }} ended in fail (a critical finding is open)."
+      - alert: JobError
+        expr: digiwal_job_last_result{result="error"} == 1
+        for: 10m # two runs at the default 5 minute interval
+        labels: {severity: warning}
+        annotations:
+          summary: "Audit job {{ $labels.job }} cannot complete"
+          description: "The last runs of {{ $labels.job }} ended in error (RPC or a store down?). An error is never a pass: this job is not checking anything."
+      - alert: JobStale
+        expr: (time() - digiwal_job_last_run_timestamp_seconds) > on(job) (3 * digiwal_job_interval_seconds)
+        labels: {severity: warning}
+        annotations:
+          summary: "Audit job {{ $labels.job }} has not run for 3 intervals"
+          description: "No run of {{ $labels.job }} has finished for more than 3 intervals. The auditor may be down or stuck."
+      - alert: JobNeverRan
+        expr: digiwal_job_interval_seconds unless on(job) digiwal_job_last_run_timestamp_seconds
+        for: 15m # three intervals at the default
+        labels: {severity: warning}
+        annotations:
+          summary: "Audit job {{ $labels.job }} never completed a run"
+          description: "{{ $labels.job }} is registered but has no finished run on record."
+
+  - name: money
+    rules:
+      - alert: HotWalletBelowFloor
+        expr: digiwal_wallet_balance{wallet="hot"} < on(asset) digiwal_hot_wallet_floor
+        for: 2m
+        labels: {severity: warning}
+        annotations:
+          summary: "Hot wallet {{ $labels.asset }} is below its Floor"
+          description: "Withdrawals may soon not be payable from Hot. Move funds from Warm (wallet-tiering.md invariant 4)."
+      - alert: HotWalletAboveCeiling
+        expr: digiwal_wallet_balance{wallet="hot"} > on(asset) digiwal_hot_wallet_ceiling
+        for: 10m
+        labels: {severity: warning}
+        annotations:
+          summary: "Hot wallet {{ $labels.asset }} is above its Ceiling"
+          description: "A Treasury Sweep should have moved the excess to Warm."
+      - alert: HotWalletFrozen
+        expr: digiwal_hot_wallet_frozen == 1
+        labels: {severity: critical}
+        annotations:
+          summary: "Hot Wallet signing is frozen on chain {{ $labels.chain_id }} (Nonce Gap)"
+          description: "wallet-service signs nothing new until an operator resolves the gap."
+      - alert: NonceGapUnreported
+        expr: digiwal_nonce_gaps{state="unreported"} > 0
+        for: 2m
+        labels: {severity: critical}
+        annotations:
+          summary: "A Nonce Gap was detected but wallet-service has not been told"
+          description: "withdrawal-service cannot report the gap, so Hot Wallet signing is not frozen. Check the call to wallet-service."
+
+  - name: withdrawals
+    rules:
+      - alert: WithdrawalStuck
+        expr: digiwal_withdrawal_stuck{status=~"reserved|signed|broadcast"} > 0 or digiwal_withdrawal_requests{status="disputed"} > 0
+        for: 1m
+        labels: {severity: warning}
+        annotations:
+          summary: "Withdrawals are stuck in {{ $labels.status }}"
+          description: "{{ $value }} withdrawal(s) past the Reaper's timeout, or disputed. These need an operator."
+      - alert: WithdrawalAlert
+        expr: increase(digiwal_withdrawal_alerts_total[10m]) > 0
+        labels: {severity: warning}
+        annotations:
+          summary: "withdrawal-service raised an ALERT ({{ $labels.kind }})"
+          description: "See the withdrawal-service log line starting with ALERT:."
+      - alert: ReaperDead
+        expr: time() - digiwal_reaper_last_pass_timestamp_seconds > 150 # 5 x REAPER_INTERVAL (30s); initial
+        labels: {severity: critical}
+        annotations:
+          summary: "The withdrawal Reaper has not completed a pass for over 2.5 minutes"
+          description: "Stuck requests are not being reclaimed."
+      - alert: OutboxBacklog
+        expr: digiwal_outbox_oldest_unpublished_age_seconds > 30
+        for: 2m
+        labels: {severity: warning}
+        annotations:
+          summary: "withdrawal events are waiting to be published (oldest {{ $value }}s)"
+          description: "Kafka or the publisher is behind; history-service and ledger-service see events late."
+
+  - name: deposits
+    rules:
+      - alert: ChainWatcherLag
+        expr: (digiwal_chain_head_block - on(chain_id) digiwal_chainwatcher_watermark_block) > on(chain_id) (digiwal_chainwatcher_confirmation_depth + 20)
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: "chain-watcher is {{ $value }} blocks behind the head on chain {{ $labels.chain_id }}"
+          description: "The expected lag is the confirmation depth plus 20 blocks of margin (initial)."
+      - alert: SweeperAlert
+        expr: increase(digiwal_sweeper_alerts_total[10m]) > 0
+        labels: {severity: warning}
+        annotations:
+          summary: "sweeper raised an ALERT ({{ $labels.kind }})"
+          description: "A Fee Bump gave up, wallet-service refused one, an operator cancelled a top-up, or a Gas Fee could not be recorded."
+
+  - name: platform
+    rules:
+      - alert: TargetDown
+        expr: up == 0
+        for: 2m
+        labels: {severity: warning}
+        annotations:
+          summary: "{{ $labels.service }} ({{ $labels.instance }}) is not being scraped"
+          description: "The service is down or its metrics port is unreachable."
+      - alert: CollectorDown
+        expr: digiwal_collector_up == 0
+        for: 2m
+        labels: {severity: warning}
+        annotations:
+          summary: "{{ $labels.collector }} cannot read what it reports"
+          description: "Its database or RPC read is failing, so its series are missing (not zero)."
+      - alert: HTTPServerErrors
+        expr: sum by (service) (rate(digiwal_http_request_duration_seconds_count{code=~"5.."}[5m])) / sum by (service) (rate(digiwal_http_request_duration_seconds_count[5m])) > 0.001
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: "{{ $labels.service }}: more than 0.1% of requests fail with a 5xx"
+          description: "Objective: 5xx rate below 0.1%."
+      - alert: HTTPLatencyP99
+        expr: histogram_quantile(0.99, sum by (service, le) (rate(digiwal_http_request_duration_seconds_bucket{route!~".*/healthz"}[5m]))) > 2
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: "{{ $labels.service }}: p99 latency over 2s"
+          description: "Objective: p50 50ms, p95 200ms, p99 2s on every synchronous endpoint, server-side, health excluded."
+      - alert: DBPoolSaturated
+        expr: digiwal_db_pool_connections{state="acquired"} / on(service) digiwal_db_pool_max_connections > 0.8
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: "{{ $labels.service }}: database pool over 80% in use"
+          description: "Objective: pool saturation below 80%."
