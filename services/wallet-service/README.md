@@ -139,3 +139,10 @@ The deposit-address endpoints are still on the plain `:8080` listener; moving th
 ```bash
 make test
 ```
+
+## Metrics
+
+`GET /metrics` on its own internal port (`METRICS_PORT`, default 9100; never on an API listener, and a test checks that). Go runtime and process
+metrics, and the database pool's saturation (`digiwal_db_pool_*`, see `pkg/metrics`).
+Both API listeners are also measured: `digiwal_http_request_duration_seconds{service="wallet-service",route,code}`, the route being the
+ServeMux pattern (never a path or an idempotency key). Nothing key-related is exported. The image builds from the repo root (it needs `pkg/metrics`).

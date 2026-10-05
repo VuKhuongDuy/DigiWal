@@ -80,6 +80,9 @@ func (s *Store) Close() {
 	s.pool.Close()
 }
 
+// PoolStat is the connection pool's state, for the saturation metrics.
+func (s *Store) PoolStat() *pgxpool.Stat { return s.pool.Stat() }
+
 // InitSeed stores the sealed seed for a role exactly once. Returns
 // ErrAlreadyInitialized on a second call — this is a one-time,
 // operator-driven action, not something that silently no-ops.

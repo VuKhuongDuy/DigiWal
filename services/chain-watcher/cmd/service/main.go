@@ -16,6 +16,7 @@ import (
 	"syscall"
 	"time"
 
+	"digiwal/pkg/metrics"
 	"digiwal/services/chain-watcher/internal/chain"
 	"digiwal/services/chain-watcher/internal/publisher"
 	"digiwal/services/chain-watcher/internal/registry"
@@ -88,6 +89,18 @@ func main() {
 		Chain: c, Store: st, Resolver: res, Publisher: pub, Config: cfg, HotWallet: hot,
 		LoadRegistry: func() (*registry.Registry, error) { return registry.Load(assetsFile) },
 	}
+
+	// Metrics on their own internal port: the connection pool and the Go runtime. (The chain lag figures are a separate
+	// change: they need the independent head ticker the design asks for.)
+	reg := metrics.NewRegistry()
+	reg.MustRegister(metrics.PoolCollector("chain-watcher", func() metrics.PoolStat { return metrics.PoolFromPgx(st.Pool().Stat()) }))
+	go func() {
+		addr := ":" + envOr("METRICS_PORT", metrics.DefaultPort)
+		log.Printf("metrics on %s", addr)
+		if err := metrics.Serve(ctx, addr, reg); err != nil {
+			log.Printf("metrics listener: %v", err)
+		}
+	}()
 
 	// /healthz on its own plain listener; chain-watcher has no mTLS server side — it only calls out.
 	go func() {

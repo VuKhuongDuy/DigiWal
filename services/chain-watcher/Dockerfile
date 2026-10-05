@@ -1,8 +1,9 @@
-# Build context is the REPO ROOT (it needs pkg/events):
+# Build context is the REPO ROOT (it needs pkg/events and pkg/metrics):
 #   docker build -f services/chain-watcher/Dockerfile .
 FROM golang:1.26-alpine AS build
 WORKDIR /src
 COPY pkg/events pkg/events
+COPY pkg/metrics pkg/metrics
 COPY services/chain-watcher/go.mod services/chain-watcher/go.sum services/chain-watcher/
 WORKDIR /src/services/chain-watcher
 RUN go mod download

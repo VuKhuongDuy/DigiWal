@@ -79,3 +79,9 @@ make test    # Postgres via testcontainers/TEST_POSTGRES_DSN; Redis via TEST_RED
   recovery, receipts), a scriptable chain for reorgs and failures, and real Postgres and Redis. The resolver was also run once (throwaway
   check, not committed) against the real `wallet-service` binary over mTLS: Redis hit, endpoint fallback, unknown address `404` = not ours,
   `CN=sweeper` refused with `403` (surfaced as an error, not "not ours").
+
+## Metrics
+
+`GET /metrics` on its own internal port (`METRICS_PORT`, default 9100; never on an API listener, and a test checks that). Go runtime and process
+metrics, and the database pool's saturation (`digiwal_db_pool_*`, see `pkg/metrics`).
+Not here yet: the watermark-vs-head lag, which needs the independent head ticker the design asks for (`monitoring-dashboard.md` section 6).

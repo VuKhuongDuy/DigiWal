@@ -25,6 +25,7 @@ import (
 
 	"github.com/redis/go-redis/v9"
 
+	"digiwal/pkg/metrics"
 	"digiwal/services/wallet-service/internal/api"
 	"digiwal/services/wallet-service/internal/authz"
 	"digiwal/services/wallet-service/internal/crypto"
@@ -217,6 +218,19 @@ func runServer(ctx context.Context, store *storage.Store, sealer *crypto.Sealer)
 		log.Fatalf("loading hot_wallet wallet: %v", err)
 	}
 
+	// Metrics: HTTP latency, the connection pool and the Go runtime, on their own internal port. Nothing key-related
+	// is exported, and the signing listener never serves /metrics.
+	reg := metrics.NewRegistry()
+	reg.MustRegister(metrics.PoolCollector("wallet-service", func() metrics.PoolStat { return metrics.PoolFromPgx(store.PoolStat()) }))
+	httpm := metrics.NewHTTP(reg, "wallet-service")
+	go func() {
+		addr := ":" + envOr("METRICS_PORT", metrics.DefaultPort)
+		log.Printf("metrics on %s", addr)
+		if err := metrics.Serve(ctx, addr, reg); err != nil {
+			log.Printf("metrics listener: %v", err)
+		}
+	}()
+
 	server := api.NewServer(store, cache, signer, hotSigner, userSign)
 	if system != nil {
 		server.WithSystemAddresses(*system)
@@ -233,7 +247,7 @@ func runServer(ctx context.Context, store *storage.Store, sealer *crypto.Sealer)
 			log.Fatalf("configuring mTLS: %v", err)
 		}
 		mtlsPort := envOr("MTLS_PORT", "8443")
-		srv := &http.Server{Addr: ":" + mtlsPort, Handler: server.MTLSRoutes(), TLSConfig: tlsCfg}
+		srv := &http.Server{Addr: ":" + mtlsPort, Handler: httpm.Wrap(server.MTLSRoutes()), TLSConfig: tlsCfg}
 		go func() {
 			log.Printf("wallet-service mTLS listening on :%s", mtlsPort)
 			log.Fatal(srv.ListenAndServeTLS("", ""))
@@ -244,7 +258,7 @@ func runServer(ctx context.Context, store *storage.Store, sealer *crypto.Sealer)
 
 	port := envOr("PORT", "8080")
 	log.Printf("wallet-service listening on :%s", port)
-	log.Fatal(http.ListenAndServe(":"+port, server.Routes()))
+	log.Fatal(http.ListenAndServe(":"+port, httpm.Wrap(server.Routes())))
 }
 
 // buildSigners wires the Hot Wallet signer and, if the user_derivation seed is
