@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
 	"digiwal/services/auditor/internal/finding"
@@ -23,10 +24,13 @@ type DepositAudit struct {
 	Store   *store.Store
 	ChainID int64
 
-	Every      time.Duration // default 5m
-	Grace      time.Duration // default 2 runs
-	Escalate   time.Duration // warn -> critical for D6, default 3 runs
-	Batch      int
+	Every    time.Duration // default 5m
+	Grace    time.Duration // default 2 runs
+	Escalate time.Duration // warn -> critical for D6, default 3 runs
+	Batch    int
+	// Hot is wallet-service's Hot Wallet address. A native transfer sent from it (a Gas Top-Up to a deposit address) is
+	// Hot Wallet Outflow, never a deposit, and chain-watcher skips it (deposit-flow.md invariant #17), so D7 must too.
+	Hot        string
 	StartBlock int64 // where the D7 scan starts on its first run (Open Question 4: default block 0)
 	ScanBlocks int64 // blocks per D7 batch
 	Now        func() time.Time
@@ -185,6 +189,9 @@ func (a *DepositAudit) scanMissed(ctx context.Context, notAfter time.Time, each 
 			return err
 		}
 		for _, c := range cands {
+			if a.Hot != "" && c.LogIndex == -1 && strings.EqualFold(c.From, a.Hot) {
+				continue
+			}
 			if err := each(source.DepositKey(a.ChainID, c.TxHash, c.LogIndex)); err != nil {
 				return err
 			}

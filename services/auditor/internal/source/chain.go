@@ -57,7 +57,8 @@ func (e EthChain) Tx(ctx context.Context, hash string) (withdrawal.ChainTx, erro
 // Candidate is a transfer found on chain that credits an address.
 type Candidate struct {
 	TxHash   string
-	LogIndex int64 // -1 for the native coin
+	LogIndex int64  // -1 for the native coin
+	From     string // the sender of a native transfer; empty for an ERC-20 Transfer log
 	To       string
 	Amount   *big.Int
 }
@@ -165,7 +166,11 @@ func (e EthChain) Scan(ctx context.Context, from, to int64, tokens []string, isD
 				return nil, fmt.Errorf("rpc: receipt %s: %w", tx.Hash().Hex(), err)
 			}
 			if r.Status == 1 {
-				out = append(out, Candidate{TxHash: strings.ToLower(tx.Hash().Hex()), LogIndex: -1, To: dst, Amount: new(big.Int).Set(tx.Value())})
+				from := ""
+				if f, ok := sender(tx); ok {
+					from = strings.ToLower(f.Hex())
+				}
+				out = append(out, Candidate{TxHash: strings.ToLower(tx.Hash().Hex()), LogIndex: -1, From: from, To: dst, Amount: new(big.Int).Set(tx.Value())})
 			}
 		}
 	}
