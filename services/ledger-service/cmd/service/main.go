@@ -17,10 +17,12 @@ import (
 	"syscall"
 
 	"digiwal/pkg/events"
+	"digiwal/pkg/metrics"
 	"digiwal/services/ledger-service/internal/api"
 	"digiwal/services/ledger-service/internal/authz"
 	"digiwal/services/ledger-service/internal/consumer"
 	"digiwal/services/ledger-service/internal/ledger"
+	"digiwal/services/ledger-service/internal/obs"
 	"digiwal/services/ledger-service/internal/screening"
 )
 
@@ -82,6 +84,17 @@ func main() {
 	} else {
 		log.Println("KAFKA_BROKERS not set: deposit consumer disabled")
 	}
+
+	// Metrics on their own internal port (monitoring-dashboard.md decision (d)); the API listeners never serve them.
+	reg := metrics.NewRegistry()
+	reg.MustRegister(obs.Collector(store))
+	go func() {
+		addr := ":" + envOr("METRICS_PORT", metrics.DefaultPort)
+		log.Printf("metrics on %s", addr)
+		if err := metrics.Serve(ctx, addr, reg); err != nil {
+			log.Printf("metrics listener: %v", err)
+		}
+	}()
 
 	port := envOr("PORT", "8080")
 	plain := &http.Server{Addr: ":" + port, Handler: server.Routes()}

@@ -72,3 +72,13 @@ make test    # integration tests need Postgres: testcontainers (Docker) or TEST_
 - No dead-letter design exists; `failed_events` is a stopgap so nothing is dropped silently.
 - `internal/authz` and `internal/testdb` are copies of wallet-service's; a shared package needs a
   repo-root build context (this service already builds from the root, for `pkg/events`).
+
+## Metrics
+
+`GET /metrics` on its own internal port (`METRICS_PORT`, default 9100; never on the API listeners), one scrape-time
+collector over this service's own database, read in one snapshot:
+`digiwal_deposits_credited_total{asset}` and `digiwal_deposit_amount_total{asset}` (monotonic; amount in whole asset
+units, display only), `digiwal_ledger_active_user_days_total` (monotonic; its increase over a UTC day is that day's active
+users, a user active in two assets counts once), `digiwal_ledger_user_liabilities{asset}`, `digiwal_ledger_failed_events`,
+`digiwal_ledger_flagged_deposits{status}`, `digiwal_ledger_active_locks` and `..._oldest_age_seconds`. An unreadable
+database omits the series (`digiwal_collector_up` 0), it never exports a zero. See `pkg/metrics`.
