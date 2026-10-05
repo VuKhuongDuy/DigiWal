@@ -18,8 +18,10 @@ import (
 	"time"
 
 	"digiwal/pkg/events"
+	"digiwal/pkg/metrics"
 	"digiwal/services/sweeper/internal/chain"
 	"digiwal/services/sweeper/internal/ledger"
+	"digiwal/services/sweeper/internal/obs"
 	"digiwal/services/sweeper/internal/registry"
 	"digiwal/services/sweeper/internal/screening"
 	"digiwal/services/sweeper/internal/sweep"
@@ -87,6 +89,17 @@ func main() {
 			MaxFeeBumps:        int(envInt("MAX_FEE_BUMPS", 5)),
 		},
 	}
+
+	// Metrics on their own internal port. sweeper has no database, so these are process metrics (they restart with it).
+	reg := metrics.NewRegistry()
+	s.Observer = obs.New(reg)
+	go func() {
+		addr := ":" + envOr("METRICS_PORT", metrics.DefaultPort)
+		log.Printf("metrics on %s", addr)
+		if err := metrics.Serve(ctx, addr, reg); err != nil {
+			log.Printf("metrics listener: %v", err)
+		}
+	}()
 
 	go func() {
 		mux := http.NewServeMux()

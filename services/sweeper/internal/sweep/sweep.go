@@ -78,6 +78,8 @@ type Sweeper struct {
 	Ledger GasPoster
 	// Alert is where ALERTs go; default: the log, prefixed "ALERT:".
 	Alert func(msg string)
+	// Observer receives what the sweeper does, for metrics; nil observes nothing.
+	Observer Observer
 }
 
 // TopUpKey is the Gas Top-Up's idempotency key (deposit-flow.md invariant #13, PROPOSED):
@@ -211,7 +213,9 @@ func (s *Sweeper) sweepToken(ctx context.Context, ev events.DepositConfirmed, us
 
 // sweepTx sends a Sweep, waits for it, and reports its gas.
 func (s *Sweeper) sweepTx(ctx context.Context, raw []byte) error {
+	done := orNop(s.Observer).Start("sweep")
 	hash, rc, err := s.broadcastAndWait(ctx, raw, "sweep")
+	done(err == nil)
 	if err != nil {
 		return err
 	}
@@ -233,7 +237,9 @@ func (s *Sweeper) topUp(ctx context.Context, ev events.DepositConfirmed, user co
 	}
 	log.Printf("gas top-up for deposit %s (hot wallet nonce %d)", ev.Key(), nonce)
 	key := TopUpKey(ev.ChainID, ev.TxHash, ev.LogIndex)
+	done := orNop(s.Observer).Start("gas_topup")
 	hash, rc, err := s.sendHotTx(ctx, key, raw)
+	done(err == nil)
 	if err != nil {
 		return err
 	}
