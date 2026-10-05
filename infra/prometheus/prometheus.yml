@@ -1,10 +1,29 @@
+# Every service exposes /metrics on its own plain-HTTP port 9100 (docs/design/monitoring-dashboard.md, decision
+# (d)): internal to the compose network, never published to the host. Targets resolve by service name when the
+# stack is one compose project (e2e/ and dev/ merge infra + e2e + dev); a target that is not running shows as
+# down (up == 0), it does not break the others.
 global:
-  scrape_interval: 5s
+  scrape_interval: 15s # collectors read databases and the RPC at scrape time
 
-# No app services expose /metrics yet (that's phase 3 — observability).
-# Self-scrape for now so Prometheus has something to show; add each
-# service's target here as it gets instrumented.
 scrape_configs:
   - job_name: prometheus
     static_configs:
       - targets: ["localhost:9090"]
+  - job_name: digiwal
+    static_configs:
+      - targets: ["api-gateway:9100"]
+        labels: {service: api-gateway}
+      - targets: ["ledger-service:9100"]
+        labels: {service: ledger-service}
+      - targets: ["withdrawal-service:9100"]
+        labels: {service: withdrawal-service}
+      - targets: ["wallet-service:9100"]
+        labels: {service: wallet-service}
+      - targets: ["chain-watcher:9100"]
+        labels: {service: chain-watcher}
+      - targets: ["sweeper:9100"]
+        labels: {service: sweeper}
+      - targets: ["history-service:9100"]
+        labels: {service: history-service}
+      - targets: ["auditor:9100"] # dev environment only
+        labels: {service: auditor}
