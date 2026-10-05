@@ -58,6 +58,19 @@ dashboards. Both are bound to `127.0.0.1` on vm3, so reach them through a tunnel
 ssh -L 3000:127.0.0.1:3000 -L 9090:127.0.0.1:9090 vm3     # Grafana http://localhost:3000, Prometheus http://localhost:9090
 ```
 
+**Alerts to Telegram.** Prometheus sends firing alerts to Alertmanager (vm3, `127.0.0.1:9093`), which posts them to a
+Telegram chat: one message per group of alerts that fire together (30 s), a reminder every 4 h while still firing, and a
+"resolved" message. Create a bot with @BotFather, add it to the chat, and put its token and the chat id (a negative number
+for a group) in vm3's `dev/.env`, then `make monitoring` there:
+
+```
+TELEGRAM_BOT_TOKEN=123456:ABC...
+TELEGRAM_CHAT_ID=-1001234567890
+```
+
+Without them alerts are held and visible on the Alertmanager page only. (Grafana's own Alertmanager does not accept alerts
+from Prometheus in the version we run, so Grafana is not in this path.)
+
 Set `RECON_CAPITAL` (and `RECON_TOLERANCE`) in vm3's `.env` to what the operator put into custody that no user owns
 (the Hot Wallet's liquidity), for example `RECON_CAPITAL=ETH=<minor units>,TT=<minor units>`; until then the
 reconciliation reports that capital as a residual (C1).

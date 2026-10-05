@@ -1,7 +1,7 @@
 # Node overlay for vm3 (10.10.0.2): custody and chain. See vm2.yml for how the two overlays fit together.
 #   here:      postgres (custody, withdrawal, chain_watcher, auditor), kafka, redis, anvil, wallet-service,
 #              withdrawal-service, chain-watcher, sweeper, simulator, auditor, and the Measurement Plane: Prometheus,
-#              Grafana, kafka-exporter, and node/cAdvisor/postgres exporters
+#              Alertmanager (to Telegram), Grafana, kafka-exporter, and node/cAdvisor/postgres exporters
 #   on vm2:    ledger-service, api-gateway, history-service, mongo
 networks:
   default:
@@ -132,6 +132,10 @@ services:
     ports: !override ["127.0.0.1:3000:3000"] # anonymous Admin: never on a routable address
     restart: unless-stopped
     mem_limit: 400m
+
+  alertmanager:
+    ports: ["127.0.0.1:9093:9093"]
+    mem_limit: 100m
 
   kafka-exporter:
     mem_limit: 100m

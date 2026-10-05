@@ -6,6 +6,12 @@ global:
   scrape_interval: 15s # collectors read databases and the RPC at scrape time
   evaluation_interval: 15s
 
+# Firing alerts go to Alertmanager (infra/alertmanager), which sends them to Telegram.
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ["alertmanager:9093"]
+
 rule_files:
   - /etc/prometheus/alerts.yml
   - /etc/prometheus/alerts-node.yml

@@ -142,6 +142,23 @@ services:
       postgres: {condition: service_healthy}
     logging: *rotate
 
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    restart: unless-stopped
+    entrypoint: ["/bin/sh", "/etc/alertmanager/entrypoint.sh"]
+    environment:
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
+    volumes:
+      - ../infra/alertmanager/entrypoint.sh:/etc/alertmanager/entrypoint.sh:ro
+      - alertmanager_data:/alertmanager
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:9093/-/healthy"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    logging: *rotate
+
   kafka-exporter:
     image: danielqsj/kafka-exporter:v1.8.0
     restart: unless-stopped
@@ -151,5 +168,6 @@ services:
     logging: *rotate
 
 volumes:
+  alertmanager_data:
   anvil_data:
   sim_data:

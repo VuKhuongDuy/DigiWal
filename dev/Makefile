@@ -24,7 +24,7 @@ MONITORING = node-exporter cadvisor postgres-exporter
 else ifeq ($(NODE),vm3)
 STORES   = postgres redis kafka anvil
 SERVICES = wallet-service withdrawal-service chain-watcher sweeper simulator
-MONITORING = node-exporter cadvisor postgres-exporter kafka-exporter prometheus grafana
+MONITORING = node-exporter cadvisor postgres-exporter kafka-exporter alertmanager prometheus grafana
 else
 STORES   = postgres redis kafka mongo anvil
 SERVICES = wallet-service ledger-service chain-watcher sweeper api-gateway withdrawal-service history-service simulator
