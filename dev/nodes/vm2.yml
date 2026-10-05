@@ -20,6 +20,8 @@ services:
   chain-watcher: {profiles: [elsewhere]}
   sweeper: {profiles: [elsewhere]}
   simulator: {profiles: [elsewhere]}
+  auditor: {profiles: [elsewhere]}
+  kafka-exporter: {profiles: [elsewhere]}
 
   postgres:
     command: [postgres, -c, hba_file=/etc/postgresql/pg_hba.conf, -c, shared_preload_libraries=pg_stat_statements,
@@ -41,7 +43,7 @@ services:
     environment:
       MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ADMIN_PASSWORD:?run make env} # first init only; `make roles` changes it on an existing volume
     command: [mongod, --wiredTigerCacheSizeGB, "0.25"] # the default sizes the cache to the host's RAM
-    ports: !override ["127.0.0.1:27017:27017"]
+    ports: !override ["127.0.0.1:27017:27017", "10.10.0.1:27017:27017"] # the auditor (vm3) reads it as auditor_ro
     mem_limit: 600m
 
   ledger-service:
@@ -50,7 +52,7 @@ services:
     extra_hosts: ["kafka:10.10.0.2"]
     depends_on: !override
       postgres: {condition: service_healthy}
-    ports: !override ["10.10.0.1:8444:8443"] # withdrawal-service and sweeper (vm3)
+    ports: !override ["10.10.0.1:8444:8443", "10.10.0.1:9102:9100"] # withdrawal-service and sweeper (vm3); /metrics for Prometheus (vm3)
     mem_limit: 300m
 
   api-gateway:
@@ -58,7 +60,7 @@ services:
       POSTGRES_DSN: postgres://svc_gateway:${SVC_GATEWAY_PASSWORD}@postgres:5432/api_gateway?sslmode=disable
       WITHDRAWAL_SERVICE_URL: https://withdrawal-service:8446
     extra_hosts: ["wallet-service:10.10.0.2", "withdrawal-service:10.10.0.2"]
-    ports: !override ["10.10.0.1:8084:8080", "127.0.0.1:8084:8080"] # never on the public interface (invariant 8)
+    ports: !override ["10.10.0.1:8084:8080", "127.0.0.1:8084:8080", "10.10.0.1:9101:9100"] # never on the public interface (invariant 8); /metrics
     mem_limit: 500m
 
   history-service:
@@ -69,6 +71,16 @@ services:
       mongo: {condition: service_started}
     ports: !override []
     mem_limit: 200m
+
+  node-exporter:
+    command: [--path.rootfs=/host, "--web.listen-address=10.10.0.1:9100"]
+    mem_limit: 100m
+  cadvisor:
+    ports: ["10.10.0.1:8081:8080"]
+    mem_limit: 200m
+  postgres-exporter:
+    ports: ["10.10.0.1:9187:9187"]
+    mem_limit: 100m
 
 volumes:
   pg_ledger_data:

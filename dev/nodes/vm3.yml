@@ -1,6 +1,7 @@
 # Node overlay for vm3 (10.10.0.2): custody and chain. See vm2.yml for how the two overlays fit together.
-#   here:      postgres (custody, withdrawal, chain_watcher), kafka, redis, anvil, wallet-service,
-#              withdrawal-service, chain-watcher, sweeper, simulator
+#   here:      postgres (custody, withdrawal, chain_watcher, auditor), kafka, redis, anvil, wallet-service,
+#              withdrawal-service, chain-watcher, sweeper, simulator, auditor, and the Measurement Plane: Prometheus,
+#              Grafana, kafka-exporter, and node/cAdvisor/postgres exporters
 #   on vm2:    ledger-service, api-gateway, history-service, mongo
 networks:
   default:
@@ -12,8 +13,6 @@ services:
   ledger-service: {profiles: [elsewhere]}
   api-gateway: {profiles: [elsewhere]}
   history-service: {profiles: [elsewhere]}
-  prometheus: {profiles: [elsewhere]}
-  grafana: {profiles: [elsewhere]}
 
   postgres:
     command: [postgres, -c, hba_file=/etc/postgresql/pg_hba.conf, -c, shared_preload_libraries=pg_stat_statements,
@@ -21,10 +20,11 @@ services:
     environment:
       POSTGRES_PASSWORD: ${PG_ADMIN_PASSWORD:?run make env}
       POSTGRES_DB: postgres
-      PG_DB_ROLES: "custody=svc_wallet withdrawal=svc_withdrawal chain_watcher=svc_chainwatcher"
+      PG_DB_ROLES: "custody=svc_wallet withdrawal=svc_withdrawal chain_watcher=svc_chainwatcher auditor=svc_auditor"
       PW_svc_wallet: ${SVC_WALLET_PASSWORD:?run make env}
       PW_svc_withdrawal: ${SVC_WITHDRAWAL_PASSWORD:?run make env}
       PW_svc_chainwatcher: ${SVC_CHAINWATCHER_PASSWORD:?run make env}
+      PW_svc_auditor: ${SVC_AUDITOR_PASSWORD:?run make env}
     volumes: !override
       - pg_core_data:/var/lib/postgresql/data
       - ../infra/postgres/init-node.sh:/docker-entrypoint-initdb.d/10-init-node.sh:ro
@@ -92,5 +92,61 @@ services:
       chain-watcher: {condition: service_started}
     mem_limit: 200m
 
+  # ---- the auditor (dev only): reads the other services' stores as the read-only login auditor_ro (`make audit-roles`)
+  auditor:
+    environment:
+      POSTGRES_DSN: postgres://svc_auditor:${SVC_AUDITOR_PASSWORD}@postgres:5432/auditor?sslmode=disable
+      LEDGER_RO_DSN: postgres://auditor_ro:auditor_ro@10.10.0.1:5432/ledger?sslmode=disable # pg-ledger on vm2
+      WALLET_RO_DSN: postgres://auditor_ro:auditor_ro@postgres:5432/custody?sslmode=disable
+      WITHDRAWAL_RO_DSN: postgres://auditor_ro:auditor_ro@postgres:5432/withdrawal?sslmode=disable
+      WATCHER_RO_DSN: postgres://auditor_ro:auditor_ro@postgres:5432/chain_watcher?sslmode=disable
+      HISTORY_RO_MONGO_URI: mongodb://auditor_ro:auditor_ro@10.10.0.1:27017/?authSource=history # mongo on vm2
+    ports: !override []
+    depends_on: !override
+      postgres: {condition: service_healthy}
+      anvil: {condition: service_healthy}
+      wallet-service: {condition: service_started}
+    mem_limit: 200m
+
+  # ---- Measurement Plane. Prometheus and Grafana are reached over ssh tunnels only (127.0.0.1).
+  prometheus:
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=2y
+      - --storage.tsdb.retention.size=25GB # the disk is 96 GB and shared with Anvil, Kafka and Postgres
+    volumes: !override
+      - ../infra/prometheus/prometheus.multi-node.yml:/etc/prometheus/prometheus.yml:ro
+      - ../infra/prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - ../infra/prometheus/alerts-node.yml:/etc/prometheus/alerts-node.yml:ro
+      - prometheus_data:/prometheus
+    ports: !override ["127.0.0.1:9090:9090"]
+    restart: unless-stopped
+    mem_limit: 1g
+
+  grafana:
+    volumes: !override
+      - ../infra/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ../infra/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana
+    ports: !override ["127.0.0.1:3000:3000"] # anonymous Admin: never on a routable address
+    restart: unless-stopped
+    mem_limit: 400m
+
+  kafka-exporter:
+    mem_limit: 100m
+
+  node-exporter:
+    command: [--path.rootfs=/host, "--web.listen-address=10.10.0.2:9100"]
+    mem_limit: 100m
+  cadvisor:
+    ports: ["10.10.0.2:8081:8080"]
+    mem_limit: 200m
+  postgres-exporter:
+    ports: ["10.10.0.2:9187:9187"]
+    mem_limit: 100m
+
 volumes:
   pg_core_data:
+  prometheus_data:
+  grafana_data:

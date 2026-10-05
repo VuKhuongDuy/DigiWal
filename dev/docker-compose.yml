@@ -90,6 +90,66 @@ services:
       sweeper: {condition: service_started}
       chain-watcher: {condition: service_started}
 
+  # --- the auditor (dev only) and the Measurement Plane exporters (docs/design/multi-node-deployment.md, M4). Not part of
+  # the product stack: `make up` starts them last, and only on the node whose overlay enables them.
+  auditor:
+    build:
+      context: ..
+      dockerfile: services/auditor/Dockerfile
+    restart: unless-stopped
+    logging: *rotate
+    environment:
+      PORT: "8080"
+      AUDITOR_ENV: dev
+      AUDITOR_ALLOWED_CHAIN_IDS: "31337"
+      RPC_URL: http://anvil:8545
+      TLS_CERT_FILE: /certs/cert.pem
+      TLS_KEY_FILE: /certs/key.pem
+      TLS_CA_FILE: /certs/ca-cert.pem
+      AUDIT_WALLET_URL: https://wallet-service:8443
+      RECON_CAPITAL: ${RECON_CAPITAL:-}
+      RECON_TOLERANCE: ${RECON_TOLERANCE:-}
+    volumes:
+      - ../infra/pki/out/auditor:/certs:ro
+
+  node-exporter:
+    image: prom/node-exporter:v1.8.2
+    restart: unless-stopped
+    network_mode: host # the host's own CPU, memory, disk and network; bound to the private address by the overlay
+    pid: host
+    volumes: ["/:/host:ro,rslave"]
+    logging: *rotate
+
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:v0.49.1
+    restart: unless-stopped
+    command: [--housekeeping_interval=10s, --docker_only=true, --store_container_labels=false,
+      "--whitelisted_container_labels=com.docker.compose.service"]
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+    devices: ["/dev/kmsg"]
+    logging: *rotate
+
+  postgres-exporter:
+    image: quay.io/prometheuscommunity/postgres-exporter:v0.15.0
+    restart: unless-stopped
+    environment:
+      DATA_SOURCE_NAME: postgresql://exporter:${EXPORTER_PASSWORD:-}@postgres:5432/postgres?sslmode=disable
+    depends_on:
+      postgres: {condition: service_healthy}
+    logging: *rotate
+
+  kafka-exporter:
+    image: danielqsj/kafka-exporter:v1.8.0
+    restart: unless-stopped
+    command: [--kafka.server=kafka:9092] # consumer lag per group: no service exports it
+    depends_on:
+      kafka: {condition: service_healthy}
+    logging: *rotate
+
 volumes:
   anvil_data:
   sim_data:

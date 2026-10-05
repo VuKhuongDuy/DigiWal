@@ -1,0 +1,97 @@
+rule_files:
+  - alerts-node.yml
+evaluation_interval: 1m
+tests:
+  - interval: 1m
+    input_series:
+      # vm2 has 5% available, vm3 has 50%.
+      - {series: 'node_memory_MemAvailable_bytes{node="vm2"}', values: '400+0x10'}
+      - {series: 'node_memory_MemTotal_bytes{node="vm2"}', values: '8000+0x10'}
+      - {series: 'node_memory_MemAvailable_bytes{node="vm3"}', values: '4000+0x10'}
+      - {series: 'node_memory_MemTotal_bytes{node="vm3"}', values: '8000+0x10'}
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: NodeMemoryLow
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: NodeMemoryLow
+        exp_alerts:
+          - exp_labels: {node: vm2, severity: critical}
+            exp_annotations:
+              summary: "vm2 has under 8% memory available"
+              description: "The design's abort line is 600 MB on a 7.8 GB node: the kernel will start killing containers."
+  - interval: 1m
+    input_series:
+      # 0.2 s of memory stall per second on vm2 (20%), 0.01 on vm3.
+      - {series: 'node_pressure_memory_waiting_seconds_total{node="vm2"}', values: '0+12x20'}
+      - {series: 'node_pressure_memory_waiting_seconds_total{node="vm3"}', values: '0+0.6x20'}
+      - {series: 'node_pressure_cpu_waiting_seconds_total{node="vm2"}', values: '0+12x20'}
+      - {series: 'node_pressure_cpu_waiting_seconds_total{node="vm3"}', values: '0+36x20'}
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: NodeMemoryPressure
+        exp_alerts:
+          - exp_labels: {node: vm2, severity: warning}
+            exp_annotations:
+              summary: "vm2 is stalling on memory"
+              description: "Tasks spent over 10% of the time waiting for memory (PSI), before an OOM kill."
+      - eval_time: 15m
+        alertname: NodeCPUPressure
+        exp_alerts:
+          - exp_labels: {node: vm3, severity: warning}
+            exp_annotations:
+              summary: "vm3 has runnable tasks waiting for a core"
+              description: "CPU is saturated (PSI): latency on this node is no longer the service's own."
+  - interval: 1m
+    input_series:
+      - {series: 'node_filesystem_avail_bytes{node="vm3",mountpoint="/"}', values: '10+0x20'}
+      - {series: 'node_filesystem_size_bytes{node="vm3",mountpoint="/"}', values: '100+0x20'}
+      - {series: 'node_filesystem_avail_bytes{node="vm3",mountpoint="/boot"}', values: '1+0x20'}
+      - {series: 'node_filesystem_size_bytes{node="vm3",mountpoint="/boot"}', values: '100+0x20'}
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: NodeDiskFilling
+        exp_alerts:
+          - exp_labels: {node: vm3, mountpoint: "/", severity: warning}
+            exp_annotations:
+              summary: "vm3 root disk is over 85% full"
+              description: "Anvil state, Kafka, Postgres WAL and the Prometheus TSDB all live here."
+  - interval: 1m
+    input_series:
+      - {series: 'container_oom_events_total{node="vm3",container_label_com_docker_compose_service="anvil"}', values: '0 0 0 1 1 1 1 1 1 1 1 1'}
+      - {series: 'container_oom_events_total{node="vm3",container_label_com_docker_compose_service=""}', values: '0 0 0 5 5 5 5 5 5 5 5 5'}
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: ContainerOOMKilled
+        exp_alerts:
+          - exp_labels: {node: vm3, container_label_com_docker_compose_service: anvil, severity: critical}
+            exp_annotations:
+              summary: "anvil on vm3 was OOM-killed"
+              description: "It hit its mem_limit. For Anvil this rolls the chain back to its last state dump (invariant 10)."
+      - eval_time: 12m
+        alertname: ContainerOOMKilled
+        exp_alerts: []
+  - interval: 1m
+    input_series:
+      - {series: 'pg_stat_activity_count{server="pg-ledger",datname="ledger",state="active"}', values: '50+0x20'}
+      - {series: 'pg_stat_activity_count{server="pg-ledger",datname="api_gateway",state="idle"}', values: '45+0x20'}
+      - {series: 'pg_settings_max_connections{server="pg-ledger"}', values: '100+0x20'}
+      - {series: 'pg_stat_activity_count{server="pg-core",datname="withdrawal",state="idle"}', values: '30+0x20'}
+      - {series: 'pg_settings_max_connections{server="pg-core"}', values: '100+0x20'}
+      - {series: 'kafka_consumergroup_lag{consumergroup="ledger",topic="deposits.confirmed",partition="0"}', values: '0+100x20'}
+      - {series: 'kafka_consumergroup_lag{consumergroup="history",topic="deposits.confirmed",partition="0"}', values: '3+0x20'}
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: PostgresConnectionsHigh
+        exp_alerts:
+          - exp_labels: {server: pg-ledger, severity: warning}
+            exp_annotations:
+              summary: "pg-ledger is using over 90% of max_connections"
+              description: "Client Pools together are close to the server's limit."
+      - eval_time: 18m
+        alertname: KafkaConsumerLag
+        exp_alerts:
+          - exp_labels: {consumergroup: ledger, severity: warning}
+            exp_annotations:
+              summary: "consumer group ledger is 1800 messages behind"
+              description: "A consumer is stuck or slower than the producers; deposits or history stop advancing."
