@@ -138,3 +138,7 @@ ran, which `JobStale` needs), `digiwal_job_last_result{job,result}` (1 for the c
 `digiwal_suspicious_oldest_open_age_seconds{severity}`, `digiwal_suspicious_detected_total` (rows are never deleted, so it only
 grows), and `digiwal_recon_custody{asset,component}` (latest on_chain / ledger / explained / residual, whole units, from
 `recon_snapshots`). Counts only: no reference, user id, address or hash is ever a label.
+
+**Grafana.** The Engineering dashboard reads four of this service's tables through a read-only login, `grafana_ro` (`roles/grafana.sql`, applied by
+`make grafana-role`): `suspicious_transactions`, `treasury_movements`, `job_runs`, `recon_snapshots`. Not `pending_findings` (an unconfirmed first
+sighting is not a finding) and not `audit_cursor`. A test asserts it can read exactly those and write nothing.
