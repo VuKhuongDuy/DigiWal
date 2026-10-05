@@ -127,3 +127,14 @@ All SQL against another service's database lives in `internal/source` (SQL anywh
 | `PORT` | `/healthz`, default 8080 |
 
 `make up` (needs the `auditor` database; the target creates it), `make test`.
+
+## Metrics (A9)
+
+`GET /metrics` on its own internal port (`METRICS_PORT`, default 9100), one scrape-time collector over the auditor's own
+database, so "last run" survives a restart (invariant 7) and an unreadable database omits the series (`collector_up` 0):
+`digiwal_job_last_run_timestamp_seconds`, `..._last_success_timestamp_seconds` (absent if the job never ended ok or warn: an
+error is never a success), `..._last_duration_seconds`, `digiwal_job_interval_seconds` (also for a registered job that never
+ran, which `JobStale` needs), `digiwal_job_last_result{job,result}` (1 for the current result), `digiwal_suspicious_open{flow,rule,severity}`,
+`digiwal_suspicious_oldest_open_age_seconds{severity}`, `digiwal_suspicious_detected_total` (rows are never deleted, so it only
+grows), and `digiwal_recon_custody{asset,component}` (latest on_chain / ledger / explained / residual, whole units, from
+`recon_snapshots`). Counts only: no reference, user id, address or hash is ever a label.

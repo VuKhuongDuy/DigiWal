@@ -18,9 +18,11 @@ import (
 	"syscall"
 	"time"
 
+	"digiwal/pkg/metrics"
 	"digiwal/services/auditor/internal/audit"
 	"digiwal/services/auditor/internal/guard"
 	"digiwal/services/auditor/internal/job"
+	"digiwal/services/auditor/internal/obs"
 	"digiwal/services/auditor/internal/rules/treasury"
 	"digiwal/services/auditor/internal/source"
 	"digiwal/services/auditor/internal/store"
@@ -74,6 +76,21 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	// Metrics on their own internal port, read from the auditor's own database (so a restart loses nothing).
+	intervals := map[string]time.Duration{}
+	for _, j := range jobs {
+		intervals[j.Name()] = j.Interval()
+	}
+	reg := metrics.NewRegistry()
+	reg.MustRegister(obs.Collector(st, intervals))
+	go func() {
+		addr := ":" + envOr("METRICS_PORT", metrics.DefaultPort)
+		log.Printf("metrics on %s", addr)
+		if err := metrics.Serve(ctx, addr, reg); err != nil {
+			log.Printf("metrics listener: %v", err)
+		}
+	}()
+
 	log.Printf("auditor running (dev): chain %d, %d job(s)", chainID, len(jobs))
 	job.Run(ctx, st, jobs)
 	if len(jobs) == 0 {
