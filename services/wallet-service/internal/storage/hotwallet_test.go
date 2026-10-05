@@ -179,3 +179,31 @@ func TestNonceGapFreeze_RefusesNewAllocationButAllowsReplay(t *testing.T) {
 		t.Fatalf("after resolve: %+v %v (want nonce 3)", sig, err)
 	}
 }
+
+func TestNonceStatesReflectFreezeAndResolve(t *testing.T) {
+	s := newStore(t)
+	ctx := context.Background()
+	if st, err := s.NonceStates(ctx); err != nil || len(st) != 0 {
+		t.Fatalf("a chain that never signed has no row: %v %v", st, err)
+	}
+	if _, err := s.pool.Exec(ctx, `INSERT INTO hot_wallet_nonces (chain_id, next_nonce) VALUES (31337, 5)`); err != nil {
+		t.Fatal(err)
+	}
+	st, _ := s.NonceStates(ctx)
+	if len(st) != 1 || st[0].NextNonce != 5 || st[0].FrozenFrom != nil {
+		t.Fatalf("%+v", st)
+	}
+	if _, err := s.FreezeNonceGap(ctx, 31337, 3); err != nil {
+		t.Fatal(err)
+	}
+	st, _ = s.NonceStates(ctx)
+	if st[0].FrozenFrom == nil || *st[0].FrozenFrom != 3 {
+		t.Fatalf("%+v", st)
+	}
+	if err := s.ResolveNonceGap(ctx, 31337); err != nil {
+		t.Fatal(err)
+	}
+	if st, _ = s.NonceStates(ctx); st[0].FrozenFrom != nil {
+		t.Fatalf("resolved: %+v", st)
+	}
+}

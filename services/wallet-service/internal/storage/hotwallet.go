@@ -210,3 +210,35 @@ func lockNonceRow(ctx context.Context, tx pgx.Tx, chainID int64, seedNonce func(
 	}
 	return next, frozen, nil
 }
+
+// NonceState is the Hot Wallet's nonce bookkeeping on one chain, as exported by the metrics.
+type NonceState struct {
+	ChainID    int64
+	NextNonce  uint64
+	FrozenFrom *uint64 // non-nil while a Nonce Gap is open
+}
+
+// NonceStates lists every chain's nonce state. Read-only.
+func (s *Store) NonceStates(ctx context.Context) ([]NonceState, error) {
+	rows, err := s.pool.Query(ctx, `SELECT chain_id, next_nonce, frozen_from_nonce FROM hot_wallet_nonces ORDER BY chain_id`)
+	if err != nil {
+		return nil, fmt.Errorf("reading nonce states: %w", err)
+	}
+	defer rows.Close()
+	var out []NonceState
+	for rows.Next() {
+		var n NonceState
+		var next int64
+		var from *int64
+		if err := rows.Scan(&n.ChainID, &next, &from); err != nil {
+			return nil, err
+		}
+		n.NextNonce = uint64(next)
+		if from != nil {
+			f := uint64(*from)
+			n.FrozenFrom = &f
+		}
+		out = append(out, n)
+	}
+	return out, rows.Err()
+}

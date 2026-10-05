@@ -30,6 +30,7 @@ import (
 	"digiwal/services/wallet-service/internal/authz"
 	"digiwal/services/wallet-service/internal/crypto"
 	"digiwal/services/wallet-service/internal/hdwallet"
+	"digiwal/services/wallet-service/internal/obs"
 	"digiwal/services/wallet-service/internal/signing"
 	"digiwal/services/wallet-service/internal/storage"
 	"digiwal/services/wallet-service/internal/treasury"
@@ -221,7 +222,7 @@ func runServer(ctx context.Context, store *storage.Store, sealer *crypto.Sealer)
 	// Metrics: HTTP latency, the connection pool and the Go runtime, on their own internal port. Nothing key-related
 	// is exported, and the signing listener never serves /metrics.
 	reg := metrics.NewRegistry()
-	reg.MustRegister(metrics.PoolCollector("wallet-service", func() metrics.PoolStat { return metrics.PoolFromPgx(store.PoolStat()) }))
+	reg.MustRegister(obs.Collector(store), metrics.PoolCollector("wallet-service", func() metrics.PoolStat { return metrics.PoolFromPgx(store.PoolStat()) }))
 	httpm := metrics.NewHTTP(reg, "wallet-service")
 	go func() {
 		addr := ":" + envOr("METRICS_PORT", metrics.DefaultPort)
