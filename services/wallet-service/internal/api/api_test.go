@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -260,7 +261,7 @@ func TestSystemAddresses(t *testing.T) {
 		Warm:    common.HexToAddress("0xa0Ee7A142d267C1f36714E4a8F75612F20a79720"),
 	})
 	// withdrawal-service only: the hot-address readers (sweeper, chain-watcher) get no new grant.
-	for cn, want := range map[string]int{"withdrawal-service": 200, "sweeper": 403, "chain-watcher": 403, "api-gateway": 403, "ledger-service": 403, "": 403} {
+	for cn, want := range map[string]int{"withdrawal-service": 200, "auditor": 200, "sweeper": 403, "chain-watcher": 403, "api-gateway": 403, "ledger-service": 403, "": 403} {
 		if got := get(srv, cn).Code; got != want {
 			t.Errorf("CN=%q: %d, want %d", cn, got, want)
 		}
@@ -268,6 +269,28 @@ func TestSystemAddresses(t *testing.T) {
 	rec := get(srv, "withdrawal-service")
 	if strings.TrimSpace(rec.Body.String()) != `{"chain_id":31337,"hot":"0x3d0290A916B57AE48a2840E7d3547fA317F976c3","warm":"0xa0Ee7A142d267C1f36714E4a8F75612F20a79720"}` {
 		t.Fatalf("body = %s", rec.Body)
+	}
+	// With a Cold Wallet declared it is added; without one the body above is unchanged.
+	withCold := (&Server{hotSigner: &fakeHot{}}).WithSystemAddresses(SystemAddresses{
+		ChainID: 31337,
+		Hot:     common.HexToAddress("0x3d0290A916B57AE48a2840E7d3547fA317F976c3"),
+		Warm:    common.HexToAddress("0xa0Ee7A142d267C1f36714E4a8F75612F20a79720"),
+		Cold:    common.HexToAddress("0x70997970C51812dc3A010C7d01b50e0d17dc79C8"),
+	})
+	var got map[string]any
+	if err := json.Unmarshal(get(withCold, "auditor").Body.Bytes(), &got); err != nil || got["cold"] != "0x70997970C51812dc3A010C7d01b50e0d17dc79C8" ||
+		got["hot"] != "0x3d0290A916B57AE48a2840E7d3547fA317F976c3" || got["warm"] != "0xa0Ee7A142d267C1f36714E4a8F75612F20a79720" || len(got) != 4 {
+		t.Fatalf("body with cold = %v (%v)", got, err)
+	}
+	// The auditor is allowed this one endpoint and nothing that signs or reveals the Hot address on its own.
+	for _, path := range []string{"/v1/wallet/hot-address", "/v1/sign/hot-wallet", "/v1/sign/user-address", "/v1/sign/hot-wallet/k/void", "/v1/sign/hot-wallet/k/replace"} {
+		for _, method := range []string{"GET", "POST"} {
+			rec := httptest.NewRecorder()
+			withCold.MTLSRoutes().ServeHTTP(rec, withPeer(httptest.NewRequest(method, path, nil), "auditor"))
+			if rec.Code == 200 || rec.Code == 202 {
+				t.Errorf("CN=auditor %s %s: %d, it must not reach this", method, path, rec.Code)
+			}
+		}
 	}
 	// Not configured yet: 503, never a zero/partial answer.
 	if rec := get(&Server{}, "withdrawal-service"); rec.Code != 503 || strings.Contains(rec.Body.String(), "0x") {

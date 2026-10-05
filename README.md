@@ -35,6 +35,8 @@ DigiWal/
     TEAM_OPERATING_MODEL.md        roles, workflow, process gates
     DEVELOPMENT.md                 local dev setup (Anvil, test funds, reorg simulation)
     design/                        per-feature design docs (produced before non-trivial implementation)
+  dev/                            the always-on dev environment on the VM (whole stack + user-activity simulator)
+  e2e/                            end-to-end tests, and `sim`, the CLI/daemon that simulates users
   infra/                          shared docker-compose services (Postgres, Redis, Kafka, MongoDB, Prometheus, Grafana)
   services/
     wallet-service/                master HD wallet + per-user deposit address derivation

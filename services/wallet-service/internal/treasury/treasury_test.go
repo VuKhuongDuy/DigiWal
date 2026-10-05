@@ -69,3 +69,46 @@ func TestLoadRefusesBadFiles(t *testing.T) {
 		t.Error("missing file: loaded")
 	}
 }
+
+const cold = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
+
+func TestColdFor(t *testing.T) {
+	hot := common.HexToAddress("0x3d0290A916B57AE48a2840E7d3547fA317F976c3")
+	base := "chains:\n  - chain_id: 31337\n    warm_address: \"" + warm + "\"\n"
+
+	// optional: no cold_address is not an error, and not an address
+	f, err := Load(write(t, base))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c, ok, err := f.ColdFor(31337, hot, common.HexToAddress(warm)); err != nil || ok || c != (common.Address{}) {
+		t.Fatalf("absent: %s %v %v", c.Hex(), ok, err)
+	}
+
+	f, err = Load(write(t, base+"    cold_address: \""+strings.ToLower(cold)+"\"\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, ok, err := f.ColdFor(31337, hot, common.HexToAddress(warm))
+	if err != nil || !ok || c != common.HexToAddress(cold) {
+		t.Fatalf("declared: %s %v %v", c.Hex(), ok, err)
+	}
+	if _, _, err := f.ColdFor(31337, common.HexToAddress(cold), common.HexToAddress(warm)); err == nil {
+		t.Error("a Cold address equal to the Hot Wallet was accepted")
+	}
+	if _, _, err := f.ColdFor(31337, hot, common.HexToAddress(cold)); err == nil {
+		t.Error("a Cold address equal to the Warm Wallet was accepted")
+	}
+	if _, ok, _ := f.ColdFor(11155111, hot, common.HexToAddress(warm)); ok {
+		t.Error("a chain the file does not list has no Cold")
+	}
+}
+
+func TestLoadRefusesBadColdAddress(t *testing.T) {
+	base := "chains:\n  - chain_id: 31337\n    warm_address: \"" + warm + "\"\n    cold_address: "
+	for name, v := range map[string]string{"short": `"0x1234"`, "no 0x": `"` + cold[2:] + `"`, "zero": `"0x0000000000000000000000000000000000000000"`, "not hex": `"0xZZ0000000000000000000000000000000000000"`} {
+		if _, err := Load(write(t, base+v+"\n")); err == nil {
+			t.Errorf("%s: a bad cold_address was accepted", name)
+		}
+	}
+}

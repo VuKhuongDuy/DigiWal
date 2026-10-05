@@ -36,7 +36,7 @@ POST /v1/sign/hot-wallet/{key}/replace    # CN: withdrawal-service, sweeper; own
 POST /v1/sign/user-address                # CN: sweeper only (Sweep: user key -> Hot Wallet)
 GET  /v1/addresses/{address}              # CN: chain-watcher only -> {user_id, chain} or 404
 GET  /v1/wallet/hot-address               # CN: withdrawal-service, sweeper, chain-watcher -> {address}; 503 without a hot_wallet seed
-GET  /v1/wallet/system-addresses          # CN: withdrawal-service only -> {chain_id, hot, warm}; 503 until the Hot Wallet is configured
+GET  /v1/wallet/system-addresses          # CN: withdrawal-service, auditor (dev) -> {chain_id, hot, warm, cold?}; 503 until the Hot Wallet is configured
 POST /v1/wallet/nonce-gap                 # CN: withdrawal-service only {chain_id, from_nonce} -> freeze Hot Wallet signing
 ```
 
@@ -69,7 +69,10 @@ missing or unparseable, lists no chains, has a non-positive or duplicate chain i
 zero address; and, once the Hot Wallet is configured, if there is no entry for its chain or the Warm
 address equals the Hot Wallet's. withdrawal-service uses it to refuse withdrawals to the Hot/Warm
 Wallet (`withdrawal-flow.md` #18) and later as its Treasury Sweep destination. It sits beside
-`hot-address`, which is unchanged. To change the Warm address: edit the file, restart wallet-service,
+`hot-address`, which is unchanged. A chain entry may also carry an optional public `cold_address` (informational: it
+restricts nothing, withdrawals to Cold stay allowed). If present it is validated like the Warm address, must differ from
+the Hot and Warm addresses (else startup fails), and is added to the answer as `cold`; without one the answer is unchanged.
+`CN=auditor` (the dev auditor) may read this endpoint and nothing else. To change the Warm address: edit the file, restart wallet-service,
 then withdrawal-service.
 
 **Never strand a nonce** (task 3.13, `withdrawal-flow.md` invariants #21-#23). A signed Hot Wallet tx that

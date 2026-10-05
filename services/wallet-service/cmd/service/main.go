@@ -200,8 +200,16 @@ func runServer(ctx context.Context, store *storage.Store, sealer *crypto.Sealer)
 			if err != nil {
 				log.Fatal(err)
 			}
-			system = &api.SystemAddresses{ChainID: signer.ChainID(), Hot: signer.HotWalletAddress(), Warm: warm}
-			log.Printf("treasury: chain %d, warm %s", system.ChainID, warm.Hex())
+			cold, hasCold, err := treasuryFile.ColdFor(signer.ChainID(), signer.HotWalletAddress(), warm)
+			if err != nil {
+				log.Fatal(err)
+			}
+			system = &api.SystemAddresses{ChainID: signer.ChainID(), Hot: signer.HotWalletAddress(), Warm: warm, Cold: cold}
+			if hasCold {
+				log.Printf("treasury: chain %d, warm %s, cold %s", system.ChainID, warm.Hex(), cold.Hex())
+			} else {
+				log.Printf("treasury: chain %d, warm %s, no cold address declared", system.ChainID, warm.Hex())
+			}
 		}
 	case errors.Is(err, storage.ErrNotFound):
 		log.Println("WARNING: no hot_wallet seed found — run with -init-seed hot_wallet before Hot Wallet signing is used")

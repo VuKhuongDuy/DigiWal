@@ -69,3 +69,23 @@ deposits only, since a reverted Gas Top-Up would be a second nonce gap.
   broadcast).
 - The gateway → ledger-service mTLS call, which the api-gateway README says was never run against the real
   binary, works.
+
+## `sim` — drive the stack by hand (`cmd/sim`)
+
+A CLI to simulate users, deposits and withdrawals against the running stack (`make up` first). It goes through
+`api-gateway` and Anvil only. Users (their API keys are shown once) are saved in `~/.digiwal-sim/state.json`.
+
+```bash
+go build -o bin/sim ./cmd/sim
+bin/sim init                          # deploy the test token, float the Hot Wallet (other commands do this on demand)
+bin/sim user create alice             # or: user create -n 5
+bin/sim deposit alice eth 2           # on-chain send, mines past the Confirmation Depth, waits for the ledger credit
+bin/sim deposit bob tt 500
+bin/sim withdraw alice eth 0.5 [--to 0x...]   # whitelists the destination (random if omitted), waits until confirmed
+bin/sim user list                     # deposit addresses + live available/locked balances
+bin/sim mine 10                       # the sweeper/chain-watcher only advance when blocks are mined
+bin/sim reset                         # forget saved users (do this after `make down up`)
+```
+
+The sim leaves the chain used (token deployed at nonce 0, account #0 has sent txs): run `make down up` before
+`make test`, which expects a fresh chain.

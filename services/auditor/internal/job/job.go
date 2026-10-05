@@ -40,6 +40,14 @@ func (o Outcome) Result() Result {
 	}
 }
 
+type runIDKey struct{}
+
+// RunID is the job_runs id of the Audit Run in progress; findings record it as first/last run.
+func RunID(ctx context.Context) int64 {
+	id, _ := ctx.Value(runIDKey{}).(int64)
+	return id
+}
+
 // Job is one periodic check. Run returns an error only when it could not complete; findings are an
 // Outcome, not an error.
 type Job interface {
@@ -61,7 +69,7 @@ func RunOnce(ctx context.Context, rec Recorder, j Job, now func() time.Time) (Re
 	if err != nil {
 		return "", fmt.Errorf("recording start of %s: %w", j.Name(), err)
 	}
-	out, runErr := safeRun(ctx, j)
+	out, runErr := safeRun(context.WithValue(ctx, runIDKey{}, id), j)
 
 	result, findings, msg := out.Result(), out.Findings(), ""
 	if runErr != nil {

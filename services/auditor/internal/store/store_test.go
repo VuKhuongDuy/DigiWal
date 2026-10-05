@@ -2,84 +2,23 @@ package store
 
 import (
 	"context"
-	"fmt"
 	"os"
-	"sync"
 	"testing"
 	"time"
 
 	"digiwal/services/auditor/internal/job"
-
-	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/testcontainers/testcontainers-go"
-	tcpostgres "github.com/testcontainers/testcontainers-go/modules/postgres"
-	"github.com/testcontainers/testcontainers-go/wait"
-)
-
-var (
-	once      sync.Once
-	adminDSN  string
-	adminErr  error
-	container testcontainers.Container
+	"digiwal/services/auditor/internal/testdb"
 )
 
 func TestMain(m *testing.M) {
 	code := m.Run()
-	if container != nil {
-		_ = container.Terminate(context.Background())
-	}
+	testdb.Terminate()
 	os.Exit(code)
-}
-
-// newDSN returns a fresh database on a real Postgres: TEST_POSTGRES_DSN if set, else a container, else skip.
-func newDSN(t *testing.T) string {
-	t.Helper()
-	once.Do(func() {
-		if dsn := os.Getenv("TEST_POSTGRES_DSN"); dsn != "" {
-			adminDSN = dsn
-			return
-		}
-		ctx := context.Background()
-		c, err := tcpostgres.Run(ctx, "postgres:16-alpine",
-			tcpostgres.WithDatabase("postgres"), tcpostgres.WithUsername("test"), tcpostgres.WithPassword("test"),
-			testcontainers.WithWaitStrategy(wait.ForLog("database system is ready to accept connections").WithOccurrence(2).WithStartupTimeout(60*time.Second)))
-		if err != nil {
-			adminErr = err
-			return
-		}
-		container = c
-		adminDSN, adminErr = c.ConnectionString(ctx, "sslmode=disable")
-	})
-	if adminErr != nil {
-		t.Skipf("no Postgres available (set TEST_POSTGRES_DSN or run Docker): %v", adminErr)
-	}
-	ctx := context.Background()
-	admin, err := pgxpool.New(ctx, adminDSN)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer admin.Close()
-	name := fmt.Sprintf("auditor_test_%d_%d", os.Getpid(), time.Now().UnixNano())
-	if _, err := admin.Exec(ctx, "CREATE DATABASE "+name); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		if a, err := pgxpool.New(ctx, adminDSN); err == nil {
-			_, _ = a.Exec(ctx, "DROP DATABASE IF EXISTS "+name+" WITH (FORCE)")
-			a.Close()
-		}
-	})
-	cfg, err := pgxpool.ParseConfig(adminDSN)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=disable",
-		cfg.ConnConfig.User, cfg.ConnConfig.Password, cfg.ConnConfig.Host, cfg.ConnConfig.Port, name)
 }
 
 func TestRunHistorySurvivesReconnect(t *testing.T) {
 	ctx := context.Background()
-	dsn := newDSN(t)
+	dsn := testdb.New(t)
 	s, err := Connect(ctx, dsn)
 	if err != nil {
 		t.Fatal(err)
@@ -126,7 +65,7 @@ func TestRunHistorySurvivesReconnect(t *testing.T) {
 
 func TestResultAndFinishedAtAgree(t *testing.T) {
 	ctx := context.Background()
-	s, err := Connect(ctx, newDSN(t))
+	s, err := Connect(ctx, testdb.New(t))
 	if err != nil {
 		t.Fatal(err)
 	}
