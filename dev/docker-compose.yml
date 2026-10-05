@@ -1,0 +1,95 @@
+# The always-on dev environment (this VM): the e2e stack's services, made long-lived, plus a simulator
+# that keeps users active. Layered over infra/ and e2e/ — see the Makefile for the exact command.
+# Paths below are relative to e2e/ (the Makefile passes --project-directory ../e2e, as the e2e compose
+# file's own relative paths need).
+#
+# Differences from the e2e stack (which is throwaway and deterministic):
+#   * restart: unless-stopped everywhere, named volumes survive `make down` (only `make reset` drops them)
+#   * anvil mines a block every 2s (the sweeper, chain-watcher and withdrawals only advance with blocks)
+#     and persists its chain in a volume, so the token address, nonces and the databases stay consistent
+#   * the Reaper timeouts are the decided 5 minutes, not the e2e tests' 20s
+services:
+  postgres:
+    restart: unless-stopped
+  redis:
+    restart: unless-stopped
+  kafka:
+    restart: unless-stopped
+  mongo:
+    restart: unless-stopped
+
+  anvil:
+    restart: unless-stopped
+    user: root # the state volume is root-owned
+    entrypoint:
+      - anvil
+      - --host
+      - 0.0.0.0
+      - --block-time
+      - "2"
+      - --state
+      - /data/anvil-state.json
+      - --state-interval
+      - "90" # each dump rewrites the whole file in place; every 5 s stalled the disk and a kill mid-dump can truncate it
+      # Without this Anvil writes every block's state under ~/.foundry/anvil/tmp inside the container: ~13 GB/day
+      # at the simulator's rate, until the disk is full. Nothing here reads historical state (the services read
+      # blocks, receipts and logs). 1000 retained states grew to 3.6 GB RSS and got Anvil OOM-killed; 128 is the
+      # design's starting value (docs/design/multi-node-deployment.md, "Anvil: safe configuration").
+      - --prune-history
+      - "128"
+    stop_grace_period: 60s # a normal `down` must finish its final state dump
+    mem_limit: 2500m
+    volumes:
+      - anvil_data:/data
+    logging: &rotate
+      driver: json-file
+      options: {max-size: 50m, max-file: "3"}
+
+  wallet-service:
+    restart: unless-stopped
+  ledger-service:
+    restart: unless-stopped
+  chain-watcher:
+    restart: unless-stopped
+  sweeper:
+    restart: unless-stopped
+  history-service:
+    restart: unless-stopped
+  api-gateway:
+    restart: unless-stopped
+
+  withdrawal-service:
+    restart: unless-stopped
+    environment:
+      STUCK_REQUEST_TIMEOUT: 5m
+      STUCK_RESERVATION_TIMEOUT: 5m
+      REAPER_INTERVAL: 30s
+
+  simulator:
+    logging: *rotate
+    build:
+      context: .
+      dockerfile: cmd/sim/Dockerfile
+    restart: unless-stopped
+    command: ["run", "--users", "${SIM_USERS:-25}", "--rate", "${SIM_RATE:-12}", "--workers", "${SIM_WORKERS:-16}"]
+    environment:
+      SIM_RPC_URL: http://anvil:8545
+      SIM_GATEWAY_URL: http://api-gateway:8080
+      SIM_WALLET_TLS_URL: https://wallet-service:8443
+      SIM_PKI_DIR: /certs # the sweeper's leaf cert: the only one wallet-service admits on hot-address
+      SIM_STATE_FILE: /data/state.json
+    volumes:
+      - ../infra/pki/out/sweeper:/certs:ro
+      - sim_data:/data
+    # The simulator retries until the stack answers, so it only needs the others started.
+    depends_on:
+      anvil: {condition: service_healthy}
+      api-gateway: {condition: service_started}
+      wallet-service: {condition: service_started}
+      withdrawal-service: {condition: service_started}
+      sweeper: {condition: service_started}
+      chain-watcher: {condition: service_started}
+
+volumes:
+  anvil_data:
+  sim_data:

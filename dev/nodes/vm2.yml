@@ -1,0 +1,74 @@
+# Node overlay for vm2 (10.10.0.1): the request path. Layered after infra/, e2e/ and ../docker-compose.yml by
+# `make` when /etc/digiwal/node says vm2 (docs/design/multi-node-deployment.md, D1/D3). Paths are relative to e2e/.
+#   here:      postgres (ledger, api_gateway), mongo, ledger-service, api-gateway, history-service
+#   on vm3:    wallet-service, withdrawal-service, chain-watcher, sweeper, simulator, kafka, redis, anvil
+# A service that lives on the other node is switched off with a profile (and its dependants' depends_on is
+# overridden), so each service is in exactly one overlay (invariant 7).
+networks:
+  default:
+    driver_opts:
+      com.docker.network.driver.mtu: "1400" # wg0's MTU is 1420: no fragmentation across the link
+
+services:
+  redis: {profiles: [elsewhere]}
+  kafka: {profiles: [elsewhere]}
+  anvil: {profiles: [elsewhere]}
+  prometheus: {profiles: [elsewhere]}
+  grafana: {profiles: [elsewhere]}
+  wallet-service: {profiles: [elsewhere]}
+  withdrawal-service: {profiles: [elsewhere]}
+  chain-watcher: {profiles: [elsewhere]}
+  sweeper: {profiles: [elsewhere]}
+  simulator: {profiles: [elsewhere]}
+
+  postgres:
+    command: [postgres, -c, hba_file=/etc/postgresql/pg_hba.conf, -c, shared_preload_libraries=pg_stat_statements,
+      -c, track_io_timing=on, -c, log_lock_waits=on]
+    environment:
+      POSTGRES_PASSWORD: ${PG_ADMIN_PASSWORD:?run make env}
+      POSTGRES_DB: postgres
+      PG_DB_ROLES: "ledger=svc_ledger api_gateway=svc_gateway"
+      PW_svc_ledger: ${SVC_LEDGER_PASSWORD:?run make env}
+      PW_svc_gateway: ${SVC_GATEWAY_PASSWORD:?run make env}
+    volumes: !override
+      - pg_ledger_data:/var/lib/postgresql/data
+      - ../infra/postgres/init-node.sh:/docker-entrypoint-initdb.d/10-init-node.sh:ro
+      - ../infra/postgres/pg_hba.conf:/etc/postgresql/pg_hba.conf:ro
+    ports: !override ["10.10.0.1:5432:5432", "127.0.0.1:5432:5432"]
+    mem_limit: 2500m
+
+  mongo:
+    environment:
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ADMIN_PASSWORD:?run make env} # first init only; `make roles` changes it on an existing volume
+    command: [mongod, --wiredTigerCacheSizeGB, "0.25"] # the default sizes the cache to the host's RAM
+    ports: !override ["127.0.0.1:27017:27017"]
+    mem_limit: 600m
+
+  ledger-service:
+    environment:
+      POSTGRES_DSN: postgres://svc_ledger:${SVC_LEDGER_PASSWORD}@postgres:5432/ledger?sslmode=disable
+    extra_hosts: ["kafka:10.10.0.2"]
+    depends_on: !override
+      postgres: {condition: service_healthy}
+    ports: !override ["10.10.0.1:8444:8443"] # withdrawal-service and sweeper (vm3)
+    mem_limit: 300m
+
+  api-gateway:
+    environment:
+      POSTGRES_DSN: postgres://svc_gateway:${SVC_GATEWAY_PASSWORD}@postgres:5432/api_gateway?sslmode=disable
+      WITHDRAWAL_SERVICE_URL: https://withdrawal-service:8446
+    extra_hosts: ["wallet-service:10.10.0.2", "withdrawal-service:10.10.0.2"]
+    ports: !override ["10.10.0.1:8084:8080", "127.0.0.1:8084:8080"] # never on the public interface (invariant 8)
+    mem_limit: 500m
+
+  history-service:
+    environment:
+      MONGO_URI: mongodb://svc_history:${SVC_HISTORY_PASSWORD}@mongo:27017/history?authSource=history
+    extra_hosts: ["kafka:10.10.0.2"]
+    depends_on: !override
+      mongo: {condition: service_started}
+    ports: !override []
+    mem_limit: 200m
+
+volumes:
+  pg_ledger_data:

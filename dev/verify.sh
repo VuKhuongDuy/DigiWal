@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+# Checks this node of the two-node dev environment (docs/design/multi-node-deployment.md, "make verify").
+# Run on a node: NODE=vm2|vm3 ./verify.sh (make verify sets it). Exit code 1 on any failure.
+set -uo pipefail
+NODE=${NODE:?NODE is empty: this check only makes sense on a node of the two-node layout}
+fail=0
+ok()  { printf '  ok    %s\n' "$*"; }
+bad() { printf '  FAIL  %s\n' "$*"; fail=1; }
+
+PEER_PUBLIC_IP=$(. /etc/digiwal/firewall.env && echo "$PEER_PUBLIC_IP")
+case $NODE in
+	vm2) PEER_PRIVATE=10.10.0.2; PEER_OPEN="9092 8545 8443 8080 8446 5432" ;;
+	vm3) PEER_PRIVATE=10.10.0.1; PEER_OPEN="8444 8084 5432" ;;
+	*) echo "unknown node $NODE"; exit 2 ;;
+esac
+tcp() { timeout 3 bash -c "echo > /dev/tcp/$1/$2" 2>/dev/null; }
+
+echo "1. WireGuard"
+hs=$(wg show wg0 latest-handshakes | awk '{print $2}' | head -1)
+if [ -n "$hs" ] && [ $(( $(date +%s) - hs )) -lt 180 ]; then ok "last handshake $(( $(date +%s) - hs ))s ago"; else bad "no recent handshake"; fi
+if ping -c 2 -W 2 -M do -s 1372 "$PEER_PRIVATE" >/dev/null 2>&1; then ok "don't-fragment ping at MTU 1400 to $PEER_PRIVATE"; else bad "DF ping to $PEER_PRIVATE failed (MTU)"; fi
+
+echo "2. The peer's public address exposes nothing but SSH (checked from here)"
+for p in 5432 6379 9092 27017 8545 8084 8443 8444 8446 8080 8085 9090 3000; do
+	if tcp "$PEER_PUBLIC_IP" "$p"; then bad "port $p is open on the peer's public IP"; fi
+done
+tcp "$PEER_PUBLIC_IP" 22 && ok "ssh reachable, other service ports closed" || bad "ssh closed on the peer"
+
+echo "3. The peer's private address serves what it should"
+for p in $PEER_OPEN; do tcp "$PEER_PRIVATE" "$p" && ok "$PEER_PRIVATE:$p reachable" || bad "$PEER_PRIVATE:$p not reachable"; done
+
+echo "4. Containers on this node"
+cd "$(dirname "$0")"
+unhealthy=$(docker ps --filter name=digiwal-dev --format '{{.Names}} {{.Status}}' | grep -Ei 'restarting|unhealthy|exited' || true)
+n=$(docker ps --filter name=digiwal-dev -q | wc -l)
+[ -z "$unhealthy" ] && ok "$n containers up, none restarting or unhealthy" || bad "$unhealthy"
+restarts=$(docker ps --filter name=digiwal-dev -q | xargs -r docker inspect -f '{{.Name}} {{.RestartCount}}' | awk '$2>0')
+[ -z "$restarts" ] && ok "no container has restarted" || echo "  note  restarts: $(echo $restarts)"
+
+echo "5. Published ports are not on a public address"
+exposed=$(docker ps --filter name=digiwal-dev --format '{{.Names}} {{.Ports}}' | grep -E '(^| )0\.0\.0\.0:|\[::\]:' || true)
+[ -z "$exposed" ] && ok "no container publishes on 0.0.0.0 or [::]" || bad "published on all interfaces: $exposed"
+
+[ "$fail" = 0 ] && echo "RESULT: all checks passed" || echo "RESULT: FAILED"
+exit $fail

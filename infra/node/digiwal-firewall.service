@@ -1,0 +1,16 @@
+[Unit]
+Description=DigiWal host firewall (INPUT + DOCKER-USER)
+After=docker.service wg-quick@wg0.service network-online.target
+Wants=network-online.target
+# Re-applied whenever Docker restarts: Docker rebuilds its own chains and jump rules.
+PartOf=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+EnvironmentFile=/etc/digiwal/firewall.env
+ExecStart=/usr/local/sbin/digiwal-firewall apply
+ExecStop=/usr/local/sbin/digiwal-firewall off
+
+[Install]
+WantedBy=multi-user.target docker.service
