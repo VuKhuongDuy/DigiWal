@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 
@@ -30,7 +31,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	store, err := ledger.Connect(ctx, requireEnv("POSTGRES_DSN"))
+	store, err := ledger.ConnectWithPool(ctx, requireEnv("POSTGRES_DSN"), int32(envInt("POSTGRES_MAX_CONNS", 0)))
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -121,6 +122,14 @@ func requireEnv(key string) string {
 func envOr(key, def string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
+	}
+	return def
+}
+
+// envInt reads a positive integer from the environment, or def when unset or not a positive integer.
+func envInt(key string, def int) int {
+	if n, err := strconv.Atoi(os.Getenv(key)); err == nil && n > 0 {
+		return n
 	}
 	return def
 }

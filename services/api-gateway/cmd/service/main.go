@@ -5,10 +5,12 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -22,7 +24,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	st, err := store.Connect(ctx, requireEnv("POSTGRES_DSN"))
+	st, err := store.ConnectWithPool(ctx, requireEnv("POSTGRES_DSN"), int32(envInt("POSTGRES_MAX_CONNS", 0)))
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -36,12 +38,13 @@ func main() {
 	}
 	s := &api.Server{
 		Auth: st, Users: st,
-		Wallet: &api.WalletClient{BaseURL: requireEnv("WALLET_SERVICE_URL"), HTTP: &http.Client{Timeout: 10 * time.Second}},
+		Wallet: &api.WalletClient{BaseURL: requireEnv("WALLET_SERVICE_URL"),
+			HTTP: &http.Client{Timeout: 10 * time.Second, Transport: pooledTransport(nil)}},
 		Ledger: &api.LedgerClient{BaseURL: requireEnv("LEDGER_SERVICE_URL"),
-			HTTP: &http.Client{Timeout: 10 * time.Second, Transport: &http.Transport{TLSClientConfig: tlsCfg}}},
+			HTTP: &http.Client{Timeout: 10 * time.Second, Transport: pooledTransport(tlsCfg)}},
 		// withdrawal-service, same mTLS client (CN=api-gateway).
 		Withdrawals: &api.WithdrawalClient{BaseURL: requireEnv("WITHDRAWAL_SERVICE_URL"),
-			HTTP: &http.Client{Timeout: 15 * time.Second, Transport: &http.Transport{TLSClientConfig: tlsCfg}}},
+			HTTP: &http.Client{Timeout: 15 * time.Second, Transport: pooledTransport(tlsCfg)}},
 	}
 	// Metrics: their own internal port, never the public listener (monitoring-dashboard.md invariant 6).
 	reg := metrics.NewRegistry()
@@ -78,6 +81,27 @@ func requireEnv(key string) string {
 func envOr(key, def string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
+	}
+	return def
+}
+
+// pooledTransport is an HTTP transport that keeps connections for reuse. net/http keeps only two idle connections
+// per host by default, so under load nearly every call to wallet-service, ledger-service or withdrawal-service
+// opened a new TCP connection (and a TLS handshake for the mTLS ones): measured at 800 requests/s, ~1,750
+// sockets in TIME_WAIT toward wallet-service's port and the gateway pinned at ~1.7 cores. tlsCfg is nil for plain HTTP.
+func pooledTransport(tlsCfg *tls.Config) *http.Transport {
+	t := http.DefaultTransport.(*http.Transport).Clone()
+	t.TLSClientConfig = tlsCfg
+	t.MaxIdleConns = 512
+	t.MaxIdleConnsPerHost = 128
+	t.IdleConnTimeout = 90 * time.Second
+	return t
+}
+
+// envInt reads a positive integer from the environment, or def when unset or not a positive integer.
+func envInt(key string, def int) int {
+	if n, err := strconv.Atoi(os.Getenv(key)); err == nil && n > 0 {
+		return n
 	}
 	return def
 }
