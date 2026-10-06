@@ -24,11 +24,11 @@ scrape_configs:
     # The auditor's metrics carry their own `job` label (digiwal_job_*{job="reconciliation"}); see prometheus.yml.
     honor_labels: true
     static_configs:
-      # vm2: the request path
-      - targets: ["10.10.0.1:9101"]
-        labels: {service: api-gateway, node: vm2}
-      - targets: ["10.10.0.1:9102"]
-        labels: {service: ledger-service, node: vm2}
+      # vm4: the stateless tier
+      - targets: ["10.10.0.3:9101"]
+        labels: {service: api-gateway, node: vm4}
+      - targets: ["10.10.0.3:9102"]
+        labels: {service: ledger-service, node: vm4}
       # vm3: custody and chain
       - targets: ["wallet-service:9100"]
         labels: {service: wallet-service, node: vm3}
@@ -47,12 +47,16 @@ scrape_configs:
         labels: {service: node-exporter, node: vm2}
       - targets: ["10.10.0.2:9100"]
         labels: {service: node-exporter, node: vm3}
+      - targets: ["10.10.0.3:9100"]
+        labels: {service: node-exporter, node: vm4}
   - job_name: cadvisor
     static_configs:
       - targets: ["10.10.0.1:8081"]
         labels: {service: cadvisor, node: vm2}
       - targets: ["10.10.0.2:8081"]
         labels: {service: cadvisor, node: vm3}
+      - targets: ["10.10.0.3:8081"]
+        labels: {service: cadvisor, node: vm4}
   - job_name: postgres
     static_configs:
       - targets: ["10.10.0.1:9187"]

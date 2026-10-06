@@ -1,16 +1,17 @@
 #!/usr/bin/env bash
 # Checks this node of the two-node dev environment (docs/design/multi-node-deployment.md, "make verify").
-# Run on a node: NODE=vm2|vm3 ./verify.sh (make verify sets it). Exit code 1 on any failure.
+# Run on a node: NODE=vm2|vm3|vm4 ./verify.sh (make verify sets it). Exit code 1 on any failure.
 set -uo pipefail
 NODE=${NODE:?NODE is empty: this check only makes sense on a node of the two-node layout}
 fail=0
 ok()  { printf '  ok    %s\n' "$*"; }
 bad() { printf '  FAIL  %s\n' "$*"; fail=1; }
 
-PEER_PUBLIC_IP=$(. /etc/digiwal/firewall.env && echo "$PEER_PUBLIC_IP")
+PEER_PUBLIC_IP=$(. /etc/digiwal/firewall.env && echo "${PEER_PUBLIC_IP%%,*}") # first peer; several on a three-node mesh
 case $NODE in
 	vm2) PEER_PRIVATE=10.10.0.2; PEER_OPEN="9092 8545 8443 8080 8446 5432 9100 8081 9187" ;;
-	vm3) PEER_PRIVATE=10.10.0.1; PEER_OPEN="8444 8084 5432 27017 9101 9102 9100 8081 9187" ;;
+	vm3) PEER_PRIVATE=10.10.0.1; PEER_OPEN="5432 27017 9100 8081 9187" ;;
+	vm4) PEER_PRIVATE=10.10.0.1; PEER_OPEN="5432 27017 9100 8081 9187" ;;
 	*) echo "unknown node $NODE"; exit 2 ;;
 esac
 tcp() { timeout 3 bash -c "echo > /dev/tcp/$1/$2" 2>/dev/null; }

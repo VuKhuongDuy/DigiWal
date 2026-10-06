@@ -2,7 +2,8 @@
 #   here:      postgres (custody, withdrawal, chain_watcher, auditor), kafka, redis, anvil, wallet-service,
 #              withdrawal-service, chain-watcher, sweeper, simulator, auditor, and the Measurement Plane: Prometheus,
 #              Alertmanager (to Telegram), Grafana, kafka-exporter, and node/cAdvisor/postgres exporters
-#   on vm2:    ledger-service, api-gateway, history-service, mongo
+#   on vm2:    mongo, and the Postgres of the request path (ledger, api_gateway)
+#   on vm4:    ledger-service, api-gateway, history-service
 networks:
   default:
     driver_opts:
@@ -56,13 +57,13 @@ services:
     environment:
       POSTGRES_DSN: postgres://svc_withdrawal:${SVC_WITHDRAWAL_PASSWORD}@postgres:5432/withdrawal?sslmode=disable
       LEDGER_SERVICE_URL: https://ledger-service:8444
-    extra_hosts: ["ledger-service:10.10.0.1"]
+    extra_hosts: ["ledger-service:10.10.0.3"]
     depends_on: !override
       postgres: {condition: service_healthy}
       kafka: {condition: service_healthy}
       anvil: {condition: service_healthy}
       wallet-service: {condition: service_started}
-    ports: !override ["10.10.0.2:8446:8443"] # api-gateway (vm2)
+    ports: !override ["10.10.0.2:8446:8443"] # api-gateway (vm4)
     mem_limit: 300m
 
   chain-watcher:
@@ -74,7 +75,7 @@ services:
   sweeper:
     environment:
       LEDGER_SERVICE_URL: https://ledger-service:8444
-    extra_hosts: ["ledger-service:10.10.0.1"]
+    extra_hosts: ["ledger-service:10.10.0.3"]
     depends_on: !override
       kafka: {condition: service_healthy}
       anvil: {condition: service_healthy}
@@ -83,7 +84,7 @@ services:
 
   simulator:
     environment:
-      SIM_GATEWAY_URL: http://10.10.0.1:8084 # api-gateway on vm2, over the private network
+      SIM_GATEWAY_URL: http://10.10.0.3:8084 # api-gateway on vm4, over the private network
     depends_on: !override
       anvil: {condition: service_healthy}
       wallet-service: {condition: service_started}

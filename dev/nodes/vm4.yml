@@ -1,0 +1,61 @@
+# Node overlay for vm4 (10.10.0.3): the stateless tier. See vm2.yml for how the overlays fit together.
+# docs/design/multi-node-deployment.md, "Addendum: three-node layout".
+#   here:      api-gateway, ledger-service, history-service (no state of their own)
+#   on vm2:    postgres (ledger, api_gateway), mongo        (the services reach them at 10.10.0.1)
+#   on vm3:    wallet-service, withdrawal-service, chain-watcher, sweeper, simulator, kafka, redis, anvil, monitoring
+networks:
+  default:
+    driver_opts:
+      com.docker.network.driver.mtu: "1400"
+
+services:
+  postgres: {profiles: [elsewhere]}
+  mongo: {profiles: [elsewhere]}
+  redis: {profiles: [elsewhere]}
+  kafka: {profiles: [elsewhere]}
+  anvil: {profiles: [elsewhere]}
+  prometheus: {profiles: [elsewhere]}
+  grafana: {profiles: [elsewhere]}
+  alertmanager: {profiles: [elsewhere]}
+  kafka-exporter: {profiles: [elsewhere]}
+  postgres-exporter: {profiles: [elsewhere]}
+  auditor: {profiles: [elsewhere]}
+  wallet-service: {profiles: [elsewhere]}
+  withdrawal-service: {profiles: [elsewhere]}
+  chain-watcher: {profiles: [elsewhere]}
+  sweeper: {profiles: [elsewhere]}
+  simulator: {profiles: [elsewhere]}
+
+  ledger-service:
+    environment:
+      POSTGRES_DSN: postgres://svc_ledger:${SVC_LEDGER_PASSWORD}@postgres:5432/ledger?sslmode=disable
+      POSTGRES_MAX_CONNS: "16" # pgx's default is 4 on a 4-vCPU host; 16 raised the read ceiling from ~1.9k to ~2.4k req/s
+    extra_hosts: ["postgres:10.10.0.1", "kafka:10.10.0.2"]
+    depends_on: !override []
+    ports: !override ["10.10.0.3:8444:8443", "10.10.0.3:9102:9100"] # withdrawal-service and sweeper (vm3); /metrics (vm3)
+    mem_limit: 300m
+
+  api-gateway:
+    environment:
+      POSTGRES_DSN: postgres://svc_gateway:${SVC_GATEWAY_PASSWORD}@postgres:5432/api_gateway?sslmode=disable
+      POSTGRES_MAX_CONNS: "16"
+      WITHDRAWAL_SERVICE_URL: https://withdrawal-service:8446
+    extra_hosts: ["postgres:10.10.0.1", "wallet-service:10.10.0.2", "withdrawal-service:10.10.0.2"]
+    depends_on: !override []
+    ports: !override ["10.10.0.3:8084:8080", "127.0.0.1:8084:8080", "10.10.0.3:9101:9100"] # never on the public interface (invariant 8); /metrics
+    mem_limit: 500m
+
+  history-service:
+    environment:
+      MONGO_URI: mongodb://svc_history:${SVC_HISTORY_PASSWORD}@mongo:27017/history?authSource=history
+    extra_hosts: ["mongo:10.10.0.1", "kafka:10.10.0.2"]
+    depends_on: !override []
+    ports: !override []
+    mem_limit: 200m
+
+  node-exporter:
+    command: [--path.rootfs=/host, "--web.listen-address=10.10.0.3:9100"]
+    mem_limit: 100m
+  cadvisor:
+    ports: ["10.10.0.3:8081:8080"]
+    mem_limit: 200m
