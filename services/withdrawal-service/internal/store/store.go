@@ -192,12 +192,20 @@ const columns = `withdrawal_id, user_id, idempotency_key, asset_id, amount::text
 // already exists, however concurrently — read back the existing one. created reports which.
 // Nothing else (validation, Reservation, signing) may run before this returns.
 func (s *Store) Create(ctx context.Context, r NewRequest) (w Withdrawal, created bool, err error) {
+	return s.CreateWithStatus(ctx, r, StatusRequested, nil)
+}
+
+// CreateWithStatus is Create that inserts the row already in its verdict state (`validated`, or `rejected` with
+// a reason), so a request costs one commit for its verdict instead of an INSERT plus an UPDATE
+// (docs/design/withdrawal-commit-reduction.md, option A). Same idempotency: one winning insert per
+// (user_id, idempotency_key), a loser reads the existing row back.
+func (s *Store) CreateWithStatus(ctx context.Context, r NewRequest, status string, reason *string) (w Withdrawal, created bool, err error) {
 	row := s.pool.QueryRow(ctx, `
-		INSERT INTO withdrawal_requests (user_id, idempotency_key, asset_id, amount, to_address)
-		VALUES ($1, $2, $3, $4::numeric, $5)
+		INSERT INTO withdrawal_requests (user_id, idempotency_key, asset_id, amount, to_address, status, reject_reason)
+		VALUES ($1, $2, $3, $4::numeric, $5, $6, $7)
 		ON CONFLICT (user_id, idempotency_key) DO NOTHING
 		RETURNING `+columns,
-		r.UserID, r.IdempotencyKey, r.AssetID, r.Amount.String(), r.ToAddress)
+		r.UserID, r.IdempotencyKey, r.AssetID, r.Amount.String(), r.ToAddress, status, reason)
 	w, err = scan(row)
 	switch {
 	case err == nil:
