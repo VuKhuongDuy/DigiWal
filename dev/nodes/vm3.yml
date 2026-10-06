@@ -50,12 +50,14 @@ services:
   wallet-service:
     environment:
       POSTGRES_DSN: postgres://svc_wallet:${SVC_WALLET_PASSWORD}@postgres:5432/custody?sslmode=disable
+      POSTGRES_MAX_CONNS: "16" # pgx's default is 4 on a 4-vCPU host: withdrawal-service queued every request on it
     ports: !override ["10.10.0.2:8443:8443", "10.10.0.2:8080:8080"] # gateway (plain HTTP: a documented gap, now private), peers
     mem_limit: 300m
 
   withdrawal-service:
     environment:
       POSTGRES_DSN: postgres://svc_withdrawal:${SVC_WITHDRAWAL_PASSWORD}@postgres:5432/withdrawal?sslmode=disable
+      POSTGRES_MAX_CONNS: "16" # pgx's default is 4 on a 4-vCPU host: withdrawal-service queued every request on it
       LEDGER_SERVICE_URL: https://ledger-service:8444
     extra_hosts: ["ledger-service:10.10.0.3"]
     depends_on: !override
@@ -69,6 +71,7 @@ services:
   chain-watcher:
     environment:
       POSTGRES_DSN: postgres://svc_chainwatcher:${SVC_CHAINWATCHER_PASSWORD}@postgres:5432/chain_watcher?sslmode=disable
+      POSTGRES_MAX_CONNS: "16" # pgx's default is 4 on a 4-vCPU host: withdrawal-service queued every request on it
     ports: !override []
     mem_limit: 200m
 
