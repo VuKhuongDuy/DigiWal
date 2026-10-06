@@ -595,3 +595,95 @@ deferred. The Postgres moves between nodes are `pg_dump`/restore of three small 
 12. **M11, S5 on evidence:** table-level settings or scrape-query changes only if the data asks for them.
 13. **M12, The Hold:** 60 minutes at 500 rps on the best configuration with all acceptance and abort checks; Breakpoint run afterwards.
 14. **M13, Failure rehearsal (feeds roadmap step 5):** stop one container, one node, the link, and the `pg-ledger` Primary under 100 rps; compare with the failure table and record the real recovery times.
+
+## Addendum (2026-10-06): three-node layout, vm4 as the stateless tier
+
+Status: PROPOSED; the placement was approved by the Tech Lead, the details below are for review. This **supersedes
+the two-node placement** above for the lab (sections "Placement and budgets", "Network design" and "Failure
+behavior" stay as history). It does not change any invariant, bounded context or the database plan: DB scaling and
+sharding are explicitly out of scope and are a later, separate discussion. Goal of this lab: **under load the
+Postgres containers are the first bottleneck**, with honest measurement. A third identical node, vm4
+(10.10.0.3, 4 vCPU / 8 GB), joins the WireGuard mesh; RTT between nodes is about 1 to 3 ms.
+
+### Placement
+
+| Node | WG IP | Runs |
+|---|---|---|
+| vm2 | 10.10.0.1 | Postgres container `postgres` (databases `ledger`, `api_gateway`), Mongo. Nothing else heavy. |
+| vm3 | 10.10.0.2 | Postgres `custody`/`withdrawal`/`chain_watcher` (pg-core), Kafka, Redis, Anvil, wallet-service, withdrawal-service, chain-watcher, sweeper, monitoring (Prometheus, Grafana, Alertmanager, exporters, cAdvisor), auditor, **k6 load generator** |
+| vm4 | 10.10.0.3 | Stateless tier: api-gateway, ledger-service, history-service, simulator |
+
+Each service is still in exactly one overlay (invariant 7): `dev/nodes/vm4.yml` is new, `vm2.yml` switches off
+api-gateway, ledger-service, history-service (profile `elsewhere`), `vm3.yml` already has no copies of them.
+Changing the single-instance rule is not part of this.
+
+### What changes in cross-node calls
+
+- **New remote hops:** api-gateway, ledger-service and history-service are now remote from their databases
+  (vm4 to vm2: `POSTGRES_DSN` host becomes `10.10.0.1`, Mongo likewise for history). Every ledger query pays 1 to 3 ms
+  of RTT, which lengthens transactions and so lock hold time on the hot `chain` row (see below).
+- api-gateway to wallet-service/withdrawal-service (vm3) and ledger-service to Kafka (vm3) stay remote as before.
+  withdrawal-service and sweeper (vm3) call ledger-service on vm4 instead of vm2: `extra_hosts: ledger-service:10.10.0.3`.
+  Simulator on vm4 reaches the gateway locally.
+- **mTLS and names:** unchanged mechanism. Services keep their service names, `extra_hosts` maps them to the node IP;
+  no PKI change. The only new material is leaf certificates for api-gateway, ledger-service and history-service
+  issued for vm4 (same CA, same SANs, which are service names, so `make certs` just distributes them to vm4 instead of vm2).
+  Other nodes' trust is unchanged.
+- **Ports** are bound to the node's WG IP (and `127.0.0.1` where only local use is needed), never `0.0.0.0`:
+  vm2 `10.10.0.1:5432` (Postgres) and Mongo only to WG; vm4 `10.10.0.3:8444` (ledger-service), `10.10.0.3:8443` or
+  the gateway's port for the k6 target; the rest as in the two-node note. Anything published for the public side stays closed.
+
+### Firewall and WireGuard
+
+Already done: a three-peer full mesh (every node has the two others as peers, `AllowedIPs` /32, keepalive 25 s) and
+`firewall.sh` takes comma-separated peers. Rule per node: accept `wg0` from the two peer IPs only on the ports above,
+persist both `INPUT` and `DOCKER-USER`. `make verify` checks from each peer that the unlisted ports are closed and
+that 1400-byte pings pass between all three pairs.
+
+### How Postgres is made the bottleneck honestly
+
+1. **Give everything else headroom.** The stateless tier owns vm4 alone, so its 4 vCPU are not shared with a DB, Kafka or Anvil.
+   Record CPU, PSI and steal on all three nodes with each run; a result counts as "Postgres-bound" only if vm2's Postgres
+   is at its CPU/IO/lock ceiling while vm4 has clear CPU headroom (target below 60%) and k6 on vm3 is not saturated.
+2. **Write-heavy mix through the single hot `chain` account.** Every deposit credit and every withdrawal Lock/Settle
+   touches the one `chain` account row, so those writes serialize on a row lock inside `ledger`. The k6 mix leans to
+   deposits and withdrawals (for example 60% writes) over balance reads. This is intentionally the real
+   shape of the system, not a synthetic hotspot, and it is what makes `ledger` saturate first.
+3. **Optional `cpus` cap on Postgres containers, not used by default.** If vm2 still is not the limit, set
+   `cpus: "2"` on the `postgres` container in `vm2.yml` (and say so in the report). If it is used, the report must
+   state "Postgres limited to N cpus", because it changes the claim from "Postgres is the bottleneck of this hardware" to
+   "of this budget". Start without it.
+4. **Caveat:** pg-core on vm3 shares the node with Kafka and Anvil (both heavy), so a saturated vm3 may look like a
+   pg-core limit when it is a neighbour limit. The goal is therefore stated for the `ledger` Postgres on vm2; judge pg-core
+   with `pg_stat_activity` waits and `node_pressure`, not the container CPU alone.
+
+### Failure table (delta to the two-node table)
+
+| Failure | What stops | What keeps working | Data impact |
+|---|---|---|---|
+| **vm4 down** | the whole external API (gateway), ledger-service (Lock/Settle/Release, credits), history, simulator; withdrawals in flight fail or are reaped | Postgres, Mongo, Kafka, wallet, chain-watcher (deposits keep queuing in Kafka/outbox), monitoring | **Data safe**: all state is on vm2/vm3. Restart vm4 and `make up`; consumers catch up from Kafka offsets |
+| **vm2 down** | ledger and api_gateway databases and Mongo, so ledger-service, api-gateway, history are up but fail every request | wallet, chain-watcher, sweeper, Kafka, pg-core, monitoring | as the old vm2 row, minus the Replica option (no Replica in this lab, no DB scaling) |
+| **vm3 down** | wallet, withdrawal, pg-core, Kafka, Redis, Anvil, monitoring, k6 | gateway auth and `GET /v1/balances` (vm4 plus vm2) | as the old vm3 row |
+| Link down to one node | calls to that node only; with vm4 isolated, the API is down | the other pair | none lost; see the old link row |
+
+### Cutover plan (no data moves)
+
+DBs stay on vm2, so nothing is copied.
+1. `make verify` on the mesh; add `dev/nodes/vm4.yml`; distribute the new leaf certs and `.env` secrets to vm4 (`make certs env`).
+2. On vm2 stop api-gateway, ledger-service, history-service (the databases and Mongo stay up). Order: gateway first, so no new
+   requests; then ledger-service; then history. Withdrawals in flight reach their terminal state through the Reaper, or are reconciled by the auditor.
+3. Update the vm2 overlay (profile `elsewhere` for the three), vm3 overlay (`extra_hosts: ledger-service:10.10.0.3`), re-render with `config`.
+4. On vm4 `make up`; wait for health; then restart wallet-service-side clients (withdrawal-service, sweeper) on vm3 so they re-resolve `ledger-service`.
+5. Check: `make verify`, all Prometheus targets `up`, simulator `errors=0 drift=0`, auditor clean, then a 50 rps k6 smoke before the full runs.
+
+**Rollback:** stop the three services on vm4, revert the overlays (git revert of the placement commit), `make up` on vm2 and vm3,
+re-run the checks. Safe at any point because no database was moved and no schema or message format changed. Do not run the
+same service on both nodes at once (invariant 7).
+
+### Open questions for the Tech Lead (new)
+
+1. **Does one Postgres container hold both `ledger` and `api_gateway` on vm2?** I assumed yes (as today). Then api-gateway's
+   sessions compete with the ledger for the same CPU, which suits "Postgres is the bottleneck" but muddies attribution. Splitting them is a DB-scaling topic, so I left it.
+2. **Is the `cpus` cap acceptable if vm2 is not the first to saturate?** Recommendation: try without; use it only if the data shows vm4 or k6 limiting first, and label the report.
+3. **k6 on vm3** shares a node with Kafka and Anvil and its network path to vm4 is over WireGuard. If k6 shows CPU use above about 70% or timing noise, move it to vm4's idle capacity or run it with fewer VUs. I did not move it, as it was placed on vm3 by decision.
+4. **Monitoring on vm3 still dies with vm3** (as before); vm4 down is visible there, vm3 down is not.
