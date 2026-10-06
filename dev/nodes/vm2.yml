@@ -1,6 +1,6 @@
 # Node overlay for vm2 (10.10.0.1): the request path. Layered after infra/, e2e/ and ../docker-compose.yml by
 # `make` when /etc/digiwal/node says vm2 (docs/design/multi-node-deployment.md, D1/D3). Paths are relative to e2e/.
-#   here:      postgres (ledger, api_gateway), mongo: the databases of the request path, nothing else heavy
+#   here:      postgres (ledger; api_gateway moved to vm4 in scaling step 2), mongo: nothing else heavy
 #   on vm4:    api-gateway, ledger-service, history-service, withdrawal-service (docs/design/multi-node-deployment.md, three-node addendum)
 #   on vm3:    wallet-service, chain-watcher, sweeper, simulator, kafka, redis, anvil, monitoring
 # A service that lives on the other node is switched off with a profile (and its dependants' depends_on is
@@ -43,6 +43,7 @@ services:
       - ../infra/postgres/pg_hba.conf:/etc/postgresql/pg_hba.conf:ro
     ports: !override ["10.10.0.1:5432:5432", "127.0.0.1:5432:5432"]
     mem_limit: 2500m
+    cpus: 0.5 # the lab's deliberate cap, so that this Postgres is the first bottleneck (remove it to lift the cap)
 
   mongo:
     environment:

@@ -1,7 +1,7 @@
 # Node overlay for vm4 (10.10.0.3): the stateless tier. See vm2.yml for how the overlays fit together.
 # docs/design/multi-node-deployment.md, "Addendum: three-node layout".
-#   here:      api-gateway, ledger-service, history-service, withdrawal-service (no state of their own)
-#   on vm2:    postgres (ledger, api_gateway), mongo        (the services reach them at 10.10.0.1)
+#   here:      api-gateway, ledger-service, history-service, withdrawal-service, and postgres-gateway (the api_gateway DB)
+#   on vm2:    postgres (ledger), mongo                     (ledger-service and history-service reach them at 10.10.0.1)
 #   on vm3:    postgres (custody, withdrawal, chain_watcher), wallet-service, chain-watcher, sweeper, simulator, kafka, redis, anvil, monitoring
 networks:
   default:
@@ -9,7 +9,33 @@ networks:
       com.docker.network.driver.mtu: "1400"
 
 services:
-  postgres: {profiles: [elsewhere]}
+  postgres: {profiles: [elsewhere]} # the shared one of the single-host stack; here the api_gateway DB has its own server
+
+  # Scaling step 2 (docs/design/database-scaling-steps.md): the API-key lookups that every request makes no longer share a
+  # Postgres with the ledger. cpus is the lab's deliberate cap, so that Postgres is the first thing to saturate.
+  postgres-gateway:
+    image: postgres:16-alpine
+    command: [postgres, -c, hba_file=/etc/postgresql/pg_hba.conf, -c, shared_preload_libraries=pg_stat_statements,
+      -c, track_io_timing=on, -c, track_wal_io_timing=on, -c, log_lock_waits=on]
+    environment:
+      POSTGRES_USER: custody
+      POSTGRES_PASSWORD: ${PG_ADMIN_PASSWORD:?run make env}
+      POSTGRES_DB: postgres
+      PG_DB_ROLES: "api_gateway=svc_gateway"
+      PW_svc_gateway: ${SVC_GATEWAY_PASSWORD:?run make env}
+    volumes:
+      - pg_gateway_data:/var/lib/postgresql/data
+      - ../infra/postgres/init-node.sh:/docker-entrypoint-initdb.d/10-init-node.sh:ro
+      - ../infra/postgres/pg_hba.conf:/etc/postgresql/pg_hba.conf:ro
+    ports: ["10.10.0.3:5432:5432", "127.0.0.1:5432:5432"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U custody"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+    cpus: 0.5
+    mem_limit: 1g
   mongo: {profiles: [elsewhere]}
   redis: {profiles: [elsewhere]}
   kafka: {profiles: [elsewhere]}
@@ -36,10 +62,11 @@ services:
 
   api-gateway:
     environment:
-      POSTGRES_DSN: postgres://svc_gateway:${SVC_GATEWAY_PASSWORD}@postgres:5432/api_gateway?sslmode=disable
+      POSTGRES_DSN: postgres://svc_gateway:${SVC_GATEWAY_PASSWORD}@postgres-gateway:5432/api_gateway?sslmode=disable
       POSTGRES_MAX_CONNS: "16"
-    extra_hosts: ["postgres:10.10.0.1", "wallet-service:10.10.0.2"]
-    depends_on: !override []
+    extra_hosts: ["wallet-service:10.10.0.2"]
+    depends_on: !override
+      postgres-gateway: {condition: service_healthy}
     ports: !override ["10.10.0.3:8084:8080", "127.0.0.1:8084:8080", "10.10.0.3:9101:9100"] # never on the public interface (invariant 8); /metrics
     mem_limit: 500m
 
@@ -66,3 +93,6 @@ services:
   cadvisor:
     ports: ["10.10.0.3:8081:8080"]
     mem_limit: 200m
+
+volumes:
+  pg_gateway_data:

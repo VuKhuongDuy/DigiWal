@@ -23,7 +23,7 @@ STORES   = postgres mongo
 SERVICES =
 MONITORING = node-exporter cadvisor postgres-exporter
 else
-STORES   =
+STORES   = postgres-gateway
 SERVICES = ledger-service api-gateway history-service withdrawal-service
 MONITORING = node-exporter cadvisor
 endif
@@ -48,7 +48,7 @@ env:
 	@gen() { grep -q "^$$1=" .env || { echo "$$1=$$(openssl rand -hex 32)" >> .env; echo "generated $$1"; }; }; \
 	case "$(NODE)" in \
 	vm2) for v in PG_ADMIN_PASSWORD SVC_LEDGER_PASSWORD SVC_GATEWAY_PASSWORD SVC_HISTORY_PASSWORD MONGO_ADMIN_PASSWORD EXPORTER_PASSWORD; do gen $$v; done ;; \
-	vm4) for v in SVC_LEDGER_PASSWORD SVC_GATEWAY_PASSWORD SVC_HISTORY_PASSWORD SVC_WITHDRAWAL_PASSWORD; do grep -q "^$$v=" .env || { echo "$$v missing: copy it from vm2's .env (the databases' passwords are set there)"; exit 1; }; done ;; \
+	vm4) gen PG_ADMIN_PASSWORD; for v in SVC_LEDGER_PASSWORD SVC_GATEWAY_PASSWORD SVC_HISTORY_PASSWORD SVC_WITHDRAWAL_PASSWORD; do grep -q "^$$v=" .env || { echo "$$v missing: copy it from vm2's .env (the databases' passwords are set there)"; exit 1; }; done ;; \
 	vm3) for v in PG_ADMIN_PASSWORD SVC_WALLET_PASSWORD SVC_WITHDRAWAL_PASSWORD SVC_CHAINWATCHER_PASSWORD SVC_AUDITOR_PASSWORD EXPORTER_PASSWORD MASTER_KEY_HEX; do gen $$v; done ;; \
 	*) gen MASTER_KEY_HEX ;; \
 	esac
@@ -84,7 +84,7 @@ firewall:
 # already has data) and the exporter's pg_monitor login; vm2 also the Mongo users.
 roles:
 ifeq ($(NODE),vm4)
-	@echo "nothing to do on vm4: it has no database"
+	@echo "nothing to do on vm4: postgres-gateway creates its role and database when its data directory is first initialised"
 else
 	$(COMPOSE) exec -T postgres sh /docker-entrypoint-initdb.d/10-init-node.sh
 	@. ./.env; { echo "\\set pw '$$EXPORTER_PASSWORD'"; cat ../infra/postgres/exporter.sql; } | $(COMPOSE) exec -T postgres psql -q -U custody -v ON_ERROR_STOP=1 -d postgres
@@ -99,7 +99,7 @@ PSQL = $(COMPOSE) exec -T postgres psql -q -U custody -v ON_ERROR_STOP=1
 # Each database revokes CONNECT from PUBLIC (infra/postgres/init-node.sh), so the login is granted it explicitly.
 audit-roles:
 ifeq ($(NODE),vm4)
-	@echo "nothing to do on vm4: it has no database"
+	@echo "nothing to do on vm4: postgres-gateway creates its role and database when its data directory is first initialised"
 else
 	$(PSQL) -d postgres < $(AUDIT_ROLES)/00_role.sql
 ifeq ($(NODE),vm2)
