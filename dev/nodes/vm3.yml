@@ -1,9 +1,9 @@
 # Node overlay for vm3 (10.10.0.2): custody and chain. See vm2.yml for how the two overlays fit together.
 #   here:      postgres (custody, withdrawal, chain_watcher, auditor), kafka, redis, anvil, wallet-service,
-#              withdrawal-service, chain-watcher, sweeper, simulator, auditor, and the Measurement Plane: Prometheus,
+#              chain-watcher, sweeper, simulator, auditor, and the Measurement Plane: Prometheus,
 #              Alertmanager (to Telegram), Grafana, kafka-exporter, and node/cAdvisor/postgres exporters
 #   on vm2:    mongo, and the Postgres of the request path (ledger, api_gateway)
-#   on vm4:    ledger-service, api-gateway, history-service
+#   on vm4:    ledger-service, api-gateway, history-service, withdrawal-service
 networks:
   default:
     driver_opts:
@@ -12,6 +12,7 @@ networks:
 services:
   mongo: {profiles: [elsewhere]}
   ledger-service: {profiles: [elsewhere]}
+  withdrawal-service: {profiles: [elsewhere]}
   api-gateway: {profiles: [elsewhere]}
   history-service: {profiles: [elsewhere]}
 
@@ -54,20 +55,6 @@ services:
     ports: !override ["10.10.0.2:8443:8443", "10.10.0.2:8080:8080"] # gateway (plain HTTP: a documented gap, now private), peers
     mem_limit: 300m
 
-  withdrawal-service:
-    environment:
-      POSTGRES_DSN: postgres://svc_withdrawal:${SVC_WITHDRAWAL_PASSWORD}@postgres:5432/withdrawal?sslmode=disable
-      POSTGRES_MAX_CONNS: "16" # pgx's default is 4 on a 4-vCPU host: withdrawal-service queued every request on it
-      LEDGER_SERVICE_URL: https://ledger-service:8444
-    extra_hosts: ["ledger-service:10.10.0.3"]
-    depends_on: !override
-      postgres: {condition: service_healthy}
-      kafka: {condition: service_healthy}
-      anvil: {condition: service_healthy}
-      wallet-service: {condition: service_started}
-    ports: !override ["10.10.0.2:8446:8443"] # api-gateway (vm4)
-    mem_limit: 300m
-
   chain-watcher:
     environment:
       POSTGRES_DSN: postgres://svc_chainwatcher:${SVC_CHAINWATCHER_PASSWORD}@postgres:5432/chain_watcher?sslmode=disable
@@ -91,7 +78,6 @@ services:
     depends_on: !override
       anvil: {condition: service_healthy}
       wallet-service: {condition: service_started}
-      withdrawal-service: {condition: service_started}
       sweeper: {condition: service_started}
       chain-watcher: {condition: service_started}
     mem_limit: 200m

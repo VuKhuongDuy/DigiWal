@@ -29,11 +29,11 @@ scrape_configs:
         labels: {service: api-gateway, node: vm4}
       - targets: ["10.10.0.3:9102"]
         labels: {service: ledger-service, node: vm4}
+      - targets: ["10.10.0.3:9103"]
+        labels: {service: withdrawal-service, node: vm4}
       # vm3: custody and chain
       - targets: ["wallet-service:9100"]
         labels: {service: wallet-service, node: vm3}
-      - targets: ["withdrawal-service:9100"]
-        labels: {service: withdrawal-service, node: vm3}
       - targets: ["chain-watcher:9100"]
         labels: {service: chain-watcher, node: vm3}
       - targets: ["sweeper:9100"]

@@ -9,7 +9,7 @@ bad() { printf '  FAIL  %s\n' "$*"; fail=1; }
 
 PEER_PUBLIC_IP=$(. /etc/digiwal/firewall.env && echo "${PEER_PUBLIC_IP%%,*}") # first peer; several on a three-node mesh
 case $NODE in
-	vm2) PEER_PRIVATE=10.10.0.2; PEER_OPEN="9092 8545 8443 8080 8446 5432 9100 8081 9187" ;;
+	vm2) PEER_PRIVATE=10.10.0.2; PEER_OPEN="9092 8545 8443 8080 5432 9100 8081 9187" ;;
 	vm3) PEER_PRIVATE=10.10.0.1; PEER_OPEN="5432 27017 9100 8081 9187" ;;
 	vm4) PEER_PRIVATE=10.10.0.1; PEER_OPEN="5432 27017 9100 8081 9187" ;;
 	*) echo "unknown node $NODE"; exit 2 ;;

@@ -1,8 +1,8 @@
 # Node overlay for vm4 (10.10.0.3): the stateless tier. See vm2.yml for how the overlays fit together.
 # docs/design/multi-node-deployment.md, "Addendum: three-node layout".
-#   here:      api-gateway, ledger-service, history-service (no state of their own)
+#   here:      api-gateway, ledger-service, history-service, withdrawal-service (no state of their own)
 #   on vm2:    postgres (ledger, api_gateway), mongo        (the services reach them at 10.10.0.1)
-#   on vm3:    wallet-service, withdrawal-service, chain-watcher, sweeper, simulator, kafka, redis, anvil, monitoring
+#   on vm3:    postgres (custody, withdrawal, chain_watcher), wallet-service, chain-watcher, sweeper, simulator, kafka, redis, anvil, monitoring
 networks:
   default:
     driver_opts:
@@ -21,7 +21,6 @@ services:
   postgres-exporter: {profiles: [elsewhere]}
   auditor: {profiles: [elsewhere]}
   wallet-service: {profiles: [elsewhere]}
-  withdrawal-service: {profiles: [elsewhere]}
   chain-watcher: {profiles: [elsewhere]}
   sweeper: {profiles: [elsewhere]}
   simulator: {profiles: [elsewhere]}
@@ -39,11 +38,19 @@ services:
     environment:
       POSTGRES_DSN: postgres://svc_gateway:${SVC_GATEWAY_PASSWORD}@postgres:5432/api_gateway?sslmode=disable
       POSTGRES_MAX_CONNS: "16"
-      WITHDRAWAL_SERVICE_URL: https://withdrawal-service:8446
-    extra_hosts: ["postgres:10.10.0.1", "wallet-service:10.10.0.2", "withdrawal-service:10.10.0.2"]
+    extra_hosts: ["postgres:10.10.0.1", "wallet-service:10.10.0.2"]
     depends_on: !override []
     ports: !override ["10.10.0.3:8084:8080", "127.0.0.1:8084:8080", "10.10.0.3:9101:9100"] # never on the public interface (invariant 8); /metrics
     mem_limit: 500m
+
+  withdrawal-service:
+    environment:
+      POSTGRES_DSN: postgres://svc_withdrawal:${SVC_WITHDRAWAL_PASSWORD}@postgres:5432/withdrawal?sslmode=disable
+      POSTGRES_MAX_CONNS: "16" # pgx's default is 4 on a 4-vCPU host: it queued every request on it at 400 rps
+    extra_hosts: ["postgres:10.10.0.2", "kafka:10.10.0.2", "anvil:10.10.0.2", "wallet-service:10.10.0.2"]
+    depends_on: !override []
+    ports: !override ["10.10.0.3:9103:9100"] # /metrics (vm3); the gateway reaches it on this node's network
+    mem_limit: 300m
 
   history-service:
     environment:

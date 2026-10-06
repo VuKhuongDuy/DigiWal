@@ -24,12 +24,12 @@ SERVICES =
 MONITORING = node-exporter cadvisor postgres-exporter
 else
 STORES   =
-SERVICES = ledger-service api-gateway history-service
+SERVICES = ledger-service api-gateway history-service withdrawal-service
 MONITORING = node-exporter cadvisor
 endif
 else ifeq ($(NODE),vm3)
 STORES   = postgres redis kafka anvil
-SERVICES = wallet-service withdrawal-service chain-watcher sweeper simulator
+SERVICES = wallet-service chain-watcher sweeper simulator
 MONITORING = node-exporter cadvisor postgres-exporter kafka-exporter alertmanager prometheus grafana
 else
 STORES   = postgres redis kafka mongo anvil
@@ -48,7 +48,7 @@ env:
 	@gen() { grep -q "^$$1=" .env || { echo "$$1=$$(openssl rand -hex 32)" >> .env; echo "generated $$1"; }; }; \
 	case "$(NODE)" in \
 	vm2) for v in PG_ADMIN_PASSWORD SVC_LEDGER_PASSWORD SVC_GATEWAY_PASSWORD SVC_HISTORY_PASSWORD MONGO_ADMIN_PASSWORD EXPORTER_PASSWORD; do gen $$v; done ;; \
-	vm4) for v in SVC_LEDGER_PASSWORD SVC_GATEWAY_PASSWORD SVC_HISTORY_PASSWORD; do grep -q "^$$v=" .env || { echo "$$v missing: copy it from vm2's .env (the databases' passwords are set there)"; exit 1; }; done ;; \
+	vm4) for v in SVC_LEDGER_PASSWORD SVC_GATEWAY_PASSWORD SVC_HISTORY_PASSWORD SVC_WITHDRAWAL_PASSWORD; do grep -q "^$$v=" .env || { echo "$$v missing: copy it from vm2's .env (the databases' passwords are set there)"; exit 1; }; done ;; \
 	vm3) for v in PG_ADMIN_PASSWORD SVC_WALLET_PASSWORD SVC_WITHDRAWAL_PASSWORD SVC_CHAINWATCHER_PASSWORD SVC_AUDITOR_PASSWORD EXPORTER_PASSWORD MASTER_KEY_HEX; do gen $$v; done ;; \
 	*) gen MASTER_KEY_HEX ;; \
 	esac
@@ -56,9 +56,9 @@ env:
 # The CA lives on vm2 only (~/.digiwal-ca); vm3 receives just the leaf directories of its own services.
 certs:
 ifeq ($(NODE),vm4)
-	@for s in ledger-service api-gateway; do test -f ../infra/pki/out/$$s/cert.pem || { echo "missing leaf for $$s: run 'make push-certs' on vm2"; exit 1; }; done
+	@for s in ledger-service api-gateway withdrawal-service; do test -f ../infra/pki/out/$$s/cert.pem || { echo "missing leaf for $$s: run 'make push-certs' on vm2"; exit 1; }; done
 else ifeq ($(NODE),vm3)
-	@for s in wallet-service withdrawal-service chain-watcher sweeper auditor; do test -f ../infra/pki/out/$$s/cert.pem || { echo "missing leaf for $$s: run 'make push-certs' on vm2"; exit 1; }; done
+	@for s in wallet-service chain-watcher sweeper auditor; do test -f ../infra/pki/out/$$s/cert.pem || { echo "missing leaf for $$s: run 'make push-certs' on vm2"; exit 1; }; done
 else
 	$(MAKE) -C ../e2e certs
 	@test -f ../infra/pki/out/auditor/cert.pem || ../infra/pki/gen-leaf.sh auditor
@@ -68,10 +68,10 @@ endif
 push-certs: certs
 	@test "$(NODE)" = vm2 || { echo "run on vm2: it holds the CA"; exit 1; }
 	ssh vm3 'mkdir -p /root/DigiWal/infra/pki/out && chmod 700 /root/DigiWal/infra/pki/out'
-	@for s in wallet-service withdrawal-service chain-watcher sweeper auditor; do \
+	@for s in wallet-service chain-watcher sweeper auditor; do \
 		rsync -a --delete ../infra/pki/out/$$s/ vm3:/root/DigiWal/infra/pki/out/$$s/ || exit 1; done
 	ssh vm4 'mkdir -p /root/DigiWal/infra/pki/out && chmod 700 /root/DigiWal/infra/pki/out'
-	@for s in ledger-service api-gateway; do \
+	@for s in ledger-service api-gateway withdrawal-service; do \
 		rsync -a --delete ../infra/pki/out/$$s/ vm4:/root/DigiWal/infra/pki/out/$$s/ || exit 1; done
 
 firewall:
