@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Host firewall for a DigiWal node (docs/design/multi-node-deployment.md, "Network design" / invariant 8).
 # Idempotent: rebuilds its own chains, leaves everything else alone. Run as root on each node:
-#   PEER_PUBLIC_IP=<the other node's public IP> ./firewall.sh [apply|status|off]
+#   PEER_PUBLIC_IP=<public IPs of the other nodes, comma-separated> ./firewall.sh [apply|status|off]
 #
 # Two layers, because Docker-published ports bypass INPUT and ufw (they are DNAT'd and go through FORWARD):
 #   DIGIWAL-INPUT  host traffic: loopback, established, the WireGuard network, SSH, and WireGuard's UDP from the peer only
@@ -9,7 +9,7 @@
 #                  the public interface and was DNAT'd to a container is dropped
 set -euo pipefail
 
-PEER_PUBLIC_IP=${PEER_PUBLIC_IP:?set PEER_PUBLIC_IP to the public IPv4 of the other node}
+PEER_PUBLIC_IP=${PEER_PUBLIC_IP:?set PEER_PUBLIC_IP to the public IPv4 of the other node(s), comma-separated}
 WG_IF=${WG_IF:-wg0}
 WG_NET=${WG_NET:-10.10.0.0/24}
 WG_PORT=${WG_PORT:-51820}
@@ -44,7 +44,7 @@ apply() {
 	iptables -A DIGIWAL-INPUT -p icmp -j ACCEPT
 	iptables -A DIGIWAL-INPUT -i "$WG_IF" -s "$WG_NET" -j ACCEPT
 	iptables -A DIGIWAL-INPUT -p tcp --dport "$SSH_PORT" -j ACCEPT
-	iptables -A DIGIWAL-INPUT -p udp --dport "$WG_PORT" -s "$PEER_PUBLIC_IP" -j ACCEPT
+	iptables -A DIGIWAL-INPUT -p udp --dport "$WG_PORT" -s "$PEER_PUBLIC_IP" -j ACCEPT # -s takes a comma list
 	# Only the public interface is closed: Docker bridge traffic to the host (container -> host services) stays open.
 	iptables -A DIGIWAL-INPUT ! -i "$PUBLIC_IF" -j ACCEPT
 	iptables -A DIGIWAL-INPUT -j DROP
