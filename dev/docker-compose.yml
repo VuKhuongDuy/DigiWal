@@ -18,27 +18,26 @@ services:
   mongo:
     restart: unless-stopped
 
+  # mockchain (e2e/mockchain, a small Node.js JSON-RPC node) stands in for Anvil: the services only need native transfers,
+  # the MockERC20, blocks, receipts and logs. Anvil's --state file is rewritten in place, and a kill mid-dump left it
+  # truncated (the container crash-looped for days); mockchain appends each block to a journal and cuts a partial last
+  # line on start. The service keeps the name `anvil` and port 8545, so no other service changes.
   anvil:
     restart: unless-stopped
-    user: root # the state volume is root-owned
-    entrypoint:
-      - anvil
-      - --host
-      - 0.0.0.0
-      - --block-time
-      - "2"
-      - --state
-      - /data/anvil-state.json
-      - --state-interval
-      - "90" # each dump rewrites the whole file in place; every 5 s stalled the disk and a kill mid-dump can truncate it
-      # Without this Anvil writes every block's state under ~/.foundry/anvil/tmp inside the container: ~13 GB/day
-      # at the simulator's rate, until the disk is full. Nothing here reads historical state (the services read
-      # blocks, receipts and logs). 1000 retained states grew to 3.6 GB RSS and got Anvil OOM-killed; 128 is the
-      # design's starting value (docs/design/multi-node-deployment.md, "Anvil: safe configuration").
-      - --prune-history
-      - "128"
-    stop_grace_period: 60s # a normal `down` must finish its final state dump
-    mem_limit: 2500m
+    image: digiwal-mockchain:dev
+    build:
+      context: ..
+      dockerfile: e2e/mockchain/Dockerfile
+    entrypoint: ["node", "server.js"]
+    user: root # the volume is root-owned
+    environment:
+      BLOCK_TIME_MS: "2000" # the sweeper, chain-watcher and withdrawals only advance with blocks
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8545/"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    mem_limit: 300m
     volumes:
       - anvil_data:/data
     logging: &rotate
