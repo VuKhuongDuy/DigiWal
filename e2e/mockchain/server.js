@@ -193,7 +193,7 @@ function txJson(t, blk, i) {
   const o = {
     hash: v.hash, nonce: q(v.nonce), blockHash: blk ? blk.hash : null, blockNumber: blk ? q(blk.number) : null, transactionIndex: blk ? q(i) : null,
     from: v.from, to: v.to, value: q(v.value), gas: q(v.gas), gasPrice: q(blk ? t.price : (v.maxFeePerGas ?? v.gasPrice)), input: v.data,
-    v: q(v.type === 0 ? (v.chainId ? v.chainId * 2n + 35n + BigInt(s.yParity) : BigInt(s.v)) : s.yParity), r: s.r, s: s.s, type: q(v.type), chainId: q(v.chainId),
+    v: q(v.type === 0 ? (v.chainId ? v.chainId * 2n + 35n + BigInt(s.yParity) : BigInt(s.v)) : s.yParity), r: q(BigInt(s.r)), s: q(BigInt(s.s)), // quantities: no leading zeros type: q(v.type), chainId: q(v.chainId),
   };
   if (v.type === 2) { o.maxFeePerGas = q(v.maxFeePerGas); o.maxPriorityFeePerGas = q(v.maxPriorityFeePerGas); o.accessList = v.accessList; o.yParity = q(s.yParity); }
   if (v.type === 1) { o.accessList = v.accessList; o.yParity = q(s.yParity); }
