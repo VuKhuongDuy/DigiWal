@@ -74,10 +74,11 @@ func main() {
 	must(err)
 	check(bal.Cmp(new(big.Int).Mul(big.NewInt(1000), big.NewInt(1e18))) > 0, "account #0 holds %s wei", bal)
 	to := common.HexToAddress("0x00000000000000000000000000000000000000a1")
+	before, _ := c.BalanceAt(ctx, to, nil)
 	rcpt := send(ctx, c, signer, key0, &to, big.NewInt(1e15), nil)
 	check(rcpt.Status == 1 && rcpt.GasUsed == 21000, "ETH transfer mined, gas %d", rcpt.GasUsed)
 	got, _ := c.BalanceAt(ctx, to, nil)
-	check(got.Cmp(big.NewInt(1e15)) == 0, "recipient got 0.001 ETH")
+	check(new(big.Int).Sub(got, before).Cmp(big.NewInt(1e15)) == 0, "recipient got 0.001 ETH")
 
 	fmt.Println("3. MockERC20")
 	raw := common.FromHex(strings.TrimSpace(contracts.MockERC20Bin))
