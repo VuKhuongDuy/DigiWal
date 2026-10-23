@@ -54,7 +54,7 @@ type Server struct {
 	// IPLimit throttles POST /users and every authenticated route by source address, before authentication —
 	// it is what covers POST /users and bad-key guessing. UserLimit throttles authenticated
 	// requests per user. Either may be nil (no limit).
-	IPLimit, UserLimit *Limiter
+	IPLimit, UserLimit RateLimiter
 }
 
 // Routes: POST /users is the only unauthenticated route (invariant #3). Everything else,
@@ -72,12 +72,12 @@ func (s *Server) Routes() http.Handler {
 
 	root := http.NewServeMux()
 	root.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
-	root.Handle("POST /users", s.IPLimit.limit(http.HandlerFunc(s.handleCreateUser), clientIP))
+	root.Handle("POST /users", limitBy(s.IPLimit, http.HandlerFunc(s.handleCreateUser), clientIP))
 	// ReportRoute: the authenticated routes sit in a mux nested behind requireAuth, which copies the request; this hands
 	// the matched pattern to the metrics wrapper outside, so per-route latency is not folded into "/".
 	// The IP limit sits in front of auth so bad-key guessing is throttled too; /healthz is exempt.
-	byUser := s.UserLimit.limit(metrics.ReportRoute(authed), func(r *http.Request) string { return UserID(r.Context()) })
-	root.Handle("/", s.IPLimit.limit(s.requireAuth(byUser), clientIP))
+	byUser := limitBy(s.UserLimit, metrics.ReportRoute(authed), func(r *http.Request) string { return UserID(r.Context()) })
+	root.Handle("/", limitBy(s.IPLimit, s.requireAuth(byUser), clientIP))
 	return root
 }
 

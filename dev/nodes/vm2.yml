@@ -57,6 +57,7 @@ services:
     environment:
       POSTGRES_DSN: postgres://svc_gateway:${SVC_GATEWAY_PASSWORD}@postgres:5432/api_gateway?sslmode=disable
       WITHDRAWAL_SERVICE_URL: https://withdrawal-service:8446
+      REDIS_ADDR: "" # redis is on vm3 and local-only (unauthenticated): in-memory rate limits until that link is secured
     extra_hosts: ["wallet-service:10.10.0.2", "withdrawal-service:10.10.0.2"]
     ports: !override ["10.10.0.1:8084:8080", "127.0.0.1:8084:8080"] # never on the public interface (invariant 8)
     mem_limit: 500m

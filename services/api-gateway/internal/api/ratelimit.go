@@ -8,6 +8,12 @@ import (
 	"time"
 )
 
+// RateLimiter decides whether a request for key is within budget. Allow never fails: an
+// implementation with a flaky backend must degrade (see RedisLimiter), not error.
+type RateLimiter interface {
+	Allow(key string) (ok bool, retryAfter time.Duration)
+}
+
 // Limiter is an approximate sliding-window rate limiter: per key it keeps two counters (the
 // current and previous fixed window) and weights the previous one by how much of it still
 // overlaps the sliding window. That is ~32 bytes of state per active key, with an error well
@@ -76,9 +82,8 @@ func (l *Limiter) sweep(now time.Time) {
 	}
 }
 
-// limit rejects with 429 once key(r) is over the limiter's budget. A nil limiter lets
-// everything through.
-func (l *Limiter) limit(next http.Handler, key func(*http.Request) string) http.Handler {
+// limitBy rejects with 429 once key(r) is over l's budget. A nil l lets everything through.
+func limitBy(l RateLimiter, next http.Handler, key func(*http.Request) string) http.Handler {
 	if l == nil {
 		return next
 	}

@@ -26,11 +26,15 @@ resolved from a valid API key, and that `user_id` is never read from the client.
 
 - The gateway -> wallet-service hop is plain HTTP: `service-auth-mtls.md` Open Question #4 (moving
   those endpoints behind mTLS, `CN=api-gateway`) is deferred.
-- Rate limiting is approximate and per instance (sliding-window counter, two counters per key, in
-  memory): `RATE_LIMIT_IP_PER_MIN` (default 1200; covers `POST /users` and bad-key guessing, keyed by
-  `RemoteAddr`, so behind a proxy it sees the proxy) and `RATE_LIMIT_USER_PER_MIN` (default 600, per
-  authenticated user); 0 disables. Over the limit -> 429 + `Retry-After`. With N instances the real limit
-  is up to N× the configured one. No lockout or backoff on repeated bad keys beyond the IP limit.
+- Rate limiting is approximate (sliding-window counter, two counters per key): `RATE_LIMIT_IP_PER_MIN`
+  (default 1200; covers `POST /users` and bad-key guessing, keyed by `RemoteAddr`, so behind a proxy it sees
+  the proxy) and `RATE_LIMIT_USER_PER_MIN` (default 600, per authenticated user); 0 disables. Over the limit ->
+  429 + `Retry-After`. Without `REDIS_ADDR` it is in-memory and per instance (N instances allow up to N× the
+  limit). With `REDIS_ADDR` the budget is shared via one Lua call per request (50 ms timeout); on any Redis
+  error the gateway **fails open** to the in-memory limiter and skips Redis for 1 s, so an outage costs
+  cross-instance accuracy, not availability. Redis here is unauthenticated and, in the two-node layout, on vm3
+  and local-only: `dev/nodes/vm2.yml` blanks `REDIS_ADDR`, so vm2's gateway stays in-memory until that
+  link is opened and secured. No lockout or backoff on repeated bad keys beyond the IP limit.
 - TLS termination for external clients is out of scope here (plain `:8080`).
 - Runs under Docker in `e2e/` (task 2.6) against the real wallet-service and ledger-service, including the
   gateway -> ledger-service mTLS balances call. Its own tests use real Postgres and fake wallet-service / ledger-service.
