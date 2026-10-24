@@ -33,12 +33,15 @@ TOPICS = deposits.detected deposits.confirmed withdrawals.broadcast withdrawals.
 
 # Secrets are generated once and kept in the gitignored .env, per node. The master key exists only where
 # wallet-service runs (vm3, or the single host): the sealed seeds in Postgres are useless without it, and
-# losing it means losing every address.
+# losing it means losing every address. REDIS_PASSWORD is generated on vm3 (it hosts Redis); vm2 copies it from there.
 env:
 	@touch .env; chmod 600 .env
 	@gen() { grep -q "^$$1=" .env || { echo "$$1=$$(openssl rand -hex 32)" >> .env; echo "generated $$1"; }; }; \
 	case "$(NODE)" in \
-	vm2) for v in PG_ADMIN_PASSWORD SVC_LEDGER_PASSWORD SVC_GATEWAY_PASSWORD SVC_HISTORY_PASSWORD MONGO_ADMIN_PASSWORD; do gen $$v; done ;; \
+	vm2) for v in PG_ADMIN_PASSWORD SVC_LEDGER_PASSWORD SVC_GATEWAY_PASSWORD SVC_HISTORY_PASSWORD MONGO_ADMIN_PASSWORD; do gen $$v; done; \
+		grep -q '^REDIS_PASSWORD=' .env || { pw=$$(ssh vm3 "sed -n 's/^REDIS_PASSWORD=//p' /root/DigiWal/dev/.env" 2>/dev/null); \
+		echo "$$pw" | grep -Eq '^[0-9a-f]{64}$$' || { echo "REDIS_PASSWORD: vm3 has none yet; run 'make env' on vm3 first (vm2 copies it from there)"; exit 1; }; \
+		echo "REDIS_PASSWORD=$$pw" >> .env; echo "copied REDIS_PASSWORD from vm3"; } ;; \
 	vm3) for v in PG_ADMIN_PASSWORD SVC_WALLET_PASSWORD SVC_WITHDRAWAL_PASSWORD SVC_CHAINWATCHER_PASSWORD REDIS_PASSWORD MASTER_KEY_HEX; do gen $$v; done ;; \
 	*) gen MASTER_KEY_HEX ;; \
 	esac

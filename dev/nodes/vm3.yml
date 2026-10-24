@@ -40,7 +40,7 @@ services:
     environment:
       REDIS_PASSWORD: ${REDIS_PASSWORD:?run make env}
       REDISCLI_AUTH: ${REDIS_PASSWORD}
-    ports: !override []
+    ports: !override ["10.10.0.2:6379:6379"] # api-gateway (vm2) shares its rate-limit counters here; WireGuard-only, password required
     mem_limit: 300m
 
   kafka:
