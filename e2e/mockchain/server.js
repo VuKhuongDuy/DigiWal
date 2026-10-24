@@ -88,28 +88,40 @@ function runCall(from, tx) {
 }
 
 // ---------------------------------------------------------------- mining
-function txView(tx) {
+function txView(tx, from) {
   return {
-    type: tx.type ?? 0, hash: tx.hash, from: lc(tx.from), to: tx.to ? lc(tx.to) : null, nonce: tx.nonce, gas: tx.gasLimit, value: tx.value, data: tx.data,
+    type: tx.type ?? 0, hash: tx.hash, from, to: tx.to ? lc(tx.to) : null, nonce: tx.nonce, gas: tx.gasLimit, value: tx.value, data: tx.data,
     maxFeePerGas: tx.maxFeePerGas, maxPriorityFeePerGas: tx.maxPriorityFeePerGas, gasPrice: tx.gasPrice, chainId: tx.chainId,
     accessList: tx.accessList ?? [], sig: tx.signature,
   };
 }
-function mineBlock(rawList = null, ts = null) {
+function mineBlock(rawList = null, ts = null, froms = null) {
   const number = blocks.length, parent = blocks[number - 1];
   const base = nextBaseFee ?? BASE_FEE_DEFAULT; nextBaseFee = null;
   const timestamp = ts ?? Math.max(Math.floor(Date.now() / 1000), parent ? parent.header.timestamp + 1 : 0);
   const included = [];
-  const pick = () => {  // next executable tx: the lowest-nonce tx of each sender, highest tip first
-    let best = null;
-    const bySender = new Map();
-    for (const e of mempool.values()) { const f = lc(e.tx.from); const cur = bySender.get(f); if (e.tx.nonce === acct(f).nonce && (!cur || tipOf(e.tx, base) > tipOf(cur.tx, base))) bySender.set(f, e); }
-    for (const e of bySender.values()) if (!best || tipOf(e.tx, base) > tipOf(best.tx, base)) best = e;
+  // One queue per sender, built once per block (re-scanning the whole mempool for every transaction is O(n^2)).
+  const queues = new Map();
+  if (!rawList) {
+    for (const e of mempool.values()) { const f = e.from; if (!queues.has(f)) queues.set(f, []); queues.get(f).push(e); }
+    for (const q of queues.values()) q.sort((x, y) => x.tx.nonce - y.tx.nonce);
+  }
+  const pos = new Map();
+  const pick = () => {  // the next executable tx: each sender's lowest-nonce tx, highest tip first
+    let best = null, bestFrom = null;
+    for (const [f, q] of queues) {
+      let i = pos.get(f) ?? 0;
+      while (i < q.length && q[i].tx.nonce < acct(f).nonce) i++;     // already used
+      pos.set(f, i);
+      const cand = q[i];
+      if (cand && cand.tx.nonce === acct(f).nonce && (!best || tipOf(cand.tx, base) > tipOf(best.tx, base))) { best = cand; bestFrom = f; }
+    }
+    if (best) pos.set(bestFrom, (pos.get(bestFrom) ?? 0) + 1);
     return best;
   };
   let gasUsed = 0n;
   const execOne = (e) => {
-    const from = lc(e.tx.from), a = acct(from), price = effPrice(e.tx, base);
+    const from = e.from, a = acct(from), price = effPrice(e.tx, base);
     if (e.tx.nonce !== a.nonce) return false;
     if (price < base || a.balance < e.tx.gasLimit * price + e.tx.value) return false;
     let r; try { r = runCall(from, e.tx); } catch (err) { console.error('call failed:', err.message); r = { ok: false, gas: 21_000n, logs: [] }; }
@@ -121,11 +133,11 @@ function mineBlock(rawList = null, ts = null) {
     return true;
   };
   if (rawList) {
-    for (const raw of rawList) { const tx = Transaction.from(raw); const e = { tx, raw }; mempool.delete(tx.hash); execOne(e); }
+    rawList.forEach((raw, k) => { const tx = Transaction.from(raw); const e = { tx, raw, from: froms ? froms[k] : lc(tx.from) }; mempool.delete(tx.hash); execOne(e); });
   } else {
     for (let e = pick(); e && gasUsed < GAS_LIMIT - 1_000_000n; e = pick()) { mempool.delete(e.tx.hash); if (!execOne(e)) { /* became unexecutable */ } }
     // drop txs that can never run (nonce already used)
-    for (const [h, e] of mempool) if (e.tx.nonce < acct(e.tx.from).nonce) mempool.delete(h);
+    for (const [h, e] of mempool) if (e.tx.nonce < acct(e.from).nonce) mempool.delete(h);
   }
   const txs = included.map((x) => x.e.tx.hash);
   const header = {
@@ -135,19 +147,18 @@ function mineBlock(rawList = null, ts = null) {
     receiptsRoot: txs.length ? keccak256(concat(txs.map((h) => keccak256(h)))) : EMPTY_ROOT,
   };
   const hash = headerHash(header);
-  let cum = 0n, logIndex = 0;
-  const blk = { number, hash, header, txs: [], raws: included.map((x) => x.e.raw) };
+  // A mined transaction is kept compactly (its raw bytes and the execution result, ~0.5 KB instead of ~7 KB as JSON objects);
+  // the JSON the node answers with is rebuilt on demand (txViewOf, receiptOf).
+  let cum = 0;
+  const blk = { number, hash, header, txs: [], raws: included.map((x) => x.e.raw), froms: included.map((x) => x.e.from) };
   included.forEach((x, i) => {
-    cum += x.used;
-    const logs = x.r.logs.map((l) => ({ ...l, blockNumber: q(number), blockHash: hash, transactionHash: x.e.tx.hash, transactionIndex: q(i), logIndex: q(logIndex++), removed: false }));
-    const view = txView(x.e.tx);
-    const receipt = {
-      transactionHash: x.e.tx.hash, transactionIndex: q(i), blockHash: hash, blockNumber: q(number), from: view.from, to: view.to,
-      cumulativeGasUsed: q(cum), gasUsed: q(x.used), contractAddress: x.r.contract ?? null, logs, logsBloom: BLOOM0, status: x.r.ok ? '0x1' : '0x0',
-      effectiveGasPrice: q(x.price), type: q(view.type),
-    };
-    blk.txs.push({ view, receipt, price: x.price });
-    txIndex.set(x.e.tx.hash, { block: number, i });
+    cum += Number(x.used);
+    const txh = x.e.tx.hash;
+    blk.txs.push({
+      h: txh, f: x.e.from, t: x.e.tx.to ? lc(x.e.tx.to) : null, type: x.e.tx.type ?? 0, raw: Buffer.from(x.e.raw.slice(2), 'hex'),
+      ok: x.r.ok ? 1 : 0, used: Number(x.used), cum, price: Number(x.price), c: x.r.contract ?? null, logs: x.r.logs.map((l) => [l.address, l.topics, l.data]),
+    });
+    txIndex.set(txh, { block: number, i });
   });
   blocks.push(blk); byHash.set(hash, number);
   return blk;
@@ -161,15 +172,17 @@ function journalOpen() {
   const text = fs.existsSync(p) ? fs.readFileSync(p, 'utf8') : '';
   const lines = text.split('\n'); lines.pop();           // '' after a well-formed file, a partial last line otherwise
   let good = 0, genesisTs = null;
+  const pend = new Map();       // tx hash -> raw, journaled as pending and not (yet) seen in a block
   for (const line of lines) {
     let j; try { j = JSON.parse(line); } catch { break; }
     if (j.op === 'genesis') { genesisTs = j.ts; mineBlock([], j.ts).raws = null; }
     else if (j.op === 'balance') acct(j.addr).balance = BigInt(j.value);
     else if (j.op === 'basefee') nextBaseFee = BigInt(j.value);
-    else if (j.op === 'pending') { try { acceptTx(j.raw, false); } catch { /* mined or replaced since */ } }
-    else if (j.op === 'block') mineBlock(j.raws, j.ts).raws = null;
+    else if (j.op === 'pending') pend.set(keccak256(j.raw), j.raw);
+    else if (j.op === 'block') { for (const r of j.raws) pend.delete(keccak256(r)); const b = mineBlock(j.raws, j.ts, j.froms); b.raws = null; b.froms = null; }
     good += Buffer.byteLength(line) + 1;
   }
+  for (const raw of pend.values()) { try { acceptTx(raw, false); } catch { /* replaced or invalid since */ } }
   const size = Buffer.byteLength(text);
   if (good < size) { fs.truncateSync(p, good); console.log(`journal: cut a partial tail (${size - good} bytes)`); }
   journalFd = fs.openSync(p, 'a');
@@ -179,8 +192,8 @@ function journalOpen() {
 const journal = (obj) => { fs.writeSync(journalFd, JSON.stringify(obj) + '\n'); fs.fsyncSync(journalFd); };
 function mineAndJournal() {
   const blk = mineBlock();
-  journal({ op: 'block', ts: blk.header.timestamp, raws: blk.raws });
-  blk.raws = null;                 // the journal has them; keeping every raw transaction in memory is what ran Node out of heap
+  journal({ op: 'block', ts: blk.header.timestamp, raws: blk.raws, froms: blk.froms });
+  blk.raws = null; blk.froms = null;                 // the journal has them; keeping every raw transaction in memory is what ran Node out of heap
   return blk;
 }
 
@@ -190,6 +203,19 @@ const blockNum = (tag) => {
   if (tag === 'earliest') return 0;
   return Number(BigInt(tag));
 };
+function txViewOf(blk, i) {
+  const r = blk.txs[i];
+  return { view: txView(Transaction.from('0x' + r.raw.toString('hex')), r.f), price: BigInt(r.price) };
+}
+function receiptOf(blk, i) {
+  const r = blk.txs[i];
+  let li = 0; for (let k = 0; k < i; k++) li += blk.txs[k].logs.length;
+  return {
+    transactionHash: r.h, transactionIndex: q(i), blockHash: blk.hash, blockNumber: q(blk.number), from: r.f, to: r.t,
+    cumulativeGasUsed: q(r.cum), gasUsed: q(r.used), contractAddress: r.c, logsBloom: BLOOM0, status: r.ok ? '0x1' : '0x0', effectiveGasPrice: q(r.price), type: q(r.type),
+    logs: r.logs.map(([address, topics, data], k) => ({ address, topics, data, blockNumber: q(blk.number), blockHash: blk.hash, transactionHash: r.h, transactionIndex: q(i), logIndex: q(li + k), removed: false })),
+  };
+}
 function txJson(t, blk, i) {
   const v = t.view, s = v.sig;
   const o = {
@@ -208,7 +234,7 @@ function blockJson(blk, full) {
     transactionsRoot: h.transactionsRoot, stateRoot: h.stateRoot, receiptsRoot: h.receiptsRoot, miner: h.miner, difficulty: '0x0', totalDifficulty: '0x0',
     extraData: '0x', size: q(500 + 200 * blk.txs.length), gasLimit: q(GAS_LIMIT), gasUsed: q(h.gasUsed), timestamp: q(h.timestamp), mixHash: ZERO32,
     baseFeePerGas: q(h.baseFee), uncles: [],
-    transactions: blk.txs.map((t, i) => (full ? txJson(t, blk, i) : t.view.hash)),
+    transactions: blk.txs.map((t, i) => (full ? txJson(txViewOf(blk, i), blk, i) : t.h)),
   };
 }
 const matchTopic = (want, got) => want == null || (Array.isArray(want) ? want.some((w) => w == null || lc(w) === lc(got ?? '')) : lc(want) === lc(got ?? ''));
@@ -242,13 +268,13 @@ function acceptTx(raw, persist) {
   const price = tx.maxFeePerGas ?? tx.gasPrice;
   if (price < base) throw rpcErr(-32000, 'max fee per gas less than block base fee');
   if (a.balance < tx.gasLimit * price + tx.value) throw rpcErr(-32000, 'insufficient funds for gas * price + value');
-  for (const [h, e] of mempool) if (lc(e.tx.from) === from && e.tx.nonce === tx.nonce) {
+  for (const [h, e] of mempool) if (e.from === from && e.tx.nonce === tx.nonce) {
     const oldMax = e.tx.maxFeePerGas ?? e.tx.gasPrice, oldTip = e.tx.maxPriorityFeePerGas ?? e.tx.gasPrice;
     const newTip = tx.maxPriorityFeePerGas ?? tx.gasPrice;
     if (price * 100n < oldMax * 110n || newTip * 100n < oldTip * 110n) throw rpcErr(-32000, 'replacement transaction underpriced');
     mempool.delete(h);
   }
-  mempool.set(tx.hash, { tx, raw });
+  mempool.set(tx.hash, { tx, raw, from });
   if (persist) journal({ op: 'pending', raw });   // a restart must not lose a transaction that was accepted but not mined yet
   return tx.hash;
 }
@@ -266,25 +292,31 @@ const methods = {
   eth_getBalance: ([a]) => q(acct(a).balance),
   eth_getTransactionCount: ([a, tag]) => {
     let n = acct(a).nonce;
-    if (tag === 'pending') { const mine = [...mempool.values()].filter((e) => lc(e.tx.from) === lc(a)).map((e) => e.tx.nonce); while (mine.includes(n)) n++; }
+    if (tag === 'pending') { const mine = new Set([...mempool.values()].filter((e) => e.from === lc(a)).map((e) => e.tx.nonce)); while (mine.has(n)) n++; }
     return q(n);
   },
   eth_getCode: ([a]) => (tokens.has(lc(a)) ? '0x' + BIN.slice(0, 64) : '0x'),
   eth_getBlockByNumber: ([tag, full]) => { const b = blocks[blockNum(tag)]; return b ? blockJson(b, full) : null; },
   eth_getBlockByHash: ([h, full]) => { const n = byHash.get(h); return n == null ? null : blockJson(blocks[n], full); },
   eth_getTransactionByHash: ([h]) => {
-    const ix = txIndex.get(h); if (ix) { const b = blocks[ix.block]; return txJson(b.txs[ix.i], b, ix.i); }
-    const p = mempool.get(h); return p ? txJson({ view: txView(p.tx) }, null, 0) : null;
+    const ix = txIndex.get(h); if (ix) { const b = blocks[ix.block]; return txJson(txViewOf(b, ix.i), b, ix.i); }
+    const p = mempool.get(h); return p ? txJson({ view: txView(p.tx, p.from) }, null, 0) : null;
   },
-  eth_getTransactionReceipt: ([h]) => { const ix = txIndex.get(h); return ix ? blocks[ix.block].txs[ix.i].receipt : null; },
+  eth_getTransactionReceipt: ([h]) => { const ix = txIndex.get(h); return ix ? receiptOf(blocks[ix.block], ix.i) : null; },
   eth_getLogs: ([f]) => {
     const from = blockNum(f.fromBlock ?? 'latest'), to = blockNum(f.toBlock ?? 'latest');
     const addrs = f.address == null ? null : (Array.isArray(f.address) ? f.address : [f.address]).map(lc);
     const out = [];
-    for (let n = Math.max(0, from); n <= Math.min(to, blocks.length - 1); n++) for (const t of blocks[n].txs) for (const l of t.receipt.logs) {
-      if (addrs && !addrs.includes(lc(l.address))) continue;
-      if (f.topics && !f.topics.every((w, k) => matchTopic(w, l.topics[k]))) continue;
-      out.push(l);
+    for (let n = Math.max(0, from); n <= Math.min(to, blocks.length - 1); n++) {
+      const b = blocks[n];
+      for (let i = 0; i < b.txs.length; i++) {
+        if (!b.txs[i].logs.length) continue;
+        for (const l of receiptOf(b, i).logs) {
+          if (addrs && !addrs.includes(lc(l.address))) continue;
+          if (f.topics && !f.topics.every((w, k) => matchTopic(w, l.topics[k]))) continue;
+          out.push(l);
+        }
+      }
     }
     return out;
   },
@@ -313,7 +345,7 @@ function handle(req) {
 
 journalOpen();
 http.createServer((rq, rs) => {
-  if (rq.method === 'GET') { rs.writeHead(200); rs.end(`ok block ${blocks.length - 1} txs ${txIndex.size} pending ${mempool.size} heap_mb ${Math.round(process.memoryUsage().heapUsed / 1048576)}\n`); return; }
+  if (rq.method === 'GET') { if (rq.url.includes('gc=1') && global.gc) global.gc(); rs.writeHead(200); rs.end(`ok block ${blocks.length - 1} txs ${txIndex.size} pending ${mempool.size} heap_mb ${Math.round(process.memoryUsage().heapUsed / 1048576)}\n`); return; }
   let body = '';
   rq.on('data', (c) => { body += c; if (body.length > 4_000_000) rq.destroy(); });
   rq.on('end', () => {
