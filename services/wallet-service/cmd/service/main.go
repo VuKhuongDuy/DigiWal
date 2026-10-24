@@ -158,7 +158,7 @@ func runInit(ctx context.Context, store *storage.Store, sealer *crypto.Sealer, r
 }
 
 func runServer(ctx context.Context, store *storage.Store, sealer *crypto.Sealer) {
-	rdb := redis.NewClient(&redis.Options{Addr: requireEnv("REDIS_ADDR")})
+	rdb := redis.NewClient(&redis.Options{Addr: requireEnv("REDIS_ADDR"), Password: os.Getenv("REDIS_PASSWORD")})
 	if err := rdb.Ping(ctx).Err(); err != nil {
 		log.Fatalf("connecting to redis: %v", err)
 	}

@@ -39,7 +39,7 @@ env:
 	@gen() { grep -q "^$$1=" .env || { echo "$$1=$$(openssl rand -hex 32)" >> .env; echo "generated $$1"; }; }; \
 	case "$(NODE)" in \
 	vm2) for v in PG_ADMIN_PASSWORD SVC_LEDGER_PASSWORD SVC_GATEWAY_PASSWORD SVC_HISTORY_PASSWORD MONGO_ADMIN_PASSWORD; do gen $$v; done ;; \
-	vm3) for v in PG_ADMIN_PASSWORD SVC_WALLET_PASSWORD SVC_WITHDRAWAL_PASSWORD SVC_CHAINWATCHER_PASSWORD MASTER_KEY_HEX; do gen $$v; done ;; \
+	vm3) for v in PG_ADMIN_PASSWORD SVC_WALLET_PASSWORD SVC_WITHDRAWAL_PASSWORD SVC_CHAINWATCHER_PASSWORD REDIS_PASSWORD MASTER_KEY_HEX; do gen $$v; done ;; \
 	*) gen MASTER_KEY_HEX ;; \
 	esac
 

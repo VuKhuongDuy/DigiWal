@@ -50,7 +50,7 @@ func main() {
 	// (fail-open) whenever Redis errors.
 	var rdb *redis.Client
 	if addr := os.Getenv("REDIS_ADDR"); addr != "" {
-		rdb = redis.NewClient(&redis.Options{Addr: addr, MaxRetries: -1, DialTimeout: 100 * time.Millisecond})
+		rdb = redis.NewClient(&redis.Options{Addr: addr, Password: os.Getenv("REDIS_PASSWORD"), MaxRetries: -1, DialTimeout: 100 * time.Millisecond})
 		defer rdb.Close()
 	}
 	newLimiter := func(prefix string, perMin int) api.RateLimiter {

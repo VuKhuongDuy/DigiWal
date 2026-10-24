@@ -8,13 +8,13 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-// Needs a real Redis (the Lua script): TEST_REDIS_ADDR.
+// Needs a real Redis (the Lua script): TEST_REDIS_ADDR, and TEST_REDIS_PASSWORD if it has one.
 func TestRedisLimiter(t *testing.T) {
 	addr := os.Getenv("TEST_REDIS_ADDR")
 	if addr == "" {
 		t.Skip("set TEST_REDIS_ADDR to run against a real Redis")
 	}
-	rdb := redis.NewClient(&redis.Options{Addr: addr, DB: 10})
+	rdb := redis.NewClient(&redis.Options{Addr: addr, Password: os.Getenv("TEST_REDIS_PASSWORD"), DB: 10})
 	defer rdb.Close()
 	rdb.FlushDB(t.Context())
 
