@@ -34,9 +34,8 @@ services:
     environment:
       POSTGRES_PASSWORD: ${PG_ADMIN_PASSWORD:?run make env}
       POSTGRES_DB: postgres
-      PG_DB_ROLES: "ledger=svc_ledger api_gateway=svc_gateway"
+      PG_DB_ROLES: "ledger=svc_ledger"
       PW_svc_ledger: ${SVC_LEDGER_PASSWORD:?run make env}
-      PW_svc_gateway: ${SVC_GATEWAY_PASSWORD:?run make env}
     volumes: !override
       - pg_ledger_data:/var/lib/postgresql/data
       - ../infra/postgres/init-node.sh:/docker-entrypoint-initdb.d/10-init-node.sh:ro
