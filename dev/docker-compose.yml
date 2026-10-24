@@ -37,7 +37,7 @@ services:
       interval: 5s
       timeout: 3s
       retries: 5
-    mem_limit: 300m
+    mem_limit: 2g # Node's heap is capped at 1.5 GB; the chain keeps its blocks, receipts and logs in memory (heap_mb on GET /)
     volumes:
       - anvil_data:/data
     logging: &rotate

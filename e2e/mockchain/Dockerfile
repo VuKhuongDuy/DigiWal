@@ -5,6 +5,6 @@ COPY e2e/mockchain/package.json ./
 RUN npm install --omit=dev --no-audit --no-fund
 COPY e2e/mockchain/server.js ./
 COPY e2e/contracts/MockERC20.bin ./MockERC20.bin
-ENV PORT=8545 DATA_DIR=/data BLOCK_TIME_MS=2000 CHAIN_ID=31337 MOCKERC20_BIN=/app/MockERC20.bin
+ENV PORT=8545 DATA_DIR=/data BLOCK_TIME_MS=2000 CHAIN_ID=31337 MOCKERC20_BIN=/app/MockERC20.bin NODE_OPTIONS=--max-old-space-size=1536
 USER root
 CMD ["node", "server.js"]

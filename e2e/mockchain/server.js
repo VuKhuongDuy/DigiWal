@@ -88,11 +88,11 @@ function runCall(from, tx) {
 }
 
 // ---------------------------------------------------------------- mining
-function txView(tx, raw) {
+function txView(tx) {
   return {
     type: tx.type ?? 0, hash: tx.hash, from: lc(tx.from), to: tx.to ? lc(tx.to) : null, nonce: tx.nonce, gas: tx.gasLimit, value: tx.value, data: tx.data,
     maxFeePerGas: tx.maxFeePerGas, maxPriorityFeePerGas: tx.maxPriorityFeePerGas, gasPrice: tx.gasPrice, chainId: tx.chainId,
-    accessList: tx.accessList ?? [], sig: tx.signature, raw,
+    accessList: tx.accessList ?? [], sig: tx.signature,
   };
 }
 function mineBlock(rawList = null, ts = null) {
@@ -140,7 +140,7 @@ function mineBlock(rawList = null, ts = null) {
   included.forEach((x, i) => {
     cum += x.used;
     const logs = x.r.logs.map((l) => ({ ...l, blockNumber: q(number), blockHash: hash, transactionHash: x.e.tx.hash, transactionIndex: q(i), logIndex: q(logIndex++), removed: false }));
-    const view = txView(x.e.tx, x.e.raw);
+    const view = txView(x.e.tx);
     const receipt = {
       transactionHash: x.e.tx.hash, transactionIndex: q(i), blockHash: hash, blockNumber: q(number), from: view.from, to: view.to,
       cumulativeGasUsed: q(cum), gasUsed: q(x.used), contractAddress: x.r.contract ?? null, logs, logsBloom: BLOOM0, status: x.r.ok ? '0x1' : '0x0',
@@ -163,22 +163,24 @@ function journalOpen() {
   let good = 0, genesisTs = null;
   for (const line of lines) {
     let j; try { j = JSON.parse(line); } catch { break; }
-    if (j.op === 'genesis') { genesisTs = j.ts; mineBlock([], j.ts); }
+    if (j.op === 'genesis') { genesisTs = j.ts; mineBlock([], j.ts).raws = null; }
     else if (j.op === 'balance') acct(j.addr).balance = BigInt(j.value);
     else if (j.op === 'basefee') nextBaseFee = BigInt(j.value);
-    else if (j.op === 'block') mineBlock(j.raws, j.ts);
+    else if (j.op === 'pending') { try { acceptTx(j.raw, false); } catch { /* mined or replaced since */ } }
+    else if (j.op === 'block') mineBlock(j.raws, j.ts).raws = null;
     good += Buffer.byteLength(line) + 1;
   }
   const size = Buffer.byteLength(text);
   if (good < size) { fs.truncateSync(p, good); console.log(`journal: cut a partial tail (${size - good} bytes)`); }
   journalFd = fs.openSync(p, 'a');
-  if (genesisTs === null) { genesisTs = Math.floor(Date.now() / 1000); mineBlock([], genesisTs); journal({ op: 'genesis', ts: genesisTs }); }
+  if (genesisTs === null) { genesisTs = Math.floor(Date.now() / 1000); mineBlock([], genesisTs).raws = null; journal({ op: 'genesis', ts: genesisTs }); }
   console.log(`chain restored at block ${blocks.length - 1}`);
 }
 const journal = (obj) => { fs.writeSync(journalFd, JSON.stringify(obj) + '\n'); fs.fsyncSync(journalFd); };
 function mineAndJournal() {
   const blk = mineBlock();
   journal({ op: 'block', ts: blk.header.timestamp, raws: blk.raws });
+  blk.raws = null;                 // the journal has them; keeping every raw transaction in memory is what ran Node out of heap
   return blk;
 }
 
@@ -231,6 +233,26 @@ function callResult(call) {   // eth_call / estimateGas dry-run on a copy of the
   }
   return '0x';
 }
+function acceptTx(raw, persist) {
+  let tx; try { tx = Transaction.from(raw); } catch (e) { throw rpcErr(-32000, 'invalid transaction: ' + e.message); }
+  const from = lc(tx.from), a = acct(from), base = nextBaseFee ?? BASE_FEE_DEFAULT;
+  if (tx.chainId !== CHAIN_ID) throw rpcErr(-32000, 'invalid chain id for signer');
+  if (mempool.has(tx.hash) || txIndex.has(tx.hash)) throw rpcErr(-32000, 'already known');
+  if (tx.nonce < a.nonce) throw rpcErr(-32000, `nonce too low: next nonce ${a.nonce}, tx nonce ${tx.nonce}`);
+  const price = tx.maxFeePerGas ?? tx.gasPrice;
+  if (price < base) throw rpcErr(-32000, 'max fee per gas less than block base fee');
+  if (a.balance < tx.gasLimit * price + tx.value) throw rpcErr(-32000, 'insufficient funds for gas * price + value');
+  for (const [h, e] of mempool) if (lc(e.tx.from) === from && e.tx.nonce === tx.nonce) {
+    const oldMax = e.tx.maxFeePerGas ?? e.tx.gasPrice, oldTip = e.tx.maxPriorityFeePerGas ?? e.tx.gasPrice;
+    const newTip = tx.maxPriorityFeePerGas ?? tx.gasPrice;
+    if (price * 100n < oldMax * 110n || newTip * 100n < oldTip * 110n) throw rpcErr(-32000, 'replacement transaction underpriced');
+    mempool.delete(h);
+  }
+  mempool.set(tx.hash, { tx, raw });
+  if (persist) journal({ op: 'pending', raw });   // a restart must not lose a transaction that was accepted but not mined yet
+  return tx.hash;
+}
+
 const methods = {
   web3_clientVersion: () => 'mockchain/1.0',
   net_version: () => String(CHAIN_ID),
@@ -252,7 +274,7 @@ const methods = {
   eth_getBlockByHash: ([h, full]) => { const n = byHash.get(h); return n == null ? null : blockJson(blocks[n], full); },
   eth_getTransactionByHash: ([h]) => {
     const ix = txIndex.get(h); if (ix) { const b = blocks[ix.block]; return txJson(b.txs[ix.i], b, ix.i); }
-    const p = mempool.get(h); return p ? txJson({ view: txView(p.tx, p.raw) }, null, 0) : null;
+    const p = mempool.get(h); return p ? txJson({ view: txView(p.tx) }, null, 0) : null;
   },
   eth_getTransactionReceipt: ([h]) => { const ix = txIndex.get(h); return ix ? blocks[ix.block].txs[ix.i].receipt : null; },
   eth_getLogs: ([f]) => {
@@ -273,24 +295,7 @@ const methods = {
     if (tokens.has(lc(call.to)) && data.startsWith(SEL.transfer)) { callResult({ ...call, data }); return q(51_000); }
     return q(data !== '0x' && data !== '' ? 60_000 : 21_000);
   },
-  eth_sendRawTransaction: ([raw]) => {
-    let tx; try { tx = Transaction.from(raw); } catch (e) { throw rpcErr(-32000, 'invalid transaction: ' + e.message); }
-    const from = lc(tx.from), a = acct(from), base = nextBaseFee ?? BASE_FEE_DEFAULT;
-    if (tx.chainId !== CHAIN_ID) throw rpcErr(-32000, 'invalid chain id for signer');
-    if (mempool.has(tx.hash) || txIndex.has(tx.hash)) throw rpcErr(-32000, 'already known');
-    if (tx.nonce < a.nonce) throw rpcErr(-32000, `nonce too low: next nonce ${a.nonce}, tx nonce ${tx.nonce}`);
-    const price = tx.maxFeePerGas ?? tx.gasPrice;
-    if (price < base) throw rpcErr(-32000, 'max fee per gas less than block base fee');
-    if (a.balance < tx.gasLimit * price + tx.value) throw rpcErr(-32000, 'insufficient funds for gas * price + value');
-    for (const [h, e] of mempool) if (lc(e.tx.from) === from && e.tx.nonce === tx.nonce) {
-      const oldMax = e.tx.maxFeePerGas ?? e.tx.gasPrice, oldTip = e.tx.maxPriorityFeePerGas ?? e.tx.gasPrice;
-      const newTip = tx.maxPriorityFeePerGas ?? tx.gasPrice;
-      if (price * 100n < oldMax * 110n || newTip * 100n < oldTip * 110n) throw rpcErr(-32000, 'replacement transaction underpriced');
-      mempool.delete(h);
-    }
-    mempool.set(tx.hash, { tx, raw });
-    return tx.hash;
-  },
+  eth_sendRawTransaction: ([raw]) => acceptTx(raw, true),
   anvil_mine: ([n]) => { for (let i = 0; i < Number(BigInt(n ?? 1)); i++) mineAndJournal(); return null; },
   evm_mine: () => { mineAndJournal(); return '0x0'; },
   anvil_setBalance: ([a, v]) => { acct(a).balance = BigInt(v); journal({ op: 'balance', addr: lc(a), value: BigInt(v).toString() }); return null; },
@@ -308,7 +313,7 @@ function handle(req) {
 
 journalOpen();
 http.createServer((rq, rs) => {
-  if (rq.method === 'GET') { rs.writeHead(200); rs.end(`ok block ${blocks.length - 1}\n`); return; }
+  if (rq.method === 'GET') { rs.writeHead(200); rs.end(`ok block ${blocks.length - 1} txs ${txIndex.size} pending ${mempool.size} heap_mb ${Math.round(process.memoryUsage().heapUsed / 1048576)}\n`); return; }
   let body = '';
   rq.on('data', (c) => { body += c; if (body.length > 4_000_000) rq.destroy(); });
   rq.on('end', () => {
