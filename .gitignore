@@ -4,6 +4,9 @@ bin/
 
 # Per-service leaf certs/keys (infra/pki/gen-leaf.sh). The CA key lives outside the repo.
 infra/pki/out/
+# Without the trailing slash too: the pattern above only matches a directory, so a SYMLINK named infra/pki/out (as made on the dev VMs)
+# was committed once (b83aa69) and made `git pull` fail on any machine with a real directory there.
+infra/pki/out
 
 # Dev / e2e hsm-gateway host files (PIN, policy, callers): infra/hsm/prepare.sh, make hsm-setup
 e2e/hsm-config/
