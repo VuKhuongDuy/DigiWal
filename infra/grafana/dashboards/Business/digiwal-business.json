@@ -408,7 +408,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum(increase(digiwal_deposits_credited_total[1d]))",
+          "expr": "sum(increase(digiwal_deposits_credited_total[1d] offset -1d))",
           "legendFormat": "Deposits",
           "refId": "A",
           "instant": false,
@@ -471,7 +471,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum by (asset) (increase(digiwal_deposit_amount_total[1d]))",
+          "expr": "sum by (asset) (increase(digiwal_deposit_amount_total[1d] offset -1d))",
           "legendFormat": "{{asset}}",
           "refId": "A",
           "instant": false,
@@ -533,7 +533,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum(increase(digiwal_withdrawals_total{status=\"requested\"}[1d]))",
+          "expr": "sum(increase(digiwal_withdrawals_total{status=\"requested\"}[1d] offset -1d))",
           "legendFormat": "Asked for",
           "refId": "A",
           "instant": false,
@@ -545,7 +545,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum(increase(digiwal_withdrawals_total{status=\"confirmed\"}[1d]))",
+          "expr": "sum(increase(digiwal_withdrawals_total{status=\"confirmed\"}[1d] offset -1d))",
           "legendFormat": "Completed",
           "refId": "B",
           "instant": false,
@@ -557,7 +557,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum(increase(digiwal_withdrawals_total{status=\"failed\"}[1d]))",
+          "expr": "sum(increase(digiwal_withdrawals_total{status=\"failed\"}[1d] offset -1d))",
           "legendFormat": "Failed",
           "refId": "C",
           "instant": false,
@@ -569,7 +569,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum(increase(digiwal_withdrawals_total{status=\"rejected\"}[1d]))",
+          "expr": "sum(increase(digiwal_withdrawals_total{status=\"rejected\"}[1d] offset -1d))",
           "legendFormat": "Refused up front",
           "refId": "D",
           "instant": false,
@@ -632,7 +632,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "increase(digiwal_users_total[1d])",
+          "expr": "increase(digiwal_users_total[1d] offset -1d)",
           "legendFormat": "New users",
           "refId": "A",
           "instant": false,
@@ -695,7 +695,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "increase(digiwal_ledger_active_user_days_total[1d])",
+          "expr": "increase(digiwal_ledger_active_user_days_total[1d] offset -1d)",
           "legendFormat": "Active users",
           "refId": "A",
           "instant": false,
@@ -758,7 +758,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum by (asset) (increase(digiwal_withdrawal_amount_total[1d]))",
+          "expr": "sum by (asset) (increase(digiwal_withdrawal_amount_total[1d] offset -1d))",
           "legendFormat": "{{asset}}",
           "refId": "A",
           "instant": false,
@@ -904,7 +904,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum(increase(digiwal_withdrawals_total{status=\"confirmed\"}[1d])) / (sum(increase(digiwal_withdrawals_total{status=\"confirmed\"}[1d])) + sum(increase(digiwal_withdrawals_total{status=\"failed\"}[1d])))",
+          "expr": "sum(increase(digiwal_withdrawals_total{status=\"confirmed\"}[1d] offset -1d)) / (sum(increase(digiwal_withdrawals_total{status=\"confirmed\"}[1d] offset -1d)) + sum(increase(digiwal_withdrawals_total{status=\"failed\"}[1d] offset -1d)))",
           "legendFormat": "Worked",
           "refId": "A",
           "instant": false,
@@ -968,7 +968,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum(increase(digiwal_withdrawal_processing_seconds_sum[1d])) / sum(increase(digiwal_withdrawal_timed_total[1d]))",
+          "expr": "sum(increase(digiwal_withdrawal_processing_seconds_sum[1d] offset -1d)) / sum(increase(digiwal_withdrawal_timed_total[1d] offset -1d))",
           "legendFormat": "Our processing",
           "refId": "A",
           "instant": false,
@@ -980,7 +980,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum(increase(digiwal_withdrawal_chain_wait_seconds_sum[1d])) / sum(increase(digiwal_withdrawal_timed_total[1d]))",
+          "expr": "sum(increase(digiwal_withdrawal_chain_wait_seconds_sum[1d] offset -1d)) / sum(increase(digiwal_withdrawal_timed_total[1d] offset -1d))",
           "legendFormat": "Waiting for the blockchain",
           "refId": "B",
           "instant": false,
@@ -1264,7 +1264,7 @@
             "uid": "prometheus"
           },
           "expr": "digiwal_wallet_balance",
-          "legendFormat": "{{wallet}} \u00b7 {{asset}}",
+          "legendFormat": "{{wallet}} · {{asset}}",
           "refId": "A",
           "instant": true,
           "range": false
@@ -1326,7 +1326,7 @@
             "uid": "prometheus"
           },
           "expr": "digiwal_wallet_balance",
-          "legendFormat": "{{wallet}} \u00b7 {{asset}}",
+          "legendFormat": "{{wallet}} · {{asset}}",
           "refId": "A",
           "instant": false,
           "range": true
@@ -1388,7 +1388,7 @@
             "uid": "prometheus"
           },
           "expr": "digiwal_ledger_user_liabilities",
-          "legendFormat": "Owed to customers \u00b7 {{asset}}",
+          "legendFormat": "Owed to customers · {{asset}}",
           "refId": "A",
           "instant": false,
           "range": true
@@ -1399,7 +1399,7 @@
             "uid": "prometheus"
           },
           "expr": "digiwal_recon_custody{component=\"on_chain\"}",
-          "legendFormat": "Held on the blockchain \u00b7 {{asset}}",
+          "legendFormat": "Held on the blockchain · {{asset}}",
           "refId": "B",
           "instant": false,
           "range": true

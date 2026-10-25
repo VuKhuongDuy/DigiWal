@@ -1,0 +1,69 @@
+# Prometheus for the two-node dev environment (docs/design/multi-node-deployment.md, Monitoring wiring). It runs on vm3
+# and reaches vm2 over the WireGuard network, so targets on vm2 are the node's private address and the host port the
+# overlay publishes (dev/nodes/vm2.yml); targets on vm3 are on the same Compose network and resolve by service name.
+# prometheus.yml beside it stays the single-host config (e2e/, one Compose project). Alert rules are the same file.
+global:
+  scrape_interval: 15s # collectors read databases and the RPC at scrape time
+  evaluation_interval: 15s
+
+# Firing alerts go to Alertmanager (infra/alertmanager), which sends them to Telegram.
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ["alertmanager:9093"]
+
+rule_files:
+  - /etc/prometheus/alerts.yml
+  - /etc/prometheus/alerts-node.yml
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
+  - job_name: digiwal
+    # The auditor's metrics carry their own `job` label (digiwal_job_*{job="reconciliation"}); see prometheus.yml.
+    honor_labels: true
+    static_configs:
+      # vm4: the stateless tier
+      - targets: ["10.10.0.3:9101"]
+        labels: {service: api-gateway, node: vm4}
+      - targets: ["10.10.0.3:9102"]
+        labels: {service: ledger-service, node: vm4}
+      - targets: ["10.10.0.3:9103"]
+        labels: {service: withdrawal-service, node: vm4}
+      # vm3: custody and chain
+      - targets: ["wallet-service:9100"]
+        labels: {service: wallet-service, node: vm3}
+      - targets: ["chain-watcher:9100"]
+        labels: {service: chain-watcher, node: vm3}
+      - targets: ["sweeper:9100"]
+        labels: {service: sweeper, node: vm3}
+      - targets: ["auditor:9100"] # dev environment only
+        labels: {service: auditor, node: vm3}
+      # history-service has no /metrics yet (docs/design/monitoring-dashboard.md), so it is not a target.
+  - job_name: node
+    static_configs:
+      - targets: ["10.10.0.1:9100"]
+        labels: {service: node-exporter, node: vm2}
+      - targets: ["10.10.0.2:9100"]
+        labels: {service: node-exporter, node: vm3}
+      - targets: ["10.10.0.3:9100"]
+        labels: {service: node-exporter, node: vm4}
+  - job_name: cadvisor
+    static_configs:
+      - targets: ["10.10.0.1:8081"]
+        labels: {service: cadvisor, node: vm2}
+      - targets: ["10.10.0.2:8081"]
+        labels: {service: cadvisor, node: vm3}
+      - targets: ["10.10.0.3:8081"]
+        labels: {service: cadvisor, node: vm4}
+  - job_name: postgres
+    static_configs:
+      - targets: ["10.10.0.1:9187"]
+        labels: {service: postgres-exporter, node: vm2, server: pg-ledger}
+      - targets: ["10.10.0.2:9187"]
+        labels: {service: postgres-exporter, node: vm3, server: pg-core}
+  - job_name: kafka
+    static_configs:
+      - targets: ["kafka-exporter:9308"]
+        labels: {service: kafka-exporter, node: vm3}

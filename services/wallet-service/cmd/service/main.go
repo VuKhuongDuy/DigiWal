@@ -35,6 +35,7 @@ import (
 	"math/big"
 	"net/http"
 	"os"
+	"strconv"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -59,7 +60,7 @@ func main() {
 	flag.Parse()
 
 	ctx := context.Background()
-	store, err := storage.Connect(ctx, requireEnv("POSTGRES_DSN"))
+	store, err := storage.ConnectWithPool(ctx, requireEnv("POSTGRES_DSN"), maxConns())
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -370,6 +371,14 @@ func requireEnv(key string) string {
 		log.Fatalf("required env var %s is not set", key)
 	}
 	return v
+}
+
+// maxConns is POSTGRES_MAX_CONNS, or 0 (pgx's default pool size) when unset or not a positive integer.
+func maxConns() int32 {
+	if n, err := strconv.Atoi(os.Getenv("POSTGRES_MAX_CONNS")); err == nil && n > 0 {
+		return int32(n)
+	}
+	return 0
 }
 
 func envOr(key, def string) string {

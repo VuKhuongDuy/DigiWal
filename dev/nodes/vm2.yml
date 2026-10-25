@@ -1,7 +1,8 @@
 # Node overlay for vm2 (10.10.0.1): the request path. Layered after infra/, e2e/ and ../docker-compose.yml by
 # `make` when /etc/digiwal/node says vm2 (docs/design/multi-node-deployment.md, D1/D3). Paths are relative to e2e/.
-#   here:      postgres (ledger, api_gateway), mongo, ledger-service, api-gateway, history-service
-#   on vm3:    wallet-service, withdrawal-service, chain-watcher, sweeper, simulator, kafka, redis, anvil
+#   here:      postgres (ledger; api_gateway moved to vm4 in scaling step 2), mongo: nothing else heavy
+#   on vm4:    api-gateway, ledger-service, history-service, withdrawal-service (docs/design/multi-node-deployment.md, three-node addendum)
+#   on vm3:    wallet-service, chain-watcher, sweeper, simulator, kafka, redis, anvil, monitoring
 # A service that lives on the other node is switched off with a profile (and its dependants' depends_on is
 # overridden), so each service is in exactly one overlay (invariant 7).
 networks:
@@ -21,50 +22,37 @@ services:
   sweeper: {profiles: [elsewhere]}
   sweep-signer: {profiles: [elsewhere]} # holds the user_derivation seed: on vm3, next to custody's database, never on the node with the CA key and the HSM
   simulator: {profiles: [elsewhere]}
+  ledger-service: {profiles: [elsewhere]}
+  api-gateway: {profiles: [elsewhere]}
+  history-service: {profiles: [elsewhere]}
+  auditor: {profiles: [elsewhere]}
+  kafka-exporter: {profiles: [elsewhere]}
+  alertmanager: {profiles: [elsewhere]}
   hot-cutover: {profiles: [elsewhere]} # the Hot cutover job runs on vm3, next to custody's database
   key-admin: {profiles: [elsewhere]} # the xpub migration job runs on vm3 too
 
   postgres:
     command: [postgres, -c, hba_file=/etc/postgresql/pg_hba.conf, -c, shared_preload_libraries=pg_stat_statements,
-      -c, track_io_timing=on, -c, log_lock_waits=on]
+      -c, track_io_timing=on, -c, track_wal_io_timing=on, -c, log_lock_waits=on]
     environment:
       POSTGRES_PASSWORD: ${PG_ADMIN_PASSWORD:?run make env}
       POSTGRES_DB: postgres
-      PG_DB_ROLES: "ledger=svc_ledger api_gateway=svc_gateway"
+      PG_DB_ROLES: "ledger=svc_ledger"
       PW_svc_ledger: ${SVC_LEDGER_PASSWORD:?run make env}
-      PW_svc_gateway: ${SVC_GATEWAY_PASSWORD:?run make env}
     volumes: !override
       - pg_ledger_data:/var/lib/postgresql/data
       - ../infra/postgres/init-node.sh:/docker-entrypoint-initdb.d/10-init-node.sh:ro
       - ../infra/postgres/pg_hba.conf:/etc/postgresql/pg_hba.conf:ro
     ports: !override ["10.10.0.1:5432:5432", "127.0.0.1:5432:5432"]
     mem_limit: 2500m
+    cpus: 0.5 # the lab's deliberate cap, so that this Postgres is the first bottleneck (remove it to lift the cap)
 
   mongo:
     environment:
       MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ADMIN_PASSWORD:?run make env} # first init only; `make roles` changes it on an existing volume
     command: [mongod, --wiredTigerCacheSizeGB, "0.25"] # the default sizes the cache to the host's RAM
-    ports: !override ["127.0.0.1:27017:27017"]
+    ports: !override ["127.0.0.1:27017:27017", "10.10.0.1:27017:27017"] # the auditor (vm3) reads it as auditor_ro
     mem_limit: 600m
-
-  ledger-service:
-    environment:
-      POSTGRES_DSN: postgres://svc_ledger:${SVC_LEDGER_PASSWORD}@postgres:5432/ledger?sslmode=disable
-    extra_hosts: ["kafka:10.10.0.2"]
-    depends_on: !override
-      postgres: {condition: service_healthy}
-    ports: !override ["10.10.0.1:8444:8443"] # withdrawal-service and sweeper (vm3)
-    mem_limit: 300m
-
-  api-gateway:
-    environment:
-      POSTGRES_DSN: postgres://svc_gateway:${SVC_GATEWAY_PASSWORD}@postgres:5432/api_gateway?sslmode=disable
-      WITHDRAWAL_SERVICE_URL: https://withdrawal-service:8446
-      REDIS_ADDR: 10.10.0.2:6379 # redis on vm3, over WireGuard; if it is unreachable the gateway falls back to in-memory limits
-      REDIS_PASSWORD: ${REDIS_PASSWORD:?run make env}
-    extra_hosts: ["wallet-service:10.10.0.2", "withdrawal-service:10.10.0.2"]
-    ports: !override ["10.10.0.1:8084:8080", "127.0.0.1:8084:8080"] # never on the public interface (invariant 8)
-    mem_limit: 500m
 
   # hsm-gateway (key-custody-hsm.md M2b): defined in e2e/docker-compose.hsm.yml, always on in this stack (the Makefile
   # activates the `hsm` profile). It signs the Hot Wallet for wallet-service and opens the vault for sweep-signer on vm3, so its only
@@ -76,14 +64,15 @@ services:
     mem_limit: 256m
     memswap_limit: 256m
 
-  history-service:
-    environment:
-      MONGO_URI: mongodb://svc_history:${SVC_HISTORY_PASSWORD}@mongo:27017/history?authSource=history
-    extra_hosts: ["kafka:10.10.0.2"]
-    depends_on: !override
-      mongo: {condition: service_started}
-    ports: !override []
+  node-exporter:
+    command: [--path.rootfs=/host, "--web.listen-address=10.10.0.1:9100"]
+    mem_limit: 100m
+  cadvisor:
+    ports: ["10.10.0.1:8081:8080"]
     mem_limit: 200m
+  postgres-exporter:
+    ports: ["10.10.0.1:9187:9187"]
+    mem_limit: 100m
 
 volumes:
   pg_ledger_data:

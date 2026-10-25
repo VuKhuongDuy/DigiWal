@@ -166,6 +166,12 @@ func audits(ctx context.Context, st *store.Store, rpc *ethclient.Client, chainID
 		return nil, err
 	}
 
+	tiers, err := tierAddresses(ctx, chainID)
+	if err != nil {
+		return nil, err
+	}
+	hot, warm := tiers.Hot, tiers.Warm
+
 	if led != nil {
 		jobs = append(jobs, &audit.LedgerIntegrity{Src: &source.LedgerChecks{Ledger: led}, Store: st, Every: every})
 	} else {
@@ -181,17 +187,12 @@ func audits(ctx context.Context, st *store.Store, rpc *ethclient.Client, chainID
 	}
 	if led != nil && wal != nil && cw != nil && h != nil {
 		jobs = append(jobs, &audit.DepositAudit{
-			Src:   &source.Deposits{Watcher: cw, Ledger: led, Wallet: wal, History: h, Chain: chain},
+			Src:   &source.Deposits{Watcher: cw, Ledger: led, Wallet: wal, History: h, Chain: chain, Hot: hot},
 			Store: st, ChainID: chainID, Every: every, Grace: grace, Escalate: escalate, StartBlock: start,
 		})
 	} else {
 		skip("deposit_audit")
 	}
-	tiers, err := tierAddresses(ctx, chainID)
-	if err != nil {
-		return nil, err
-	}
-	hot, warm := tiers.Hot, tiers.Warm
 	if led != nil && wal != nil && wd != nil && hot != "" && warm != "" {
 		jobs = append(jobs, &audit.TreasuryAudit{
 			Src:   &source.Treasury{Wallet: wal, Ledger: led, Withdrawal: wd, Chain: chain, ChainID: chainID, Hot: hot},

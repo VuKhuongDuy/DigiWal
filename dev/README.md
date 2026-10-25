@@ -12,11 +12,11 @@ in [`docs/design/multi-node-deployment.md`](../docs/design/multi-node-deployment
 | Postgres (own server per node, no replica) | `ledger`, `api_gateway` | `custody` (wallet-service), `withdrawal`, `chain_watcher` |
 | Other stores | mongo | kafka, redis, anvil |
 | Services | api-gateway, ledger-service, history-service | wallet-service, withdrawal-service, chain-watcher, sweeper, simulator |
+| Auditor and monitoring | node, cAdvisor and Postgres exporters | the auditor (and its `auditor` database), Prometheus, Grafana, Kafka exporter, node, cAdvisor and Postgres exporters |
 
 Each service sits on the same node as its own database. Cross-node calls keep the **service name** (`extra_hosts` points
 it at the peer's private address), so the mTLS certificates need no change. The exact placement, ports and settings are
-in [`nodes/vm2.yml`](nodes/vm2.yml) and [`nodes/vm3.yml`](nodes/vm3.yml); not yet deployed: Prometheus, Grafana, the
-auditor (see the design note).
+in [`nodes/vm2.yml`](nodes/vm2.yml) and [`nodes/vm3.yml`](nodes/vm3.yml).
 
 ## Using it
 
@@ -70,6 +70,40 @@ custody's database and gets the seed per Sweep from `hsm-gateway` over WireGuard
 secrets as files, no key file anywhere); sections 6-12 add the same flags for hsm-gateway and wallet-service, the modes/owners of every key, PIN and password file, the audit chain
 and the host settings. The simulator now runs as uid 10014 (it presents the sweeper's key, mode 0400): after pulling this change `make reset` on vm3 once, the old state volume belongs to another uid.
 Alerts for all of this: `infra/prometheus/alerts.yml` group `key-custody`.
+
+## Auditor and monitoring
+
+The auditor ([`services/auditor`](../services/auditor/README.md), dev only) runs on vm3 and reads the other services' stores
+with a read-only login: `auditor_ro` on vm2's `ledger` (over the private network) and on vm3's `custody`, `withdrawal` and
+`chain_watcher`, and on the `history` Mongo database on vm2. `make up` creates those logins (`make audit-roles`, on each node,
+vm2 first). It keeps its own findings in the `auditor` database on vm3.
+
+Prometheus on vm3 (`infra/prometheus/prometheus.multi-node.yml`) scrapes every service's `/metrics` (vm2's are published on
+`10.10.0.1:9101` api-gateway and `:9102` ledger-service), the node, cAdvisor and Postgres exporters of both nodes, and the
+Kafka exporter. Rules: `infra/prometheus/alerts.yml` and `alerts-node.yml` (memory, CPU/IO pressure, disk, OOM kills,
+Postgres connections, Kafka lag), tested by `infra/prometheus/check.sh`. Grafana on vm3 has the Business and Engineering
+dashboards. Both are bound to `127.0.0.1` on vm3, so reach them through a tunnel:
+
+```bash
+ssh -L 3000:127.0.0.1:3000 -L 9090:127.0.0.1:9090 vm3     # Grafana http://localhost:3000, Prometheus http://localhost:9090
+```
+
+**Alerts to Telegram.** Prometheus sends firing alerts to Alertmanager (vm3, `127.0.0.1:9093`), which posts them to a
+Telegram chat: one message per group of alerts that fire together (30 s), a reminder every 4 h while still firing, and a
+"resolved" message. Create a bot with @BotFather, add it to the chat, and put its token and the chat id (a negative number
+for a group) in vm3's `dev/.env`, then `make monitoring` there:
+
+```
+TELEGRAM_BOT_TOKEN=123456:ABC...
+TELEGRAM_CHAT_ID=-1001234567890
+```
+
+Without them alerts are held and visible on the Alertmanager page only. (Grafana's own Alertmanager does not accept alerts
+from Prometheus in the version we run, so Grafana is not in this path.)
+
+Set `RECON_CAPITAL` (and `RECON_TOLERANCE`) in vm3's `.env` to what the operator put into custody that no user owns
+(the Hot Wallet's liquidity), for example `RECON_CAPITAL=ETH=<minor units>,TT=<minor units>`; until then the
+reconciliation reports that capital as a residual (C1).
 
 ## Access and security
 

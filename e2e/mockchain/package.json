@@ -1,0 +1,9 @@
+{
+  "name": "mockchain",
+  "version": "1.0.0",
+  "private": true,
+  "description": "A tiny Ethereum JSON-RPC node for the dev environment: native transfers and the MockERC20, no EVM",
+  "type": "module",
+  "main": "server.js",
+  "dependencies": { "ethers": "6.13.4" }
+}

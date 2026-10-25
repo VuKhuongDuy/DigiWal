@@ -36,7 +36,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	st, err := store.Connect(ctx, requireEnv("POSTGRES_DSN"))
+	st, err := store.ConnectWithPool(ctx, requireEnv("POSTGRES_DSN"), int32(envInt("POSTGRES_MAX_CONNS", 0)))
 	if err != nil {
 		log.Fatal(err)
 	}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
 	"digiwal/services/auditor/internal/finding"
@@ -185,6 +186,9 @@ func (a *DepositAudit) scanMissed(ctx context.Context, notAfter time.Time, each 
 			return err
 		}
 		for _, c := range cands {
+			if a.Src.Hot != "" && c.LogIndex == -1 && strings.EqualFold(c.From, a.Src.Hot) {
+				continue
+			}
 			if err := each(source.DepositKey(a.ChainID, c.TxHash, c.LogIndex)); err != nil {
 				return err
 			}

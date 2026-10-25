@@ -1,7 +1,9 @@
 # Node overlay for vm3 (10.10.0.2): custody and chain. See vm2.yml for how the two overlays fit together.
-#   here:      postgres (custody, withdrawal, chain_watcher), kafka, redis, anvil, wallet-service,
-#              withdrawal-service, chain-watcher, sweeper, sweep-signer, simulator
-#   on vm2:    ledger-service, api-gateway, history-service, mongo
+#   here:      postgres (custody, withdrawal, chain_watcher, auditor), kafka, redis, anvil, wallet-service,
+#              chain-watcher, sweeper, sweep-signer, simulator, auditor, and the Measurement Plane: Prometheus,
+#              Alertmanager (to Telegram), Grafana, kafka-exporter, and node/cAdvisor/postgres exporters
+#   on vm2:    mongo, the Postgres of the request path (ledger), and hsm-gateway (the HSM token)
+#   on vm4:    ledger-service, api-gateway, history-service, withdrawal-service
 networks:
   default:
     driver_opts:
@@ -10,23 +12,23 @@ networks:
 services:
   mongo: {profiles: [elsewhere]}
   ledger-service: {profiles: [elsewhere]}
+  withdrawal-service: {profiles: [elsewhere]}
   api-gateway: {profiles: [elsewhere]}
   history-service: {profiles: [elsewhere]}
-  prometheus: {profiles: [elsewhere]}
-  grafana: {profiles: [elsewhere]}
   hsm-gateway: {profiles: [elsewhere]}
   hsm-perms: {profiles: [elsewhere]}
 
   postgres:
     command: [postgres, -c, hba_file=/etc/postgresql/pg_hba.conf, -c, shared_preload_libraries=pg_stat_statements,
-      -c, track_io_timing=on, -c, log_lock_waits=on]
+      -c, track_io_timing=on, -c, track_wal_io_timing=on, -c, log_lock_waits=on]
     environment:
       POSTGRES_PASSWORD: ${PG_ADMIN_PASSWORD:?run make env}
       POSTGRES_DB: postgres
-      PG_DB_ROLES: "custody=svc_wallet withdrawal=svc_withdrawal chain_watcher=svc_chainwatcher"
+      PG_DB_ROLES: "custody=svc_wallet withdrawal=svc_withdrawal chain_watcher=svc_chainwatcher auditor=svc_auditor"
       PW_svc_wallet: ${SVC_WALLET_PASSWORD:?run make env}
       PW_svc_withdrawal: ${SVC_WITHDRAWAL_PASSWORD:?run make env}
       PW_svc_chainwatcher: ${SVC_CHAINWATCHER_PASSWORD:?run make env}
+      PW_svc_auditor: ${SVC_AUDITOR_PASSWORD:?run make env}
     volumes: !override
       - pg_core_data:/var/lib/postgresql/data
       - ../infra/postgres/init-node.sh:/docker-entrypoint-initdb.d/10-init-node.sh:ro
@@ -57,6 +59,7 @@ services:
   wallet-service:
     environment:
       POSTGRES_DSN: postgres://svc_wallet:${SVC_WALLET_PASSWORD}@postgres:5432/custody?sslmode=disable
+      POSTGRES_MAX_CONNS: "16" # pgx's default is 4 on a 4-vCPU host: withdrawal-service queued every request on it
       REDIS_PASSWORD: ${REDIS_PASSWORD:?run make env}
       # pkcs11 (the only backend of this stack): the Hot Wallet is signed by hsm-gateway on vm2 over WireGuard,
       # pinned to wallet-service's leaf (CN wallet-service, the same /certs); the hot_wallet seed is not loaded.
@@ -73,7 +76,7 @@ services:
       POSTGRES_DSN: postgres://svc_wallet:${SVC_WALLET_PASSWORD}@postgres:5432/custody?sslmode=disable
       HSM_GATEWAY_URL: https://hsm-gateway:8445
       LEDGER_SERVICE_URL: https://ledger-service:8444
-    extra_hosts: ["hsm-gateway:10.10.0.1", "ledger-service:10.10.0.1"]
+    extra_hosts: ["hsm-gateway:10.10.0.1", "ledger-service:10.10.0.3"]
 
   # key-admin (docs/runbooks/dev-hsm-bringup.md): custody's database and the gateway over WireGuard, as its own pinned leaf (CN key-admin).
   key-admin:
@@ -82,22 +85,10 @@ services:
       HSM_GATEWAY_URL: https://hsm-gateway:8445
     extra_hosts: ["hsm-gateway:10.10.0.1"]
 
-  withdrawal-service:
-    environment:
-      POSTGRES_DSN: postgres://svc_withdrawal:${SVC_WITHDRAWAL_PASSWORD}@postgres:5432/withdrawal?sslmode=disable
-      LEDGER_SERVICE_URL: https://ledger-service:8444
-    extra_hosts: ["ledger-service:10.10.0.1"]
-    depends_on: !override
-      postgres: {condition: service_healthy}
-      kafka: {condition: service_healthy}
-      anvil: {condition: service_healthy}
-      wallet-service: {condition: service_started}
-    ports: !override ["10.10.0.2:8446:8443"] # api-gateway (vm2)
-    mem_limit: 300m
-
   chain-watcher:
     environment:
       POSTGRES_DSN: postgres://svc_chainwatcher:${SVC_CHAINWATCHER_PASSWORD}@postgres:5432/chain_watcher?sslmode=disable
+      POSTGRES_MAX_CONNS: "16" # pgx's default is 4 on a 4-vCPU host: withdrawal-service queued every request on it
       REDIS_PASSWORD: ${REDIS_PASSWORD:?run make env}
     ports: !override []
     mem_limit: 200m
@@ -105,7 +96,7 @@ services:
   sweeper:
     environment:
       LEDGER_SERVICE_URL: https://ledger-service:8444
-    extra_hosts: ["ledger-service:10.10.0.1"]
+    extra_hosts: ["ledger-service:10.10.0.3"]
     depends_on: !override
       kafka: {condition: service_healthy}
       anvil: {condition: service_healthy}
@@ -124,14 +115,73 @@ services:
 
   simulator:
     environment:
-      SIM_GATEWAY_URL: http://10.10.0.1:8084 # api-gateway on vm2, over the private network
+      SIM_GATEWAY_URL: http://10.10.0.3:8084 # api-gateway on vm4, over the private network
     depends_on: !override
       anvil: {condition: service_healthy}
       wallet-service: {condition: service_started}
-      withdrawal-service: {condition: service_started}
       sweeper: {condition: service_started}
       chain-watcher: {condition: service_started}
     mem_limit: 200m
 
+  # ---- the auditor (dev only): reads the other services' stores as the read-only login auditor_ro (`make audit-roles`)
+  auditor:
+    environment:
+      POSTGRES_DSN: postgres://svc_auditor:${SVC_AUDITOR_PASSWORD}@postgres:5432/auditor?sslmode=disable
+      LEDGER_RO_DSN: postgres://auditor_ro:auditor_ro@10.10.0.1:5432/ledger?sslmode=disable # pg-ledger on vm2
+      WALLET_RO_DSN: postgres://auditor_ro:auditor_ro@postgres:5432/custody?sslmode=disable
+      WITHDRAWAL_RO_DSN: postgres://auditor_ro:auditor_ro@postgres:5432/withdrawal?sslmode=disable
+      WATCHER_RO_DSN: postgres://auditor_ro:auditor_ro@postgres:5432/chain_watcher?sslmode=disable
+      HISTORY_RO_MONGO_URI: mongodb://auditor_ro:auditor_ro@10.10.0.1:27017/?authSource=history # mongo on vm2
+    ports: !override []
+    depends_on: !override
+      postgres: {condition: service_healthy}
+      anvil: {condition: service_healthy}
+      wallet-service: {condition: service_started}
+    mem_limit: 200m
+
+  # ---- Measurement Plane. Prometheus and Grafana are reached over ssh tunnels only (127.0.0.1).
+  prometheus:
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=2y
+      - --storage.tsdb.retention.size=25GB # the disk is 96 GB and shared with Anvil, Kafka and Postgres
+    volumes: !override
+      - ../infra/prometheus/prometheus.multi-node.yml:/etc/prometheus/prometheus.yml:ro
+      - ../infra/prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - ../infra/prometheus/alerts-node.yml:/etc/prometheus/alerts-node.yml:ro
+      - prometheus_data:/prometheus
+    ports: !override ["127.0.0.1:9090:9090"]
+    restart: unless-stopped
+    mem_limit: 1g
+
+  grafana:
+    volumes: !override
+      - ../infra/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ../infra/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana
+    ports: !override ["127.0.0.1:3000:3000"] # anonymous Admin: never on a routable address
+    restart: unless-stopped
+    mem_limit: 400m
+
+  alertmanager:
+    ports: ["127.0.0.1:9093:9093"]
+    mem_limit: 100m
+
+  kafka-exporter:
+    mem_limit: 100m
+
+  node-exporter:
+    command: [--path.rootfs=/host, "--web.listen-address=10.10.0.2:9100"]
+    mem_limit: 100m
+  cadvisor:
+    ports: ["10.10.0.2:8081:8080"]
+    mem_limit: 200m
+  postgres-exporter:
+    ports: ["10.10.0.2:9187:9187"]
+    mem_limit: 100m
+
 volumes:
   pg_core_data:
+  prometheus_data:
+  grafana_data:

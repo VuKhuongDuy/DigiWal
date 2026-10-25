@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Checks this node of the two-node dev environment (docs/design/multi-node-deployment.md, key-custody-hsm.md 5.6 "make verify").
-# Run on a node: NODE=vm2|vm3 ./verify.sh (make verify sets it). Exit code 1 on any FAIL.
+# Checks this node of the multi-node dev environment (vm2, vm3, vm4) (docs/design/multi-node-deployment.md, key-custody-hsm.md 5.6 "make verify").
+# Run on a node: NODE=vm2|vm3|vm4 ./verify.sh (make verify sets it). Exit code 1 on any FAIL.
 # Every check prints PASS or FAIL with the reason; SKIP means it cannot be decided on this host (it needs the node itself: Linux, root, /proc) and says
 # what to do. A SKIP never hides a FAIL elsewhere, but it is not a pass either: run `make -C dev verify` ON the node for those.
 # NODE=local checks a single-host stack instead (the e2e stack): PROJECT=digiwal-e2e HSM_DIR=../e2e/hsm-config SWEEP_DIR=../e2e/sweep-config
 # SIGNER_BACKEND=pkcs11 NODE=local ./verify.sh -- the WireGuard/peer sections do not apply there and are skipped.
 set -uo pipefail
-NODE=${NODE:?NODE is empty: this check only makes sense on a node of the two-node layout (or NODE=local for a single host)}
+NODE=${NODE:?NODE is empty: this check only makes sense on a node of the multi-node layout (or NODE=local for a single host)}
 PROJECT=${PROJECT:-digiwal-dev}
 fail=0; skipped=0
 ok()   { printf '  PASS  %s\n' "$*"; }
@@ -51,10 +51,11 @@ hardening() {
 }
 
 case $NODE in
-	vm2) PEER_PRIVATE=10.10.0.2; PEER_OPEN="9092 8545 8443 8080 8446 5432"; HAS_GW=1; HAS_CUSTODY=0 ;;
-	vm3) PEER_PRIVATE=10.10.0.1; PEER_OPEN="8444 8084 5432"; HAS_GW=0; HAS_CUSTODY=1
+	vm2) PEER_PRIVATE=10.10.0.2; PEER_OPEN="9092 8545 8443 8080 5432 9100 8081 9187"; HAS_GW=1; HAS_CUSTODY=0 ;;
+	vm3) PEER_PRIVATE=10.10.0.1; PEER_OPEN="5432 27017 9100 8081 9187"; HAS_GW=0; HAS_CUSTODY=1
 		# hsm-gateway (key-custody-hsm.md M2b) listens on vm2's WireGuard address only when the Hot Wallet is on the HSM
 		[ "${SIGNER_BACKEND:-software}" = pkcs11 ] && PEER_OPEN="$PEER_OPEN 8445" ;;
+	vm4) PEER_PRIVATE=10.10.0.1; PEER_OPEN="5432 27017 9100 8081 9187"; HAS_GW=0; HAS_CUSTODY=0 ;;
 	local) HAS_GW=1; HAS_CUSTODY=1 ;;
 	*) echo "unknown node $NODE"; exit 2 ;;
 esac
@@ -62,20 +63,23 @@ tcp() { timeout 3 bash -c "echo > /dev/tcp/$1/$2" 2>/dev/null; }
 cd "$(dirname "$0")"
 
 if [ "$NODE" != local ]; then
-PEER_PUBLIC_IP=$(. /etc/digiwal/firewall.env && echo "$PEER_PUBLIC_IP")
+PEER_PUBLIC_IP=$(. /etc/digiwal/firewall.env && echo "${PEER_PUBLIC_IP%%,*}") # first peer; several on a three-node mesh
 echo "1. WireGuard"
 hs=$(wg show wg0 latest-handshakes | awk '{print $2}' | head -1)
 if [ -n "$hs" ] && [ $(( $(date +%s) - hs )) -lt 180 ]; then ok "last handshake $(( $(date +%s) - hs ))s ago"; else bad "no recent handshake"; fi
 if ping -c 2 -W 2 -M do -s 1372 "$PEER_PRIVATE" >/dev/null 2>&1; then ok "don't-fragment ping at MTU 1400 to $PEER_PRIVATE"; else bad "DF ping to $PEER_PRIVATE failed (MTU)"; fi
 
 echo "2. The peer's public address exposes nothing but SSH (checked from here)"
-for p in 5432 6379 9092 27017 8545 8084 8443 8444 8445 8446 8080 8085 9090 3000; do
+for p in 5432 6379 9092 27017 8545 8084 8443 8444 8445 8446 8080 8085 9090 3000 9100 9101 9102 9187 8081 9308; do
 	if tcp "$PEER_PUBLIC_IP" "$p"; then bad "port $p is open on the peer's public IP"; fi
 done
 tcp "$PEER_PUBLIC_IP" 22 && ok "ssh reachable, other service ports closed" || bad "ssh closed on the peer"
 
 echo "3. The peer's private address serves what it should"
 for p in $PEER_OPEN; do tcp "$PEER_PRIVATE" "$p" && ok "$PEER_PRIVATE:$p reachable" || bad "$PEER_PRIVATE:$p not reachable"; done
+if [ "$NODE" = vm4 ]; then
+	tcp "$PEER_PRIVATE" 8445 && bad "$PEER_PRIVATE:8445 (hsm-gateway) is reachable from vm4: only vm3 may call it" || ok "hsm-gateway ($PEER_PRIVATE:8445) is not reachable from vm4 (only vm3 may call it)"
+fi
 else
 	echo "1-3. WireGuard and the peer's addresses"; skip "single host (NODE=local): there is no peer"
 fi
@@ -291,6 +295,22 @@ if [ "$HAS_GW" = 1 ] || [ "$HAS_CUSTODY" = 1 ]; then
 		skip "kernel.yama.ptrace_scope >= 1: $NEEDS_NODE"
 		skip "swap off: $NEEDS_NODE"
 	fi
+fi
+
+if [ "$NODE" = vm3 ]; then
+	echo "13. Monitoring (Prometheus on this node)"
+	down=$(curl -sf http://127.0.0.1:9090/api/v1/targets | python3 -c '
+import json, sys
+t = json.load(sys.stdin)["data"]["activeTargets"]
+print(len(t), *[x["scrapeUrl"] for x in t if x["health"] != "up"])') || down=""
+	set -- $down
+	if [ -z "$down" ]; then bad "Prometheus does not answer on 127.0.0.1:9090"
+	elif [ $# = 1 ]; then ok "all $1 scrape targets are up"
+	else n=$1; shift; bad "$# of $n scrape targets down: $*"; fi
+	stale=$(curl -sf 'http://127.0.0.1:9090/api/v1/query' --data-urlencode 'query=time() - digiwal_job_last_success_timestamp_seconds > 900' | python3 -c '
+import json, sys
+print(*[x["metric"]["job"] for x in json.load(sys.stdin)["data"]["result"]])') || stale="?"
+	[ -z "$stale" ] && ok "every auditor job succeeded in the last 15 minutes" || bad "auditor jobs without a recent success: $stale"
 fi
 
 if [ "$fail" = 0 ]; then

@@ -210,6 +210,33 @@ func TestMissedByTheWatcher(t *testing.T) {
 	}
 }
 
+// A Gas Top-Up (a native transfer from the Hot Wallet to a deposit address) is Hot Wallet Outflow: chain-watcher
+// skips it (deposit-flow.md invariant #17), so D7 must not call it missed. The same transfer from anyone else is.
+func TestGasTopUpIsNotAMissedDeposit(t *testing.T) {
+	d := newDepEnv(t)
+	hot := "0x00000000000000000000000000000000000000a1"
+	d.job.Src.Hot = hot
+	topUp := "0xdee0000000000000000000000000000000000000000000000000000000000003"
+	other := "0xdee0000000000000000000000000000000000000000000000000000000000004"
+	d.chain.cands[20] = []source.Candidate{
+		{TxHash: topUp, LogIndex: -1, From: hot, To: depAdr, Amount: big.NewInt(10)},
+		{TxHash: other, LogIndex: -1, From: "0x00000000000000000000000000000000000000b2", To: depAdr, Amount: big.NewInt(10)},
+	}
+	for _, h := range []string{topUp, other} {
+		d.chain.transfers[source.DepositKey(dChain, h, -1)] = deposit.OnChain{Found: true, Success: true, Block: 20,
+			BlockHash: "0x20", Canonical: "0x20", To: depAdr, Amount: big.NewInt(10)}
+	}
+	d.run()
+	d.run()
+	rows, err := d.st.Findings(context.Background(), "deposit")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].Rule != "D7" || rows[0].Reference != source.DepositKey(dChain, other, -1) {
+		t.Fatalf("only the transfer from a stranger should be flagged: %+v", rows)
+	}
+}
+
 // The scan stops at the watermark and at the Grace Period, in batches, and resumes where it stopped.
 func TestScanRespectsWatermarkAndGrace(t *testing.T) {
 	d := newDepEnv(t)

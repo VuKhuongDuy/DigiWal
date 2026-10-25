@@ -385,10 +385,15 @@ func resolveAccount(ctx context.Context, tx pgx.Tx, ref AccountRef, userID, asse
 	case RefGasExpense:
 		err = tx.QueryRow(ctx, `SELECT id FROM accounts WHERE asset_id = $1 AND kind = 'gas_expense'`, assetID).Scan(&id)
 	default:
-		err = tx.QueryRow(ctx, `
-			INSERT INTO accounts (asset_id, kind, user_id) VALUES ($1, 'user', $2)
-			ON CONFLICT (asset_id, user_id) WHERE kind = 'user' DO UPDATE SET user_id = EXCLUDED.user_id
-			RETURNING id`, assetID, userID).Scan(&id)
+		// Read first: the upsert below writes a new row version (and WAL) even when the account exists, on every
+		// Lock and Apply, and it is the first statement to wait on a user's row. Only a first use pays for it.
+		err = tx.QueryRow(ctx, `SELECT id FROM accounts WHERE asset_id = $1 AND kind = 'user' AND user_id = $2`, assetID, userID).Scan(&id)
+		if errors.Is(err, pgx.ErrNoRows) {
+			err = tx.QueryRow(ctx, `
+				INSERT INTO accounts (asset_id, kind, user_id) VALUES ($1, 'user', $2)
+				ON CONFLICT (asset_id, user_id) WHERE kind = 'user' DO UPDATE SET user_id = EXCLUDED.user_id
+				RETURNING id`, assetID, userID).Scan(&id)
+		}
 	}
 	if err != nil {
 		return "", fmt.Errorf("resolving account: %w", err)

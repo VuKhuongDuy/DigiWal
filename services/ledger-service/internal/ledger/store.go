@@ -22,8 +22,21 @@ type Store struct {
 }
 
 // Connect opens the pool and applies any pending migrations.
-func Connect(ctx context.Context, dsn string) (*Store, error) {
-	pool, err := pgxpool.New(ctx, dsn)
+func Connect(ctx context.Context, dsn string) (*Store, error) { return ConnectWithPool(ctx, dsn, 0) }
+
+// ConnectWithPool is Connect with an explicit pool size (0 keeps pgx's default of max(4, CPUs)). The size is a
+// separate argument, not a pool_max_conns parameter in the DSN: the same DSN also goes to golang-migrate, which
+// would send that parameter to the server as a runtime setting and be refused ("unrecognized configuration
+// parameter"), so the service could not start.
+func ConnectWithPool(ctx context.Context, dsn string, maxConns int32) (*Store, error) {
+	cfg, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		return nil, fmt.Errorf("parsing postgres dsn: %w", err)
+	}
+	if maxConns > 0 {
+		cfg.MaxConns = maxConns
+	}
+	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("connecting to postgres: %w", err)
 	}

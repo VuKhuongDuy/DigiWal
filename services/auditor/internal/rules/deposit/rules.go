@@ -44,6 +44,7 @@ type OnChain struct {
 	Block     int64
 	BlockHash string // hash of the block the receipt names
 	Canonical string // hash of the block currently at that height
+	From      string // the sender of a native transfer; "" for an ERC-20 Transfer log
 	To        string
 	Amount    *big.Int
 	Token     string // ERC-20 contract the Transfer log came from; "" for the native coin
@@ -58,6 +59,9 @@ type Facts struct {
 	Owner    string // wallet-service owner of the receiving address; "" if it is not a deposit address
 	History  *History
 	Chain    OnChain
+	// Hot is wallet-service's Hot Wallet address, "" when unknown. A native transfer sent from it (a Gas Top-Up to a
+	// deposit address) is Hot Wallet Outflow, which chain-watcher never counts as a deposit (deposit-flow.md #17).
+	Hot string
 }
 
 func lowerEq(a, b string) bool { return strings.EqualFold(a, b) }
@@ -219,6 +223,9 @@ func d6(f Facts) *finding.Violation {
 // D7: a successful transfer to a deposit address that chain-watcher has no record of (missed by the watcher).
 func d7(f Facts) *finding.Violation {
 	if f.Observed != nil || !f.Chain.Found || !f.Chain.Success || f.Chain.Amount == nil || f.Chain.Amount.Sign() <= 0 || f.Owner == "" {
+		return nil
+	}
+	if f.Hot != "" && f.Chain.Token == "" && lowerEq(f.Chain.From, f.Hot) {
 		return nil
 	}
 	return crit("D7", map[string]any{"problem": "a transfer to a deposit address that chain-watcher never observed",

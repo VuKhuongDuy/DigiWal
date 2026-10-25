@@ -24,6 +24,7 @@ import (
 // Requests is the slice of store.Store the API needs.
 type Requests interface {
 	Create(ctx context.Context, r store.NewRequest) (store.Withdrawal, bool, error)
+	CreateWithStatus(ctx context.Context, r store.NewRequest, status string, reason *string) (store.Withdrawal, bool, error)
 	Transition(ctx context.Context, id, from, to string, reason *string) (store.Withdrawal, error)
 	Get(ctx context.Context, userID, idempotencyKey string) (store.Withdrawal, error)
 }
@@ -118,7 +119,7 @@ func response(w store.Withdrawal) statusResponse {
 
 // handleCreate is POST /v1/withdrawals. Only a body that cannot even be stored is refused
 // up front (400); business validation (asset, minimum, whitelist, screening, destination)
-// happens after the row exists, so a failure ends in `rejected` rather than vanishing.
+// happens before the row is inserted (once, in its verdict state), so a failure ends in `rejected` rather than vanishing.
 func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	var b createBody
 	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<14))
@@ -144,54 +145,72 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	amount, _ := new(big.Int).SetString(b.Amount, 10)
 	req := store.NewRequest{UserID: b.UserID, IdempotencyKey: b.IdempotencyKey, AssetID: b.AssetID, Amount: amount, ToAddress: b.ToAddress}
 
-	wd, created, err := s.requests.Create(r.Context(), req)
-	if err != nil {
-		log.Printf("creating withdrawal request: %v", err)
+	// A duplicate is answered from a plain read (no fsync) before anything is validated or written.
+	switch wd, err := s.requests.Get(r.Context(), req.UserID, req.IdempotencyKey); {
+	case err == nil:
+		s.answerDuplicate(w, wd, req)
+		return
+	case !errors.Is(err, store.ErrNotFound):
+		log.Printf("looking up withdrawal request: %v", err)
 		writeErr(w, http.StatusInternalServerError, "internal error")
 		return
 	}
-	if !created {
-		// Invariant #11: a duplicate never re-validates, re-reserves or re-signs; it reads the
-		// existing row back. A different request under the same key is the caller's bug, not a
-		// retry, so it is refused rather than answered with another request's status.
-		if !wd.SameRequest(req) {
-			writeErr(w, http.StatusConflict, "idempotency_key already used for a different withdrawal")
-			return
-		}
-		writeJSON(w, http.StatusOK, response(wd))
-		return
-	}
-	s.validateNew(w, r, wd)
+	s.validateNew(w, r, req)
 }
 
-// validateNew runs validation and then the Reservation in-line, right after the row was created:
-// only this handler ever moves a row out of `requested` (invariant #11, Open Questions #9b option B).
-//   - a check fails: `rejected` with reject_reason, 422 — nothing was reserved (#10);
-//   - no verdict (a dependency failed): the row stays `requested`, 503. That key is spent: a
-//     retry with it only reads the row back; the Reaper fails it after the Stuck Request Timeout,
-//     and the client retries with a new key (#17, #18);
+// answerDuplicate is invariant #11: a duplicate never re-validates, re-reserves or re-signs; it reads the
+// existing row back. A different request under the same key is the caller's bug, not a retry, so it is
+// refused rather than answered with another request's status.
+func (s *Server) answerDuplicate(w http.ResponseWriter, wd store.Withdrawal, req store.NewRequest) {
+	if !wd.SameRequest(req) {
+		writeErr(w, http.StatusConflict, "idempotency_key already used for a different withdrawal")
+		return
+	}
+	writeJSON(w, http.StatusOK, response(wd))
+}
+
+// validateNew runs validation, inserts the row once in its verdict state, then the Reservation in-line
+// (invariant #11, Open Questions #9b option B; one INSERT instead of INSERT + UPDATE: docs/design/withdrawal-commit-reduction.md, A):
+//   - a check fails: a `rejected` row with reject_reason, 422 — nothing was reserved (#10);
+//   - no verdict (a dependency failed): no row is written, 503, and the key is NOT spent: the client may retry it;
 //   - all checks pass: `validated`, then the ledger Lock (#1):
 //     locked → `reserved`, 202 (signing and broadcast continue in the background, task 3.3);
 //     not enough Available Balance → `rejected` / insufficient_funds, 422, no Lock exists;
 //     ledger unreachable → 503, the row stays `validated` and the Reaper Releases and fails it.
-func (s *Server) validateNew(w http.ResponseWriter, r *http.Request, wd store.Withdrawal) {
-	reason, err := s.validator.Check(r.Context(), wd)
+func (s *Server) validateNew(w http.ResponseWriter, r *http.Request, req store.NewRequest) {
+	// Validation has no side effect, so it runs before the row exists and the row is inserted once, already in its
+	// verdict state (one commit instead of two). Concurrent racers on one key may both validate; only one inserts.
+	probe := store.Withdrawal{UserID: req.UserID, IdempotencyKey: req.IdempotencyKey, AssetID: req.AssetID, Amount: req.Amount, ToAddress: req.ToAddress}
+	reason, err := s.validator.Check(r.Context(), probe)
 	if err != nil {
-		log.Printf("validating withdrawal %s: %v", wd.ID, err)
-		writeUnavailable(w, wd)
+		log.Printf("validating withdrawal for %s: %v", req.UserID, err)
+		writeUnavailable(w, probe) // no verdict, no row: the key is not spent
 		return
 	}
 	if reason != "" {
-		s.advance(w, r, wd, store.StatusRequested, store.StatusRejected, &reason, http.StatusUnprocessableEntity)
+		wd, created, err := s.requests.CreateWithStatus(r.Context(), req, store.StatusRejected, &reason)
+		switch {
+		case err != nil:
+			log.Printf("recording rejected withdrawal request: %v", err)
+			writeErr(w, http.StatusInternalServerError, "internal error")
+		case !created:
+			s.answerDuplicate(w, wd, req)
+		default:
+			writeJSON(w, http.StatusUnprocessableEntity, response(wd))
+		}
 		return
 	}
-	next, ok := s.advance(nil, r, wd, store.StatusRequested, store.StatusValidated, nil, 0)
-	if !ok || s.reserver == nil {
-		if ok {
-			writeJSON(w, http.StatusAccepted, response(next))
-		} else {
-			s.writeCurrent(w, r, wd)
-		}
+	next, created, err := s.requests.CreateWithStatus(r.Context(), req, store.StatusValidated, nil)
+	switch {
+	case err != nil:
+		log.Printf("creating withdrawal request: %v", err)
+		writeErr(w, http.StatusInternalServerError, "internal error")
+		return
+	case !created:
+		s.answerDuplicate(w, next, req)
+		return
+	case s.reserver == nil:
+		writeJSON(w, http.StatusAccepted, response(next))
 		return
 	}
 	err = s.reserver.Lock(r.Context(), next.Key(), next.UserID, next.AssetID, next.Amount)
@@ -200,7 +219,7 @@ func (s *Server) validateNew(w http.ResponseWriter, r *http.Request, wd store.Wi
 		why := RejectInsufficientFunds
 		s.advance(w, r, next, store.StatusValidated, store.StatusRejected, &why, http.StatusUnprocessableEntity)
 	case err != nil:
-		log.Printf("reserving withdrawal %s: %v", wd.ID, err)
+		log.Printf("reserving withdrawal %s: %v", next.ID, err)
 		writeUnavailable(w, next)
 	default:
 		s.advance(w, r, next, store.StatusValidated, store.StatusReserved, nil, http.StatusAccepted)

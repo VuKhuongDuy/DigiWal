@@ -1,0 +1,56 @@
+# Platform alerts for the two-node dev environment (docs/design/multi-node-deployment.md, Abort conditions and
+# Monitoring wiring). They need the exporters of the multi-node Prometheus (prometheus.multi-node.yml), so they are not
+# loaded by the single-host config. Tested with promtool (alerts-node_test.yml).
+groups:
+  - name: nodes
+    rules:
+      - alert: NodeMemoryLow
+        expr: node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes < 0.08
+        for: 2m
+        labels: {severity: critical}
+        annotations:
+          summary: "{{ $labels.node }} has under 8% memory available"
+          description: "The design's abort line is 600 MB on a 7.8 GB node: the kernel will start killing containers."
+      - alert: NodeMemoryPressure
+        expr: rate(node_pressure_memory_waiting_seconds_total[5m]) > 0.1
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: "{{ $labels.node }} is stalling on memory"
+          description: "Tasks spent over 10% of the time waiting for memory (PSI), before an OOM kill."
+      - alert: NodeCPUPressure
+        expr: rate(node_pressure_cpu_waiting_seconds_total[5m]) > 0.5
+        for: 10m
+        labels: {severity: warning}
+        annotations:
+          summary: "{{ $labels.node }} has runnable tasks waiting for a core"
+          description: "CPU is saturated (PSI): latency on this node is no longer the service's own."
+      - alert: NodeDiskFilling
+        expr: node_filesystem_avail_bytes{mountpoint="/"} / node_filesystem_size_bytes{mountpoint="/"} < 0.15
+        for: 10m
+        labels: {severity: warning}
+        annotations:
+          summary: "{{ $labels.node }} root disk is over 85% full"
+          description: "Anvil state, Kafka, Postgres WAL and the Prometheus TSDB all live here."
+      - alert: ContainerOOMKilled
+        expr: increase(container_oom_events_total{container_label_com_docker_compose_service!=""}[5m]) > 0
+        labels: {severity: critical}
+        annotations:
+          summary: "{{ $labels.container_label_com_docker_compose_service }} on {{ $labels.node }} was OOM-killed"
+          description: "It hit its mem_limit. For Anvil this rolls the chain back to its last state dump (invariant 10)."
+  - name: databases
+    rules:
+      - alert: PostgresConnectionsHigh
+        expr: sum by (server) (pg_stat_activity_count) / max by (server) (pg_settings_max_connections) > 0.9
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: "{{ $labels.server }} is using over 90% of max_connections"
+          description: "Client Pools together are close to the server's limit."
+      - alert: KafkaConsumerLag
+        expr: sum by (consumergroup) (kafka_consumergroup_lag) > 500
+        for: 10m
+        labels: {severity: warning}
+        annotations:
+          summary: "consumer group {{ $labels.consumergroup }} is {{ $value }} messages behind"
+          description: "A consumer is stuck or slower than the producers; deposits or history stop advancing."
