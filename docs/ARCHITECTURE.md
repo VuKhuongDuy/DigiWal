@@ -30,9 +30,11 @@ you instead of letting you fake them:
 
 | Service | Responsibility | Talks to |
 |---|---|---|
-| `wallet-service` | Holds ≥2 sealed HD seeds (encrypted at rest): one derives every user's deposit address (BIP44 `m/44'/60'/0'/0/{index}`), a separate one is the Hot Wallet's signing key — kept apart so a compromised `wallet-service` process can never expose both at once. Signs outgoing transactions (withdrawals, Sweep, Gas Top-Up) on request; never exposes private keys. Warm/Cold tier keys live outside this service entirely (see `docs/design/wallet-tiering.md`). | Postgres (wallets, addresses, sealed seeds), Redis (address-set cache), **EVM testnet RPC — PROPOSED, pending Tech Lead sign-off** (gas price/limit estimation so `wallet-service` can construct outgoing transactions itself instead of trusting caller-supplied gas parameters, and to source a user address's live nonce for Sweep signing; see `docs/design/integration-contracts.md` §2 Open Questions #11 and `docs/design/deposit-flow.md` invariant #12) |
+| `wallet-service` | Issues every deposit address from the Attested xpub (never holds the seed or a master key) and builds and records Hot Wallet transactions, asking `hsm-gateway` to sign them; keeps the nonce state and enforces the Hot Wallet's fee ceiling. Warm/Cold tier keys live outside this service entirely (see `docs/design/wallet-tiering.md`, `docs/design/key-custody-hsm.md`). | Postgres (addresses, xpub, nonces), `hsm-gateway` (Hot signatures, xpub attestation, mTLS), Redis (address-set cache), **EVM testnet RPC — PROPOSED, pending Tech Lead sign-off** (gas price/limit estimation so `wallet-service` can construct outgoing transactions itself instead of trusting caller-supplied gas parameters, and to source a user address's live nonce for Sweep signing; see `docs/design/integration-contracts.md` §2 Open Questions #11 and `docs/design/deposit-flow.md` invariant #12) |
+| `hsm-gateway` | In front of the HSM token (SoftHSMv2 in dev: **not** tamper-resistant hardware). Holds the Hot Key, the attestation key and the KEK; signs only what its Signing Policy allows, audits every request (hash-chained log), opens the Sealed Secret for `sweep-signer` only. Runs on the CA node (vm2), pinned callers, mTLS. | PKCS#11 token, audit log (`docs/design/key-custody-hsm.md`) |
+| `sweep-signer` | The only process that ever holds the user_derivation Seed in memory (fetched per Sweep from `hsm-gateway`, mlock'd, zeroed). Signs Sweeps (user address to Hot Wallet) for `sweeper` and re-derives every deposit address from the Seed (Address Audit). No published port. | `hsm-gateway` (unseal, Hot address), Postgres (vault role, read-only grants), `sweeper` (caller) |
 | `chain-watcher` | Polls/subscribes to the EVM testnet RPC, checks incoming transfers against the known-address set, resolves each one to the owning `user_id` (Redis first, `wallet-service` on a cache miss — see `docs/design/deposit-flow.md`'s Address Resolution), waits for confirmations, emits deposit events carrying that `user_id`. Purely an observer — never signs or broadcasts. | Redis (address→`user_id` lookup), Postgres (watermark, observed transfers), Kafka (producer), `wallet-service` (address resolution, mTLS, cache-miss fallback only; Hot Wallet address fetched once at startup so Hot Wallet Outflows are never treated as deposits — `deposit-flow.md` invariant #17, Decided and implemented) |
-| `sweeper` | Consumes confirmed deposits, tops up a user's deposit address with gas when its native balance can't cover it, then sweeps the deposit to the Hot Wallet. Reads the Asset Registry (static config, mounted — a gap fixed on Tech Lead review, `docs/design/ledger.md`'s Bounded context(s)) to know whether an asset is native or ERC-20, which decides both its balance-query and its signing-call branch. Signs via `wallet-service`; holds no key material of its own. See `docs/design/deposit-flow.md`. | `wallet-service` (sign, mTLS), EVM testnet RPC (broadcast), Kafka (consumer), Asset Registry (static config, mounted) |
+| `sweeper` | Consumes confirmed deposits, tops up a user's deposit address with gas when its native balance can't cover it, then sweeps the deposit to the Hot Wallet. Reads the Asset Registry (static config, mounted — a gap fixed on Tech Lead review, `docs/design/ledger.md`'s Bounded context(s)) to know whether an asset is native or ERC-20, which decides both its balance-query and its signing-call branch. Gas Top-Ups are signed via `wallet-service` (Hot Wallet), Sweeps via `sweep-signer`; holds no key material of its own. See `docs/design/deposit-flow.md`. | `wallet-service` and `sweep-signer` (sign, mTLS), EVM testnet RPC (broadcast), Kafka (consumer), Asset Registry (static config, mounted) |
 | `ledger-service` | Source of truth for balances. Double-entry bookkeeping in Postgres. Consumes deposit/withdrawal/transfer events idempotently (dedupe by tx hash + log index, or a client-supplied idempotency key for internal transfers). Owns the Asset Registry (static config, mounted into every service that reads it). | Postgres (ledger), Kafka (consumer + producer) |
 | `withdrawal-service` | Validates a withdrawal request against the ledger, optionally takes a Redis lock on the user as a fast-fail optimization, reserves funds via `ledger-service`'s Lock (not an immediate debit — see below), asks `wallet-service` to sign, broadcasts, tracks confirmation, then Settles the Lock (the actual debit) on confirmation. The Redis lock is never load-bearing for correctness — the Postgres atomic `locked_balance` `UPDATE` inside `ledger-service`'s Lock creation is the sole boundary preventing overdraft; a lost/expired Redis lock can at worst let a doomed-to-fail concurrent request reach Postgres before being rejected there, not cause an overdraft. See `docs/design/ledger.md` Open Questions #1. Also reads the Asset Registry directly (`min_withdrawal_amount` for validation, `hot_floor`/`hot_ceiling` for its sweep-monitor loop — same previously-missing dependency as `sweeper`'s). | Postgres (read), Redis (optional fast-fail lock), Kafka, `wallet-service`, Asset Registry (static config, mounted) |
 | `history-service` | Denormalized, query-optimized transaction history / audit log — the "read model" — fed by Kafka events, stored in MongoDB. | MongoDB, Kafka (consumer) |
@@ -52,7 +54,9 @@ flowchart TB
     end
 
     subgraph Core["Core services"]
-        Wallet["wallet-service<br/>≥2 sealed HD seeds, signing<br/>(wallet-tiering.md)"]
+        Wallet["wallet-service<br/>xpub addresses, Hot tx building<br/>(wallet-tiering.md)"]
+        HSM["hsm-gateway<br/>Hot Key, KEK, policy, audit<br/>(key-custody-hsm.md)"]
+        SweepSigner["sweep-signer<br/>Seed in RAM, signs Sweeps<br/>(key-custody-hsm.md)"]
         Watcher["chain-watcher<br/>observes deposits<br/>(deposit-flow.md)"]
         Sweeper["sweeper<br/>gas top-up + sweep to Hot<br/>(deposit-flow.md)"]
         Ledger["ledger-service<br/>double-entry, Lock/Settle/Release<br/>(ledger.md)"]
@@ -85,7 +89,10 @@ flowchart TB
     Kafka -->|deposits.confirmed| Ledger
     Kafka -->|all 4 topics| History
 
-    Sweeper -->|"sign — mTLS"| Wallet
+    Sweeper -->|"gas top-up sign — mTLS"| Wallet
+    Sweeper -->|"sweep sign — mTLS"| SweepSigner
+    Wallet -->|"hot sign — mTLS, pinned"| HSM
+    SweepSigner -->|"unseal — mTLS, pinned"| HSM
     Sweeper --> Chain
 
     Withdrawal -->|"lock / settle / release,<br/>apply(correction) — mTLS"| Ledger
@@ -143,11 +150,12 @@ arrow above: `docs/design/integration-contracts.md`.
 This is a learning project, but "custody wallet" is exactly the kind of
 system where sloppy key handling is the whole point of the lesson:
 
-- **Tiered key custody, not one seed for everything.** `wallet-service`
-  holds ≥2 sealed BIP39 seeds, each independently encrypted with
-  AES-256-GCM under a "master key" env var (`MASTER_KEY_HEX`) that
-  stands in for a real KMS/HSM: one derives every user's deposit
-  address, a separate one is the Hot Wallet's signing key. Warm and Cold
+- **Tiered key custody, not one seed for everything.** the Hot
+  Key lives in an HSM token behind `hsm-gateway` (never in `wallet-service`),
+  and the seed that derives every user's deposit address is a Sealed Secret:
+  AES-256-GCM under a per-secret DEK, the DEK wrapped by a KEK that never
+  leaves the HSM (`docs/design/key-custody-hsm.md` M3c; no environment-held
+  key exists). Only `sweep-signer` can ask the gateway to open it. Warm and Cold
   tier seeds are never held by `wallet-service`, or any other always-on
   service, at all — sealed, operator-held, decrypted only inside a
   local one-off signing tool when funds move between tiers. Full design

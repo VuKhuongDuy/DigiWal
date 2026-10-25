@@ -206,6 +206,9 @@ Question #7).
   `destination_on_screening_list` (pre-sign re-check, #23);
   `abandoned_refunded` / `abandoned` (operator abandon of a `disputed`
   request, #9 — PROPOSED).
+  `policy_refused` (`hsm-gateway`'s Signing Policy said no, `422` on the
+  sign call, `key-custody-hsm.md` Open question 4: handled like
+  `sign_refused`, the Lock is Released, an operator alert fires).
 
 Withdrawal Request states: a row exists first (invariant #11), then
 moves `requested → validated → reserved → signed → broadcast →
