@@ -6,8 +6,8 @@ COMPOSE = docker compose
 
 .PHONY: gen-key certs up init-seeds down logs test
 
-# Generates a fresh AES-256 key into .env (gitignored). Run once per
-# environment (local, staging, ...) — never reuse a key across them.
+# LEGACY: only for the software Hot Wallet of this standalone dev compose (a !prod build); nothing in M3c needs it, the user seed is sealed by
+# hsm-gateway under a KEK in the HSM (docs/runbooks/dev-hsm-bringup.md). Generates the old software key into .env (gitignored).
 gen-key:
 	@test -f .env && echo ".env already exists, not overwriting" && exit 1 || true
 	@echo "MASTER_KEY_HEX=$$(openssl rand -hex 32)" > .env
@@ -34,15 +34,16 @@ up: certs
 # terminal once; write it down, it is never shown again and never stored
 # in plaintext. Restarts the running service afterward so it picks up the
 # new seed (it only checks at boot).
-#   make init-seed ROLE=user_derivation
+# Since key-custody-hsm.md M3b this service never holds the user_derivation seed: that one is created by
+# `key-admin init-seed user_derivation` (the e2e/ and dev/ Makefiles do it) and opened only by sweep-signer. Here, only the
+# dev software hot_wallet seed:
 #   make init-seed ROLE=hot_wallet
 init-seed:
-	@test -n "$(ROLE)" || (echo "usage: make init-seed ROLE=user_derivation|hot_wallet" && exit 1)
+	@test -n "$(ROLE)" || (echo "usage: make init-seed ROLE=hot_wallet (user_derivation: key-admin init-seed, see e2e/ or dev/)" && exit 1)
 	$(COMPOSE) run --rm wallet-service -init-seed $(ROLE)
 	$(COMPOSE) restart wallet-service
 
 init-seeds:
-	$(MAKE) init-seed ROLE=user_derivation
 	$(MAKE) init-seed ROLE=hot_wallet
 
 down:

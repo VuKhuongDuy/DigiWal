@@ -47,6 +47,7 @@ type fakeSigner struct {
 	next      uint64
 	keys      []string
 	refuse    bool
+	signErr   error // returned by SignHotWallet when set (a specific refusal)
 	conflict  bool
 	failNext  int  // transient failures before answering
 	loseReply bool // sign and store, then fail as if the response were lost
@@ -67,6 +68,9 @@ func (s *fakeSigner) SignHotWallet(_ context.Context, r wallet.SignRequest) (str
 	s.keys = append(s.keys, r.IdempotencyKey)
 	if s.voided {
 		return "", 0, wallet.ErrKeyVoided
+	}
+	if s.signErr != nil {
+		return "", 0, s.signErr
 	}
 	if s.refuse {
 		return "", 0, wallet.ErrSignRefused
@@ -575,5 +579,54 @@ func TestKeyConflictIsNeverReleased(t *testing.T) {
 	}
 	if r.get("k1").Status != store.StatusReserved || len(r.ledger.released) != 0 {
 		t.Fatalf("status %s, released %v", r.get("k1").Status, r.ledger.released)
+	}
+}
+
+// A policy refusal on the sign path is still a refusal (Lock released, failed, no retry) but fails as
+// policy_refused and raises one ALERT carrying the rule id and the withdrawal id; any other 400/422
+// refusal stays sign_refused with no such ALERT.
+func TestSignPolicyRefusalFailsAsPolicyRefusedWithAlert(t *testing.T) {
+	r := newRig(t)
+	alerts := r.alerts()
+	w := r.reserved("k1")
+	r.signer.signErr = fmt.Errorf("wrapped: %w", &wallet.SignPolicyRefusedError{Rule: "max_per_tx", Body: `{"error":"policy_refused","rule":"max_per_tx"}`})
+	for i := 0; i < 3; i++ {
+		if err := r.step(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got := r.get("k1")
+	if got.Status != store.StatusFailed || *got.RejectReason != ReasonPolicyRefused || ReasonPolicyRefused != "policy_refused" || len(r.chain.sent) != 0 {
+		t.Fatalf("%+v", got)
+	}
+	if len(r.ledger.released) != 1 || r.ledger.released[0] != "withdrawal:"+w.ID || len(r.ledger.settled) != 0 {
+		t.Fatalf("released %v settled %v", r.ledger.released, r.ledger.settled)
+	}
+	if len(r.signer.keys) != 1 {
+		t.Fatalf("signing was retried: %v", r.signer.keys)
+	}
+	if len(*alerts) != 1 || !strings.Contains((*alerts)[0], "max_per_tx") || !strings.Contains((*alerts)[0], w.ID) {
+		t.Fatalf("alerts = %q", *alerts)
+	}
+	r.failedEvents()
+	_ = r.onlyFailedEvent(ReasonPolicyRefused)
+}
+
+func TestOtherSignRefusalsStaySignRefusedWithoutAlert(t *testing.T) {
+	for name, err := range map[string]error{
+		"400/422 plain": wallet.ErrSignRefused,
+		"wrapped":       fmt.Errorf("%w (422): {\"error\":\"gas ceiling\"}", wallet.ErrSignRefused),
+	} {
+		r := newRig(t)
+		alerts := r.alerts()
+		r.reserved("k1")
+		r.signer.signErr = err
+		for i := 0; i < 3; i++ {
+			_ = r.step()
+		}
+		got := r.get("k1")
+		if got.Status != store.StatusFailed || *got.RejectReason != ReasonSignRefused || len(r.ledger.released) != 1 || len(r.signer.keys) != 1 || len(*alerts) != 0 {
+			t.Fatalf("%s: %+v released=%v keys=%v alerts=%q", name, got, r.ledger.released, r.signer.keys, *alerts)
+		}
 	}
 }

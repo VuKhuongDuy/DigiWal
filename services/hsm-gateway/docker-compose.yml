@@ -1,0 +1,57 @@
+# hsm-gateway (key-custody-hsm.md, M2a). NOT yet wired into dev/nodes/vm2.yml or vm3.yml (that is M2b), so this
+# fragment is standalone: it starts the gateway on its own for local runs and for the init-token ceremony.
+#
+# Host-side files it expects (all OUTSIDE the repo; none of them is ever an environment variable):
+#   secrets/hsm-user-pin   the user PIN, one line, mode 0400, owned by uid 10001   (make secrets)
+#   config/policy.yaml     Signing Policy, root-owned 0644 (copy config/policy.example.yaml)
+#   config/callers.yaml    pinned caller leaf fingerprints (copy config/callers.example.yaml)
+#   ../../infra/pki/out/hsm-gateway/{cert,key,ca-cert}.pem   (infra/pki/gen-leaf.sh hsm-gateway)
+#   data/tokens, data/audit, data/state   the ONLY writable mounts, owned by uid 10001
+include:
+  - path: ../../infra/docker-compose.yml
+
+services:
+  hsm-gateway:
+    build:
+      context: ../..            # repo root: the image needs pkg/metrics
+      dockerfile: services/hsm-gateway/Dockerfile
+    # No restart loop on a bad PIN: three tries, then it stays down (and the PIN guard refuses anyway).
+    restart: on-failure:3
+    environment:
+      PORT: "8080"
+      MTLS_ADDR: ${HSM_GATEWAY_MTLS_ADDR:-:8443}   # M2b binds this to the Private Network address, never 0.0.0.0
+      TLS_CERT_FILE: /certs/cert.pem
+      TLS_KEY_FILE: /certs/key.pem
+      TLS_CA_FILE: /certs/ca-cert.pem
+      CALLERS_FILE: /config/callers.yaml
+      POLICY_FILE: /config/policy.yaml
+      POLICY_REQUIRE_ROOT_OWNER: ${POLICY_REQUIRE_ROOT_OWNER:-true}
+      AUDIT_LOG_FILE: /var/lib/hsm-gateway/audit/audit.log
+      PIN_GUARD_FILE: /var/lib/hsm-gateway/state/pin-guard.json
+      HSM_PIN_FILE: /run/secrets/hsm-user-pin     # a path, never the PIN itself
+      HSM_TOKEN_LABEL: digiwal-hot
+      HSM_KEY_LABEL: hot-key
+      HSM_POOL_SIZE: "4"
+    secrets:
+      - hsm-user-pin
+    volumes:
+      - ../../infra/pki/out/hsm-gateway:/certs:ro
+      - ./config/policy.yaml:/config/policy.yaml:ro
+      - ./config/callers.yaml:/config/callers.yaml:ro
+      # the only writable mounts: the token, the audit log (operator sets chattr +a on the host file) and the PIN guard
+      - ./data/tokens:/var/lib/softhsm/tokens
+      - ./data/audit:/var/lib/hsm-gateway/audit
+      - ./data/state:/var/lib/hsm-gateway/state
+    # Hardening (design 4.6 / M4 flags, applied from the start for this service)
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    read_only: true
+    tmpfs: ["/tmp:size=16m,mode=1777"]
+    mem_limit: 256m
+    pids_limit: 128
+    user: "10001:10001"
+    ports: ["127.0.0.1:8443:8443"]   # local runs only; M2b removes this and binds the Private Network address
+
+secrets:
+  hsm-user-pin:
+    file: ${HSM_PIN_SECRET_FILE:-./secrets/hsm-user-pin}

@@ -56,13 +56,13 @@ func (ca *testCA) leaf(t *testing.T, cn string) tls.Certificate {
 }
 
 // newServer starts an mTLS server (same tls settings as ServerTLSConfig)
-// with the two sign endpoints stubbed behind their real policies.
+// with the sign endpoints stubbed behind their real policies.
 func newServer(t *testing.T, ca *testCA) *httptest.Server {
 	t.Helper()
 	ok := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
 	mux := http.NewServeMux()
 	mux.Handle("POST /v1/sign/hot-wallet", Require(HotWalletSigners, ok))
-	mux.Handle("POST /v1/sign/user-address", Require(UserAddressSigners, ok))
+	mux.Handle("POST /v1/wallet/hot-address", Require(HotAddressReaders, ok)) // GET in the service; POST here is enough for the matrix
 	mux.Handle("POST /v1/sign/hot-wallet/{key}/void", Require(HotWalletVoiders, ok))
 	mux.Handle("POST /v1/sign/hot-wallet/{key}/replace", Require(HotWalletKeyReaders, ok))
 	srv := httptest.NewUnstartedServer(mux)
@@ -101,11 +101,14 @@ func TestCNAuthorizationMatrix(t *testing.T) {
 	}{
 		{"withdrawal-service", "/v1/sign/hot-wallet", 200},
 		{"sweeper", "/v1/sign/hot-wallet", 200},
-		{"sweeper", "/v1/sign/user-address", 200},
-		// invariant #4: a compromised withdrawal-service can never pick a user key
-		{"withdrawal-service", "/v1/sign/user-address", 403},
 		{"api-gateway", "/v1/sign/hot-wallet", 403},
-		{"api-gateway", "/v1/sign/user-address", 403},
+		// key-custody-hsm.md M3b: sweep-signer owns Sweep signing; it may read the Hot address (dev profile only uses it) and
+		// can never sign a Hot Wallet transaction, void or replace one
+		{"sweep-signer", "/v1/wallet/hot-address", 200},
+		{"sweep-signer", "/v1/sign/hot-wallet", 403},
+		{"sweep-signer", "/v1/sign/hot-wallet/k/void", 403},
+		{"sweep-signer", "/v1/sign/hot-wallet/k/replace", 403},
+		{"api-gateway", "/v1/wallet/hot-address", 403},
 		// invariants #21, #22: void is withdrawal-service's alone; replace is also sweeper's (its
 		// Gas Top-Ups); nobody else touches either
 		{"withdrawal-service", "/v1/sign/hot-wallet/k/void", 200},
@@ -136,7 +139,7 @@ func TestHandshakeRejectsUnknownOrMissingClientCert(t *testing.T) {
 	// Right CN, but signed by a different CA: must fail at the TLS layer.
 	rogue := newCA(t, "rogue-ca")
 	forged := rogue.leaf(t, "sweeper")
-	if code, err := post(srv, ca, &forged, "/v1/sign/user-address"); err == nil {
+	if code, err := post(srv, ca, &forged, "/v1/sign/hot-wallet"); err == nil {
 		t.Fatalf("forged cert accepted, status %d", code)
 	}
 	// No client cert at all.

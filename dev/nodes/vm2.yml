@@ -19,7 +19,10 @@ services:
   withdrawal-service: {profiles: [elsewhere]}
   chain-watcher: {profiles: [elsewhere]}
   sweeper: {profiles: [elsewhere]}
+  sweep-signer: {profiles: [elsewhere]} # holds the user_derivation seed: on vm3, next to custody's database, never on the node with the CA key and the HSM
   simulator: {profiles: [elsewhere]}
+  hot-cutover: {profiles: [elsewhere]} # the Hot cutover job runs on vm3, next to custody's database
+  key-admin: {profiles: [elsewhere]} # the xpub migration job runs on vm3 too
 
   postgres:
     command: [postgres, -c, hba_file=/etc/postgresql/pg_hba.conf, -c, shared_preload_libraries=pg_stat_statements,
@@ -62,6 +65,16 @@ services:
     extra_hosts: ["wallet-service:10.10.0.2", "withdrawal-service:10.10.0.2"]
     ports: !override ["10.10.0.1:8084:8080", "127.0.0.1:8084:8080"] # never on the public interface (invariant 8)
     mem_limit: 500m
+
+  # hsm-gateway (key-custody-hsm.md M2b): defined in e2e/docker-compose.hsm.yml, always on in this stack (the Makefile
+  # activates the `hsm` profile). It signs the Hot Wallet for wallet-service and opens the vault for sweep-signer on vm3, so its only
+  # published port is on the WireGuard address, never 0.0.0.0 and not even loopback (invariant 8). The token, audit
+  # log and PIN guard are on vm2's disk, which is the point: the Hot Key is not on the node that holds the database.
+  hsm-gateway:
+    ports: !override ["10.10.0.1:8445:8443"] # wallet-service (vm3) only; infra/node/firewall.sh admits just that peer
+    restart: on-failure:3
+    mem_limit: 256m
+    memswap_limit: 256m
 
   history-service:
     environment:

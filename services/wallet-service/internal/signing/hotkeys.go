@@ -9,7 +9,6 @@ import (
 
 	"github.com/ethereum/go-ethereum/core/types"
 
-	"digiwal/services/wallet-service/internal/hdwallet"
 	"digiwal/services/wallet-service/internal/storage"
 )
 
@@ -109,7 +108,7 @@ func (s *Signer) Void(ctx context.Context, caller, key string) (VoidResponse, er
 	if key == "" || len(key) > 128 {
 		return VoidResponse{}, fmt.Errorf("%w: key is required (max 128 chars)", ErrInvalidRequest)
 	}
-	res, err := s.store.VoidHotKey(ctx, s.chainID, caller, key,
+	res, err := s.store.VoidHotKey(ctx, s.chainID, s.hotKey, caller, key,
 		func(ctx context.Context) (uint64, error) { return s.chain.PendingNonceAt(ctx, s.from) })
 	if err != nil {
 		return VoidResponse{}, err
@@ -153,6 +152,10 @@ func (s *Signer) Cancel(ctx context.Context, key string) (storage.Replacement, e
 }
 
 func (s *Signer) replace(ctx context.Context, caller, key string, seq int, kind string, maxGas *big.Int) (storage.Replacement, error) {
+	// A known-down signer fails fast, before the network and before the DB lock.
+	if err := s.hot.Available(); err != nil {
+		return storage.Replacement{}, err
+	}
 	// The network is read before the lock is taken, like signing.
 	netTip, baseFee, err := s.chain.FeeQuote(ctx)
 	if err != nil {
@@ -164,7 +167,7 @@ func (s *Signer) replace(ctx context.Context, caller, key string, seq int, kind 
 		limit = maxGas
 	}
 
-	return s.store.ReplaceHotKey(ctx, s.chainID, caller, key, seq, kind, func(in storage.ReplaceInput) (storage.Built, error) {
+	return s.store.ReplaceHotKey(ctx, s.chainID, s.hotKey, caller, key, seq, kind, func(in storage.ReplaceInput) (storage.Built, error) {
 		orig, err := decodeTx(in.OriginalRaw)
 		if err != nil {
 			return storage.Built{}, err
@@ -178,10 +181,13 @@ func (s *Signer) replace(ctx context.Context, caller, key string, seq int, kind 
 			return storage.Built{}, fmt.Errorf("%w: a replacement needs max fee %s wei, above the ceiling %s", ErrGasCeilingExceeded, feeCap, limit)
 		}
 		body := txBody{to: *orig.To(), value: orig.Value(), data: orig.Data(), gas: orig.Gas(), tip: tip, cap_: feeCap}
+		// A Fee Bump is signed under the class of the payout it replaces; a Nonce Filler is a cancel.
+		meta := HotMeta{Operation: OpPayout, IdempotencyKey: key, Caller: caller}
 		if kind == storage.KindCancel {
 			body = txBody{to: s.from, value: new(big.Int), gas: 21000, tip: tip, cap_: feeCap}
+			meta.Operation = OpCancel
 		}
-		raw, err := signTx(s.wallet, hdwallet.HotWalletIndex, s.chainID, in.Nonce, body)
+		raw, err := s.signHot(ctx, meta, in.Nonce, body)
 		if err != nil {
 			return storage.Built{}, err
 		}

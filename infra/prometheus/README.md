@@ -3,7 +3,7 @@
 `prometheus.yml` scrapes every service's `:9100/metrics` every 15s and loads `alerts.yml`. There is no Alertmanager and no email for now:
 a firing alert shows on http://localhost:9090/alerts and in the Engineering dashboard. History is kept on a volume for two years.
 
-`alerts.yml` has 20 rules (auditor, money, withdrawals, deposits, platform). Thresholds come from the design's Objectives or are marked
+`alerts.yml` has 33 rules (auditor, money, withdrawals, deposits, platform, key-custody). Thresholds come from the design's Objectives or are marked
 "initial" for the Tech Lead to tune. `alerts_test.yml` unit-tests every one with `promtool test rules` (fires, stays quiet, renders its
 text); after any change run
 

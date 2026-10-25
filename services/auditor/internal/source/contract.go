@@ -36,8 +36,8 @@ var Contract = map[string]map[string][]string{
 	},
 	"wallet": {
 		"wallet_addresses":        {"user_id", "address"},
-		"hot_wallet_nonces":       {"chain_id", "next_nonce", "frozen_from_nonce"},
-		"hot_wallet_signatures":   {"idempotency_key", "chain_id", "nonce", "caller_cn", "created_at", "signed_raw_tx"},
+		"hot_wallet_nonces":       {"chain_id", "hot_address", "next_nonce", "frozen_from_nonce"},
+		"hot_wallet_signatures":   {"idempotency_key", "chain_id", "hot_address", "nonce", "caller_cn", "created_at", "signed_raw_tx"},
 		"hot_wallet_replacements": {"idempotency_key", "replacement_seq", "nonce", "tx_hash", "max_fee_per_gas", "max_priority_fee_per_gas", "kind", "created_at"},
 		"hot_wallet_voids":        {"idempotency_key", "caller_cn", "chain_id"},
 	},

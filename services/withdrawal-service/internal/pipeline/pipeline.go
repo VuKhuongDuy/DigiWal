@@ -36,8 +36,9 @@ import (
 
 // Failure reasons recorded on a `failed` row (reject_reason column).
 const (
-	ReasonSignRefused = "sign_refused" // wallet-service refused the request; no nonce allocated
-	ReasonTxReverted  = "tx_reverted"  // mined, but reverted: nothing was paid out
+	ReasonSignRefused   = "sign_refused"   // wallet-service refused the request; no nonce allocated
+	ReasonPolicyRefused = "policy_refused" // hsm-gateway's Signing Policy refused (a sign_refused with a rule id); no nonce allocated
+	ReasonTxReverted    = "tx_reverted"    // mined, but reverted: nothing was paid out
 )
 
 type Store interface {
@@ -181,7 +182,13 @@ func (p *Pipeline) sign(ctx context.Context, w store.Withdrawal) error {
 	})
 	if errors.Is(err, wallet.ErrSignRefused) {
 		log.Printf("withdrawal %s: %v — releasing its Lock", w.ID, err)
-		return p.releaseAndFail(ctx, w, store.StatusReserved, failure{reason: ReasonSignRefused})
+		reason := ReasonSignRefused
+		var policy *wallet.SignPolicyRefusedError
+		if errors.As(err, &policy) {
+			reason = ReasonPolicyRefused
+			p.alert(w, "sign-policy-refused", fmt.Sprintf("signing refused by the signing policy (rule %s); Lock released, request failed as %s", policy.Rule, ReasonPolicyRefused))
+		}
+		return p.releaseAndFail(ctx, w, store.StatusReserved, failure{reason: reason})
 	}
 	if errors.Is(err, wallet.ErrKeyVoided) {
 		log.Printf("withdrawal %s: its key was voided; the Reaper releases it", w.ID)
@@ -451,7 +458,7 @@ func (p *Pipeline) feeBump(ctx context.Context, w store.Withdrawal) error {
 }
 
 // bump asks wallet-service for the next Fee Bump version and stores it. At most MaxFeeBumps; then, or
-// when wallet-service refuses (fee ceiling, a Nonce Filler is the latest version), an ALERT.
+// when wallet-service refuses (fee ceiling, the signing policy, a Nonce Filler is the latest version), an ALERT.
 func (p *Pipeline) bump(ctx context.Context, w store.Withdrawal, vs []version) error {
 	n := len(vs) - 1 // Fee Bumps so far
 	if n >= p.maxBumps() {
@@ -459,7 +466,11 @@ func (p *Pipeline) bump(ctx context.Context, w store.Withdrawal, vs []version) e
 		return nil
 	}
 	rep, err := p.Signer.ReplaceHotWallet(ctx, w.Key(), n+1)
+	var policy *wallet.PolicyRefusedError
 	switch {
+	case errors.As(err, &policy):
+		p.alert(w, "bump-policy-refused", fmt.Sprintf("Fee Bump %d refused by the signing policy (rule %s): %v", n+1, policy.Rule, err))
+		return nil
 	case errors.Is(err, wallet.ErrReplaceCeiling):
 		p.alert(w, "bump-ceiling", fmt.Sprintf("underpriced, but Fee Bump %d would exceed wallet-service's fee ceiling: %v", n+1, err))
 		return nil

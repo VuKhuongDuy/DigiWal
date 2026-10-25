@@ -25,6 +25,8 @@ const (
 const (
 	CNWithdrawalService = "withdrawal-service"
 	CNSweeper           = "sweeper"
+	// CNHotCutover is the operator's Hot cutover tool (key-custody-hsm.md 5.5), whose drain txs are Hot signatures too.
+	CNHotCutover = "hot-cutover"
 )
 
 // Addresses are the tier addresses, lower case. Cold may be empty (no Cold address configured yet).
@@ -90,8 +92,10 @@ func imm(rule, sev string, d map[string]any) *finding.Violation {
 	return &finding.Violation{Rule: rule, Severity: sev, Immediate: true, Detail: d}
 }
 
-// NonceRef is the reference of T1.
-func NonceRef(chainID int64) string { return fmt.Sprintf("nonce:%d", chainID) }
+// NonceRef is the reference of T1: one per (chain, Hot address), since nonce state is per address.
+func NonceRef(chainID int64, hot string) string {
+	return fmt.Sprintf("nonce:%d:%s", chainID, strings.ToLower(hot))
+}
 
 // TxRef is the reference of a transaction sent by the Hot Wallet (T2, T4).
 func TxRef(chainID int64, hash string) string {
@@ -160,6 +164,8 @@ var SignerPolicy = map[string][]string{
 	"gas-topup:":  {CNSweeper},
 	"sweep:":      {CNSweeper},
 	"treasury:":   {CNSweeper, CNWithdrawalService},
+	// The Hot cutover drain (old Hot address -> new Hot address), signed once per cutover by the operator tool.
+	"hot-cutover:": {CNHotCutover},
 }
 
 // T3: every Hot signature has a known purpose and an allowed caller; a withdrawal key must belong to a request.

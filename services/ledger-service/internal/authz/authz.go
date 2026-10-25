@@ -21,6 +21,9 @@ const (
 	CNWithdrawalService = "withdrawal-service"
 	CNAPIGateway        = "api-gateway"
 	CNSweeper           = "sweeper"
+	// CNHotCutover is the operator's one-off Hot cutover tool (key-custody-hsm.md 5.5): it posts the gas of its drain
+	// transactions and can reach nothing else here.
+	CNHotCutover = "hot-cutover"
 )
 
 // ApplyCallers may call POST /v1/ledger/transactions: withdrawal-service only
@@ -28,9 +31,9 @@ const (
 var ApplyCallers = []string{CNWithdrawalService}
 
 // GasFeeReporters may call POST /v1/ledger/gas-fees (ledger.md invariant #12, task 1.9): the two services that
-// sign Hot Wallet txs. A separate allow-list from ApplyCallers on purpose: sweeper must stay unable to
+// sign Hot Wallet txs, and the operator's Hot cutover tool. A separate allow-list from ApplyCallers on purpose: sweeper must stay unable to
 // reach apply or the Lock/Settle/Release trio, and this endpoint's correction rules do not apply.
-var GasFeeReporters = []string{CNWithdrawalService, CNSweeper}
+var GasFeeReporters = []string{CNWithdrawalService, CNSweeper, CNHotCutover}
 
 // BalanceReaders may call GET /v1/ledger/balances/{user_id}: api-gateway only
 // (integration-contracts.md §2/§3, service-auth-mtls.md matrix). Read-only.

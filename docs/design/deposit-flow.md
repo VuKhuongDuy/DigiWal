@@ -291,20 +291,20 @@ concrete Confirmation Depth and Gas Top-Up numbers below.
    the Sweep's finality guarantee rides on the same Confirmation Depth
    the ledger credit already depends on, not a separate, weaker check.
 6. **A Sweep is signed by the user's own derived key, never a new key.**
-   `wallet-service` already holds the seed that derives every user
-   address — unchanged by `wallet-tiering.md`'s seed split, which only
-   separates the *Hot Wallet's* key from that seed. So signing a Sweep
-   needs no new key material; custody of "who can move a user's swept
-   funds" stays exactly where it already was. `sweeper` asks for the
-   signature, it never holds or derives the key itself.
-7. **`wallet-service` enforces server-side that a Sweep signing
+   The signer is **`sweep-signer`**, not `wallet-service`
+   (`key-custody-hsm.md` M3b): the only process that holds the
+   user-address Seed (opened from the vault by `hsm-gateway`, in RAM per
+   Sweep). `sweeper` asks for the signature, it never holds or derives
+   the key itself.
+7. **`sweep-signer` enforces server-side that a Sweep signing
    request's destination is always the Hot Wallet — it never trusts the
-   caller's `to_address`.** `POST /v1/sign/user-address` (the endpoint
+   caller's `to_address`** (pinned from `hsm-gateway`'s `GET /v1/hot/key`,
+   not from `wallet-service`). `POST /v1/sign/user-address` (the endpoint
    `sweeper` calls for the Sweep step, `docs/design/integration-contracts.md`
    §2) lets the caller pick *which user key* signs, by design — that's
    the whole point of the endpoint — but the destination is not
-   caller-controlled: `wallet-service` validates the request's
-   `to_address` against the Hot Wallet address itself before signing,
+   caller-controlled: `sweep-signer` validates the request's
+   `to_address` against the pinned Hot Wallet address itself before signing,
    rather than accepting whatever `sweeper` sends. This caps a
    compromised `sweeper`'s blast radius at "can move already-deposited,
    not-yet-swept user funds into the Hot Wallet," never to an arbitrary
@@ -342,7 +342,7 @@ concrete Confirmation Depth and Gas Top-Up numbers below.
     design in `compliance-screening.md`. Both `sweeper` and
     `ledger-service` check independently, since they each consume
     `deposits.confirmed` directly.
-12. **A user address's nonce for a Sweep transaction is sourced by
+12. **A user address's nonce for a Sweep transaction is sourced by (`sweep-signer` now, same live RPC read)
     `wallet-service` via a live `eth_getTransactionCount(address,
     "pending")` RPC call at signing time, not a DB-tracked counter.**
     **Decided (Tech Lead, 2026-09-30)** — approved as proposed, per Open

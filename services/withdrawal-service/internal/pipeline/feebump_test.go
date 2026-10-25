@@ -213,6 +213,15 @@ func TestFeeBumpRefusalsAreAlertsAndTransientErrorsRetryTheSameSeq(t *testing.T)
 			t.Fatalf("alerts %q", *a)
 		}
 	})
+	t.Run("signing policy refusal → its own ALERT with the rule id, not the ceiling", func(t *testing.T) {
+		r, a := setup(t)
+		r.signer.replaceErr = fmt.Errorf("wrapped: %w", &wallet.PolicyRefusedError{Rule: "P3-window-24h"})
+		_ = r.step()
+		if len(*a) != 1 || !strings.Contains((*a)[0], "signing policy") || !strings.Contains((*a)[0], "P3-window-24h") ||
+			strings.Contains((*a)[0], "ceiling") || len(r.txs(r.get("k"))) != 0 {
+			t.Fatalf("alerts %q", *a)
+		}
+	})
 	t.Run("refused (a Nonce Filler is the latest) → ALERT", func(t *testing.T) {
 		r, a := setup(t)
 		r.signer.replaceErr = fmt.Errorf("%w (409)", wallet.ErrReplaceRefused)

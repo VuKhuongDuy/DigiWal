@@ -16,6 +16,8 @@ var (
 	ErrNotCallers = errors.New("key belongs to another caller")
 	// ErrReplacementGap: replacement_seq is neither a stored one (a replay) nor the next one.
 	ErrReplacementGap = errors.New("replacement_seq is not the next one")
+	// ErrOtherHotKey: the key was signed by a different Hot address than the one signing now.
+	ErrOtherHotKey = errors.New("key was signed by another Hot address")
 	// ErrKeyCancelled: the latest version is a Nonce Filler; a Fee Bump must not undo it.
 	ErrKeyCancelled = errors.New("key was cancelled by a Nonce Filler")
 )
@@ -106,13 +108,13 @@ type VoidResult struct {
 // the key already has a signature (returned, nothing voided) or a tombstone is written and every
 // later sign for the key is refused (ErrKeyVoided) without allocating a nonce. Idempotent.
 // ErrNotCallers if the key was signed (or already voided) for another caller.
-func (s *Store) VoidHotKey(ctx context.Context, chainID int64, caller, key string, seedNonce func(context.Context) (uint64, error)) (VoidResult, error) {
+func (s *Store) VoidHotKey(ctx context.Context, chainID int64, hot, caller, key string, seedNonce func(context.Context) (uint64, error)) (VoidResult, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return VoidResult{}, fmt.Errorf("beginning tx: %w", err)
 	}
 	defer tx.Rollback(ctx)
-	if _, _, err := lockNonceRow(ctx, tx, chainID, seedNonce); err != nil {
+	if _, _, err := lockNonceRow(ctx, tx, chainID, hot, seedNonce); err != nil {
 		return VoidResult{}, err
 	}
 
@@ -177,14 +179,14 @@ type Built struct {
 // (a filler is how a gap is repaired). A caller is stopped by a freeze covering the nonce
 // (ErrNonceGapOpen), by another caller's key (ErrNotCallers) and by a Nonce Filler (ErrKeyCancelled).
 // For kind=cancel an existing cancel is returned as it is, so retrying the command only re-sends it.
-func (s *Store) ReplaceHotKey(ctx context.Context, chainID int64, caller, key string, seq int, kind string,
+func (s *Store) ReplaceHotKey(ctx context.Context, chainID int64, hot, caller, key string, seq int, kind string,
 	build func(ReplaceInput) (Built, error)) (Replacement, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return Replacement{}, fmt.Errorf("beginning tx: %w", err)
 	}
 	defer tx.Rollback(ctx)
-	_, frozen, err := lockNonceRow(ctx, tx, chainID, nil)
+	_, frozen, err := lockNonceRow(ctx, tx, chainID, hot, nil)
 	if err != nil {
 		return Replacement{}, err
 	}
@@ -192,8 +194,9 @@ func (s *Store) ReplaceHotKey(ctx context.Context, chainID int64, caller, key st
 	var n int64
 	var orig []byte
 	var owner *string
-	err = tx.QueryRow(ctx, `SELECT nonce, signed_raw_tx, caller_cn FROM hot_wallet_signatures WHERE idempotency_key = $1`, key).
-		Scan(&n, &orig, &owner)
+	var signedBy string
+	err = tx.QueryRow(ctx, `SELECT nonce, signed_raw_tx, caller_cn, hot_address FROM hot_wallet_signatures WHERE idempotency_key = $1`, key).
+		Scan(&n, &orig, &owner, &signedBy)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Replacement{}, ErrNotFound
 	}
@@ -202,6 +205,11 @@ func (s *Store) ReplaceHotKey(ctx context.Context, chainID int64, caller, key st
 	}
 	if caller != "" && (owner == nil || *owner != caller) {
 		return Replacement{}, ErrNotCallers
+	}
+	// A replacement is signed by the current Hot key: a key signed by another Hot address (a legacy
+	// one, before a cutover) lives in another nonce domain and cannot be replaced by this key.
+	if signedBy != hot {
+		return Replacement{}, ErrOtherHotKey
 	}
 	if caller != "" && frozen != nil && n >= *frozen {
 		return Replacement{}, ErrNonceGapOpen

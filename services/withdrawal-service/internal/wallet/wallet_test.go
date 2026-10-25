@@ -200,6 +200,23 @@ func TestReplaceHotWallet(t *testing.T) {
 			t.Errorf("%s: %v, want %v", name, err, tc.want)
 		}
 	}
+	// A 422 is the fee ceiling unless its body says policy_refused: that one carries the rule id and is
+	// never reported as a ceiling.
+	c = serve(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(422)
+		_, _ = w.Write([]byte(`{"error":"policy_refused","rule":"P3-window-24h"}`))
+	})
+	_, err = c.ReplaceHotWallet(context.Background(), "k", 1)
+	var pr *PolicyRefusedError
+	if !errors.Is(err, ErrReplacePolicyRefused) || errors.Is(err, ErrReplaceCeiling) || errors.Is(err, ErrReplaceRefused) || !errors.As(err, &pr) || pr.Rule != "P3-window-24h" {
+		t.Fatalf("policy_refused 422: %v", err)
+	}
+	for name, body := range map[string]string{"ceiling message": `{"error":"gas price above ceiling"}`, "not json": `oops`, "policy_refused-like text": `{"error":"policy_refused_not","rule":"x"}`} {
+		c = serve(t, func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(422); _, _ = w.Write([]byte(body)) })
+		if _, err := c.ReplaceHotWallet(context.Background(), "k", 1); !errors.Is(err, ErrReplaceCeiling) || errors.Is(err, ErrReplacePolicyRefused) {
+			t.Errorf("422 %s: %v, want the fee ceiling", name, err)
+		}
+	}
 	// 503 (a Nonce Gap freeze) and a wrong seq in the answer are transient/unusable, never "refused".
 	c = serve(t, func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(503) })
 	if _, err := c.ReplaceHotWallet(context.Background(), "k", 1); err == nil || errors.Is(err, ErrReplaceRefused) || errors.Is(err, ErrReplaceCeiling) {
@@ -239,5 +256,34 @@ func TestCancelHashes(t *testing.T) {
 	c = serve(t, func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(503) })
 	if _, err := c.CancelHashes(context.Background(), "k"); err == nil {
 		t.Fatal("a 503 must not read as 'no filler'")
+	}
+}
+
+// The sign path parses a 422 policy_refused body into a SignPolicyRefusedError that is still an
+// ErrSignRefused; every other 400/422 stays a plain ErrSignRefused.
+func TestSignHotWalletPolicyRefusal(t *testing.T) {
+	c := serve(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(422)
+		_, _ = w.Write([]byte(`{"error":"policy_refused","rule":"window_1h"}`))
+	})
+	_, _, err := c.SignHotWallet(context.Background(), SignRequest{IdempotencyKey: "k"})
+	var pr *SignPolicyRefusedError
+	if !errors.Is(err, ErrSignRefused) || !errors.As(err, &pr) || pr.Rule != "window_1h" || errors.Is(err, ErrReplacePolicyRefused) {
+		t.Fatalf("policy_refused 422: %v", err)
+	}
+	for name, tc := range map[string]struct {
+		code int
+		body string
+	}{
+		"422 other":       {422, `{"error":"gas price above ceiling"}`},
+		"422 not json":    {422, `oops`},
+		"400 with a rule": {400, `{"error":"policy_refused","rule":"x"}`},
+		"422 lookalike":   {422, `{"error":"policy_refused_not","rule":"x"}`},
+	} {
+		c = serve(t, func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(tc.code); _, _ = w.Write([]byte(tc.body)) })
+		_, _, err := c.SignHotWallet(context.Background(), SignRequest{IdempotencyKey: "k"})
+		if !errors.Is(err, ErrSignRefused) || errors.As(err, &pr) {
+			t.Errorf("%s: %v, want a plain ErrSignRefused", name, err)
+		}
 	}
 }

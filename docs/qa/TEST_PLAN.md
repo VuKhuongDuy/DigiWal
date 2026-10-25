@@ -53,7 +53,7 @@ After **every** e2e test the *invariant checker* (section 9) runs against Postgr
 | ACC-09 | `init-seed` run twice for a role | second refused, first seed untouched | Critical | UNIT |
 | ACC-10 | Service started with **no** hot-wallet seed / no RPC | `/v1/sign/*` → 503, never signs with the wrong seed; deposit-address still works | Critical | AUTO |
 | ACC-11 | `user_derivation` seed ≡ `hot_wallet` seed (operator mistake) | refused, or at minimum Hot Wallet address ≠ any user address (else sweeping = signing as hot wallet) | Critical | AUTO |
-| ACC-12 | Wrong / missing `MASTER_KEY_HEX`, tampered `sealed_seed` | fails closed at boot, no partial service | High | UNIT+AUTO |
+| ACC-12 | Wrong / missing key material (legacy software key), tampered sealed seed | fails closed at boot, no partial service | High | UNIT+AUTO |
 | ACC-13 | Mint user + API key (`POST /users`) returns key once; DB stores only hash; bad/missing/rotated key → 401; client-sent `user_id` ignored | — | Critical | BLK-GW |
 | ACC-14 | Ledger account lazily created on first deposit; 20 concurrent first deposits for a brand-new user | exactly one account row, balances sum correct | Critical | AUTO |
 | ACC-15 | Same user, ETH and token → two accounts; locks/balances independent | — | High | UNIT |
@@ -179,7 +179,7 @@ Meanwhile **QA found that `Apply(source_type=deposit)` already permits user→us
 | SEC-02 | TLS < 1.3, plain HTTP to mTLS port | High | AUTO |
 | SEC-03 | Plain listener exposes only `/healthz` (try `/v1/...` on :8080/:8081) | Critical | AUTO |
 | SEC-04 | `deposit-address` endpoints on wallet plain listener: unauthenticated by design? any host on the network can create addresses / enumerate users | High | AUTO (document) |
-| SEC-05 | Secrets never in logs: mnemonic, seed, `MASTER_KEY_HEX`, raw tx key; grep container logs after full run | Critical | AUTO |
+| SEC-05 | Secrets never in logs: mnemonic, seed, any key material, raw tx key; grep container logs after full run | Critical | AUTO |
 | SEC-06 | Hot wallet key cannot be used via user-address endpoint (user_id → hot index) | Critical | PROBE |
 | SEC-07 | Oversized bodies, deep JSON, unknown fields, duplicate keys | Medium | UNIT+AUTO |
 | SEC-08 | Slowloris / stalled client on every listener — **no `ReadHeaderTimeout` set** on any `http.Server` | High (P6) | AUTO → finding |

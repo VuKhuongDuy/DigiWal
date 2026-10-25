@@ -1,0 +1,89 @@
+# hsm-gateway for the e2e stack and for the dev stack (dev/Makefile layers this file too). It is INERT unless the
+# `hsm` compose profile is active (the Makefiles activate it only for SIGNER_BACKEND=pkcs11), so a stack started
+# without SIGNER_BACKEND is exactly what it was. Paths are relative to e2e/ (--project-directory).
+#
+# Host-side files, from `make hsm-setup` (infra/hsm/*.sh), in ${HSM_DIR:-./hsm-config} (gitignored):
+#   hsm-user-pin   the token user PIN (dev: a random value in a plain file, mode 0400, owner uid 10001 where the host is root)
+#   policy.yaml    Signing Policy, with the Hot address the ceremony printed
+#   callers.yaml   SHA-256 of the pinned caller leaves (wallet-service)
+# The token, the audit log and the PIN guard live in named volumes (a Docker Desktop host bind mount cannot hold
+# SoftHSM's files for uid 10001), chowned to uid 10001 once by hsm-perms. The signing port is never published here;
+# dev/nodes/vm2.yml publishes it on the WireGuard address only.
+services:
+  hsm-perms:
+    profiles: [hsm]
+    image: hsm-gateway:local
+    build:
+      context: ..
+      dockerfile: services/hsm-gateway/Dockerfile
+    user: "0:0"
+    entrypoint: ["chown", "-R", "10001:10001", "/var/lib/softhsm/tokens", "/var/lib/hsm-gateway/audit", "/var/lib/hsm-gateway/state"]
+    restart: "no"
+    # A one-off root job: it may chown the three volumes and nothing else (no network use, no other capability, nothing writable but the volumes).
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER]
+    security_opt: ["no-new-privileges:true"]
+    read_only: true
+    mem_limit: 32m
+    pids_limit: 16
+    network_mode: none
+    volumes:
+      - hsm_tokens:/var/lib/softhsm/tokens
+      - hsm_audit:/var/lib/hsm-gateway/audit
+      - hsm_state:/var/lib/hsm-gateway/state
+
+  hsm-gateway:
+    profiles: [hsm]
+    image: hsm-gateway:local
+    # No restart loop on a bad PIN: three tries, then it stays down (and the PIN guard refuses anyway).
+    restart: on-failure:3
+    environment:
+      PORT: "8080"
+      MTLS_ADDR: ":8443"
+      TLS_CERT_FILE: /certs/cert.pem
+      TLS_KEY_FILE: /certs/key.pem
+      TLS_CA_FILE: /certs/ca-cert.pem
+      CALLERS_FILE: /config/callers.yaml
+      POLICY_FILE: /config/policy.yaml
+      POLICY_REQUIRE_ROOT_OWNER: ${HSM_POLICY_REQUIRE_ROOT_OWNER:-false} # dev: the file belongs to whoever ran make
+      AUDIT_LOG_FILE: /var/lib/hsm-gateway/audit/audit.log
+      PIN_GUARD_FILE: /var/lib/hsm-gateway/state/pin-guard.json
+      HSM_PIN_FILE: /run/secrets/hsm-user-pin # a path, never the PIN itself
+      HSM_TOKEN_LABEL: digiwal-hot
+      HSM_KEY_LABEL: hot-key
+      HSM_POOL_SIZE: "4"
+    secrets:
+      - hsm-user-pin
+    volumes:
+      - ../infra/pki/out/hsm-gateway:/certs:ro
+      - ${HSM_DIR:-./hsm-config}/policy.yaml:/config/policy.yaml:ro
+      - ${HSM_DIR:-./hsm-config}/callers.yaml:/config/callers.yaml:ro
+      - hsm_tokens:/var/lib/softhsm/tokens
+      - hsm_audit:/var/lib/hsm-gateway/audit
+      - hsm_state:/var/lib/hsm-gateway/state
+    depends_on:
+      hsm-perms: {condition: service_completed_successfully}
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    read_only: true
+    tmpfs: ["/tmp:size=16m,mode=1777"]
+    mem_limit: 256m
+    memswap_limit: 256m # == mem_limit: the container cannot swap (the PIN and the unwrapped keys live in its memory)
+    pids_limit: 128
+    user: "10001:10001"
+    ulimits: {core: 0} # no core dump
+    # No curl or wget in the image: bash's /dev/tcp. /healthz is the plain listener (never published); mTLS port 8443 is the only one a peer reaches.
+    healthcheck:
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/8080 && printf 'GET /healthz HTTP/1.0\\r\\n\\r\\n' >&3 && head -n1 <&3 | grep -q ' 200'"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+secrets:
+  hsm-user-pin:
+    file: ${HSM_DIR:-./hsm-config}/hsm-user-pin
+
+volumes:
+  hsm_tokens:
+  hsm_audit:
+  hsm_state:

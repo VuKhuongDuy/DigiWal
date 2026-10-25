@@ -15,27 +15,188 @@ services:
       PORT: "8080"
       POSTGRES_DSN: postgres://custody:custody@postgres:5432/custody?sslmode=disable
       REDIS_ADDR: redis:6379
-      MASTER_KEY_HEX: ${MASTER_KEY_HEX:?set by 'make e2e'}
+      # LEGACY, software Hot Wallet only (the `make e2e` regression baseline, a !prod build): the variable below is the old software key,
+      # set only when the Makefile says the Hot Wallet is a software key (WALLET_SOFTWARE_HOT); with SIGNER_BACKEND=pkcs11 it is the empty
+      # string. wallet-service never holds the user_derivation seed (the vault, opened by hsm-gateway for sweep-signer, does).
+      MASTER_KEY_HEX: ${WALLET_SOFTWARE_HOT:+${MASTER_KEY_HEX}}
       TLS_CERT_FILE: /certs/cert.pem
       TLS_KEY_FILE: /certs/key.pem
       TLS_CA_FILE: /certs/ca-cert.pem
       RPC_URL: http://anvil:8545
       ASSETS_FILE: /config/assets.yaml
       TREASURY_FILE: /config/treasury.yaml   # wallet-service only, never mounted elsewhere
+      # Deposit addresses are issued from the Attested xpub, verified on every issuance against this pinned key (kept outside the
+      # database): the HSM's attestation key (pkcs11), or a dev attester's throwaway key (software). Unset = no new address (503).
+      XPUB_ATTEST_PUBKEY_FILE: ${XPUB_ATTEST_PUBKEY_FILE:-}
+      # software (default): the Hot Wallet is the hot_wallet seed. pkcs11: it is signed by hsm-gateway
+      # (docker-compose.hsm.yml, `make e2e-hsm`) and the hot_wallet seed is never loaded.
+      SIGNER_BACKEND: ${SIGNER_BACKEND:-software}
+      HSM_GATEWAY_URL: ${HSM_GATEWAY_URL:-https://hsm-gateway:8443}
     volumes:
       - ../infra/pki/out/wallet-service:/certs:ro
       - ./assets.yaml:/config/assets.yaml:ro
       - ../infra/treasury.yaml:/config/treasury.yaml:ro
-    ports: ["8080:8080", "8443:8443"]
+      - ${XPUB_PIN_HOST:-/dev/null}:/config/attest-pubkey:ro
+    ports: ["127.0.0.1:8080:8080", "127.0.0.1:8443:8443"] # loopback only; dev/nodes/vm3.yml re-publishes on the WireGuard address
     depends_on:
       postgres: {condition: service_healthy}
       redis: {condition: service_healthy}
+      anvil: {condition: service_healthy}
+    # Hardening (key-custody-hsm.md 5.6, checked by `make verify`): nothing writable but /tmp, no capabilities, no core dump, no container swap,
+    # a fixed uid (10003: the owner of its leaf key, infra/pki/leaf-uid.sh). It holds no key and no seed, only the leaf and the pinned attestation key.
+    user: "10003:10003"
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    read_only: true
+    tmpfs: ["/tmp:size=16m,mode=1777"]
+    mem_limit: 256m
+    memswap_limit: 256m
+    pids_limit: 256
+    ulimits: {core: 0}
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  # key-admin (key-custody-hsm.md M3c, docs/runbooks/dev-hsm-bringup.md): the one-off ceremony job. `init` creates the user_derivation seed,
+  # has hsm-gateway seal it (KEK in the HSM), attests the xpub and stores it; the rotation commands change the wrappers inside the HSM. It holds
+  # no key. Inert unless started by name (`make init`). Its image is built with the `prod` tag (the legacy MASTER_KEY commands are compiled out).
+  key-admin:
+    profiles: [keyadmin]
+    image: key-admin:local
+    build:
+      context: ..
+      dockerfile: services/wallet-service/Dockerfile
+      target: keyadmin
+    restart: "no"
+    environment:
+      POSTGRES_DSN: postgres://custody:custody@postgres:5432/custody?sslmode=disable
+      VAULT_DSN: postgres://svc_keyadmin@postgres:5432/custody?sslmode=disable
+      VAULT_DB_PASSWORD_FILE: /run/secrets/key-admin-db-password
+      TLS_CERT_FILE: /certs/cert.pem          # key-admin's own leaf: the one hsm-gateway pins for POST /v1/attest and /v1/vault/*
+      TLS_KEY_FILE: /certs/key.pem
+      TLS_CA_FILE: /certs/ca-cert.pem
+      HSM_GATEWAY_URL: ${HSM_GATEWAY_URL:-https://hsm-gateway:8443}
+      XPUB_ATTEST_PUBKEY_FILE: /config/attest-pubkey
+    volumes:
+      - ../infra/pki/out/key-admin:/certs:ro
+      - ${XPUB_PIN_HOST:-/dev/null}:/config/attest-pubkey:ro
+    secrets:
+      - key-admin-db-password
+    user: "10004:10004" # the owner of key-admin's leaf key and database password file
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    read_only: true
+    tmpfs: ["/tmp:size=8m,mode=1777"]
+    mem_limit: 128m
+    memswap_limit: 128m
+    pids_limit: 64
+    ulimits: {core: 0}
+
+  # The Hot cutover tool (key-custody-hsm.md 5.5, docs/runbooks/hot-cutover.md): a one-off, operator-run job, inert
+  # unless started by name (`make hot-cutover-<step>` runs it with `docker compose run`). It is the only thing that opens
+  # the legacy hot_wallet seed once the HSM backend exists, so it has its own image stage (never the wallet-service one),
+  # talks to hsm-gateway as wallet-service's pinned leaf and to the ledger as its own CN (hot-cutover: gas-fees only).
+  hot-cutover:
+    profiles: [cutover]
+    image: hot-cutover:local
+    build:
+      context: ..
+      dockerfile: services/wallet-service/Dockerfile
+      target: cutover
+    restart: "no"
+    environment:
+      POSTGRES_DSN: postgres://custody:custody@postgres:5432/custody?sslmode=disable
+      MASTER_KEY_HEX: ${MASTER_KEY_HEX:-}   # LEGACY: the Hot cutover opens the old software hot_wallet seed; only the cutover rehearsal sets it
+      RPC_URL: http://anvil:8545
+      ASSETS_FILE: /config/assets.yaml
+      TREASURY_FILE: /config/treasury.yaml
+      TLS_CERT_FILE: /certs/cert.pem          # wallet-service's leaf: the one hsm-gateway pins
+      TLS_KEY_FILE: /certs/key.pem
+      TLS_CA_FILE: /certs/ca-cert.pem
+      HSM_GATEWAY_URL: ${HSM_GATEWAY_URL:-https://hsm-gateway:8443}
+      LEDGER_SERVICE_URL: https://ledger-service:8443
+      LEDGER_TLS_CERT_FILE: /ledger-certs/cert.pem
+      LEDGER_TLS_KEY_FILE: /ledger-certs/key.pem
+      LEDGER_TLS_CA_FILE: /ledger-certs/ca-cert.pem
+    volumes:
+      - ../infra/pki/out/wallet-service:/certs:ro
+      - ../infra/pki/out/hot-cutover:/ledger-certs:ro
+      - ./assets.yaml:/config/assets.yaml:ro
+      - ../infra/treasury.yaml:/config/treasury.yaml:ro
+    user: "10003:10003" # presents wallet-service's leaf, so it runs as wallet-service's uid (infra/pki/leaf-uid.sh)
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    read_only: true
+    tmpfs: ["/tmp:size=8m,mode=1777"]
+    mem_limit: 128m
+    memswap_limit: 128m
+    pids_limit: 64
+    ulimits: {core: 0}
+
+  # sweep-signer (key-custody-hsm.md M3b, K10): the ONLY place the user_derivation Seed exists in plaintext. It signs Sweeps (user key -> Hot
+  # Wallet) for sweeper and nothing else. Hardened as part of the invariant (16) and checked by `make verify`: a static binary on `scratch`
+  # (no shell, no package manager), read-only root, no capabilities, no-new-privileges, fixed non-root uid, no core dump, no swap
+  # (memswap_limit == mem_limit), small memlock for the one Seed page, no published port (reachable on the compose network only, mTLS,
+  # CN sweeper, pinned leaf). Its two secrets are FILES under /run/secrets, never environment, never in this file.
+  #   host files, from `make sweep-setup` in ${SWEEP_DIR:-./sweep-config} (gitignored):
+  #     db-password    the password of the least-privilege role svc_sweepsigner (infra/postgres/sweep-signer-role.sql)
+  #     callers.yaml   SHA-256 of sweeper's leaf (the pin)
+  sweep-signer:
+    image: sweep-signer:local
+    build:
+      context: ..
+      dockerfile: services/sweep-signer/Dockerfile
+      args:
+        TAGS: ${SWEEP_SIGNER_TAGS:-}
+    restart: on-failure:5
+    environment:
+      PORT: "8080"
+      POSTGRES_DSN: postgres://svc_sweepsigner@postgres:5432/custody?sslmode=disable
+      POSTGRES_PASSWORD_FILE: /run/secrets/sweep-signer-db-password
+      RPC_URL: http://anvil:8545
+      ASSETS_FILE: /config/assets.yaml
+      TLS_CERT_FILE: /certs/cert.pem
+      TLS_KEY_FILE: /certs/key.pem
+      TLS_CA_FILE: /certs/ca-cert.pem
+      CALLERS_FILE: /config/callers.yaml
+      # gateway: the Hot address is pinned from hsm-gateway GET /v1/hot/key (production, and every stack whose Hot Key is in the HSM).
+      # wallet-service: DEV profile only (a software Hot Wallet has no gateway); compiled out of a TAGS=prod image.
+      HOT_SOURCE: ${SWEEP_HOT_SOURCE:-wallet-service}
+      HSM_GATEWAY_URL: ${HSM_GATEWAY_URL:-https://hsm-gateway:8443}
+      WALLET_SERVICE_URL: https://wallet-service:8443
+      AUDIT_INTERVAL: ${SWEEP_AUDIT_INTERVAL:-5s}
+    secrets:
+      - sweep-signer-db-password
+    volumes:
+      - ../infra/pki/out/sweep-signer:/certs:ro
+      - ./assets.yaml:/config/assets.yaml:ro
+      - ${SWEEP_DIR:-./sweep-config}/callers.yaml:/config/callers.yaml:ro
+    healthcheck:
+      test: ["CMD", "/service", "healthcheck"]
+      interval: 3s
+      timeout: 3s
+      retries: 40
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    read_only: true
+    user: "10002:10002"
+    mem_limit: 64m
+    memswap_limit: 64m
+    pids_limit: 64
+    ulimits:
+      core: 0
+      memlock: {soft: 65536, hard: 65536}
+    depends_on:
+      postgres: {condition: service_healthy}
       anvil: {condition: service_healthy}
 
   ledger-service:
     build:
       context: ..
       dockerfile: services/ledger-service/Dockerfile
+    user: "10010:10010" # fixed uid = the owner of its leaf key (infra/pki/leaf-uid.sh)
     environment:
       PORT: "8080"
       POSTGRES_DSN: postgres://custody:custody@postgres:5432/ledger?sslmode=disable
@@ -58,6 +219,7 @@ services:
     build:
       context: ..
       dockerfile: services/chain-watcher/Dockerfile
+    user: "10013:10013" # fixed uid = the owner of its leaf key (infra/pki/leaf-uid.sh)
     environment:
       PORT: "8080"
       POSTGRES_DSN: postgres://custody:custody@postgres:5432/chain_watcher?sslmode=disable
@@ -85,6 +247,7 @@ services:
     build:
       context: ..
       dockerfile: services/sweeper/Dockerfile
+    user: "10014:10014" # fixed uid = the owner of its leaf key (infra/pki/leaf-uid.sh)
     environment:
       PORT: "8080"
       KAFKA_BROKERS: kafka:9092
@@ -92,6 +255,7 @@ services:
       ASSETS_FILE: /config/assets.yaml
       SCREENING_FILE: /config/screening.yaml
       WALLET_SERVICE_URL: https://wallet-service:8443
+      SWEEP_SIGNER_URL: https://sweep-signer:8443       # Sweeps are signed here (M3b), the only holder of the user_derivation seed
       LEDGER_SERVICE_URL: https://ledger-service:8443   # its Gas Fees (task 2.8)
       TLS_CERT_FILE: /certs/cert.pem
       TLS_KEY_FILE: /certs/key.pem
@@ -105,6 +269,7 @@ services:
       kafka: {condition: service_healthy}
       anvil: {condition: service_healthy}
       ledger-service: {condition: service_started}
+      sweep-signer: {condition: service_healthy}
 
   history-service:
     build:
@@ -123,6 +288,7 @@ services:
     build:
       context: ..
       dockerfile: services/api-gateway/Dockerfile
+    user: "10011:10011" # fixed uid = the owner of its leaf key (infra/pki/leaf-uid.sh)
     environment:
       PORT: "8080"
       POSTGRES_DSN: postgres://custody:custody@postgres:5432/api_gateway?sslmode=disable
@@ -144,6 +310,7 @@ services:
     build:
       context: ..
       dockerfile: services/withdrawal-service/Dockerfile
+    user: "10012:10012" # fixed uid = the owner of its leaf key (infra/pki/leaf-uid.sh)
     environment:
       PORT: "8080"
       POSTGRES_DSN: postgres://custody:custody@postgres:5432/withdrawal?sslmode=disable
@@ -175,3 +342,9 @@ services:
       anvil: {condition: service_healthy}
       ledger-service: {condition: service_started}
       wallet-service: {condition: service_started}  # it retries system-addresses until wallet-service answers
+
+secrets:
+  key-admin-db-password:
+    file: ${SWEEP_DIR:-./sweep-config}/keyadmin-db-password
+  sweep-signer-db-password:
+    file: ${SWEEP_DIR:-./sweep-config}/db-password
