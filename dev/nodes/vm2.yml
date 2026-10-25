@@ -57,6 +57,8 @@ services:
     environment:
       POSTGRES_DSN: postgres://svc_gateway:${SVC_GATEWAY_PASSWORD}@postgres:5432/api_gateway?sslmode=disable
       WITHDRAWAL_SERVICE_URL: https://withdrawal-service:8446
+      REDIS_ADDR: 10.10.0.2:6379 # redis on vm3, over WireGuard; if it is unreachable the gateway falls back to in-memory limits
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?run make env}
     extra_hosts: ["wallet-service:10.10.0.2", "withdrawal-service:10.10.0.2"]
     ports: !override ["10.10.0.1:8084:8080", "127.0.0.1:8084:8080"] # never on the public interface (invariant 8)
     mem_limit: 500m

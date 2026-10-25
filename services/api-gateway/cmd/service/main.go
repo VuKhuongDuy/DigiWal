@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -16,6 +17,7 @@ import (
 	"digiwal/services/api-gateway/internal/api"
 	"digiwal/services/api-gateway/internal/obs"
 	"digiwal/services/api-gateway/internal/store"
+	"github.com/redis/go-redis/v9"
 )
 
 func main() {
@@ -43,6 +45,26 @@ func main() {
 		Withdrawals: &api.WithdrawalClient{BaseURL: requireEnv("WITHDRAWAL_SERVICE_URL"),
 			HTTP: &http.Client{Timeout: 15 * time.Second, Transport: &http.Transport{TLSClientConfig: tlsCfg}}},
 	}
+	// Rate limits, requests per minute; 0 disables. In-memory and per instance by default; with
+	// REDIS_ADDR the budget is shared across instances, falling back to the in-memory limiter
+	// (fail-open) whenever Redis errors.
+	var rdb *redis.Client
+	if addr := os.Getenv("REDIS_ADDR"); addr != "" {
+		rdb = redis.NewClient(&redis.Options{Addr: addr, Password: os.Getenv("REDIS_PASSWORD"), MaxRetries: -1, DialTimeout: 100 * time.Millisecond})
+		defer rdb.Close()
+	}
+	newLimiter := func(prefix string, perMin int) api.RateLimiter {
+		if perMin <= 0 {
+			return nil
+		}
+		local := api.NewLimiter(perMin, time.Minute)
+		if rdb == nil {
+			return local
+		}
+		return &api.RedisLimiter{Client: rdb, Prefix: "ratelimit:" + prefix + ":", Limit: perMin, Window: time.Minute, Fallback: local}
+	}
+	s.IPLimit = newLimiter("ip", envInt("RATE_LIMIT_IP_PER_MIN", 1200))
+	s.UserLimit = newLimiter("user", envInt("RATE_LIMIT_USER_PER_MIN", 600))
 	// Metrics: their own internal port, never the public listener (monitoring-dashboard.md invariant 6).
 	reg := metrics.NewRegistry()
 	reg.MustRegister(obs.Collector(st), metrics.PoolCollector("api-gateway", func() metrics.PoolStat { return metrics.PoolFromPgx(st.Pool().Stat()) }))
@@ -73,6 +95,18 @@ func requireEnv(key string) string {
 		log.Fatalf("required env var %s is not set", key)
 	}
 	return v
+}
+
+func envInt(key string, def int) int {
+	v := os.Getenv(key)
+	if v == "" {
+		return def
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 0 {
+		log.Fatalf("env var %s must be a non-negative integer, got %q", key, v)
+	}
+	return n
 }
 
 func envOr(key, def string) string {

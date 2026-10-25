@@ -18,6 +18,8 @@ services:
       LEDGER_SERVICE_URL: ${LEDGER_SERVICE_URL:-https://ledger-service:8443}
       # Withdrawals and the whitelist, over mTLS as CN=api-gateway (same certs).
       WITHDRAWAL_SERVICE_URL: ${WITHDRAWAL_SERVICE_URL:-https://withdrawal-service:8443}
+      # Shared rate-limit budget; the gateway falls back to its in-memory limiter if Redis errors.
+      REDIS_ADDR: redis:6379
       TLS_CERT_FILE: /certs/cert.pem
       TLS_KEY_FILE: /certs/key.pem
       TLS_CA_FILE: /certs/ca-cert.pem
