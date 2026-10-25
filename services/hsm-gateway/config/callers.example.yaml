@@ -1,0 +1,12 @@
+# Pinned callers (key-custody-hsm.md invariant 25, K15). A client certificate must chain to the project CA AND
+# be exactly one of these leaves (SHA-256 of the DER), under the CN listed. Root-owned, read-only mount.
+#   hsm-gateway fingerprint infra/pki/out/wallet-service/cert.pem
+#   openssl x509 -in cert.pem -noout -fingerprint -sha256
+# Rotating a caller's certificate means adding the new fingerprint here and restarting the gateway.
+callers:
+  - cn: wallet-service
+    sha256: "0000000000000000000000000000000000000000000000000000000000000000"   # REPLACE
+  # - cn: sweep-signer
+  #   sha256: "..."
+  # - cn: auditor
+  #   sha256: "..."

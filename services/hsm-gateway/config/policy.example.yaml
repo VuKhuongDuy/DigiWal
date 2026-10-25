@@ -1,0 +1,37 @@
+# Signing Policy for hsm-gateway (docs/design/key-custody-hsm.md invariant 4).
+# Root-owned, mounted read-only into the hsm-gateway container ONLY. Its SHA-256 is logged at start and
+# in every audit entry. Editing it means restarting the gateway; there is no hot reload.
+#
+# Amounts are quoted decimal strings in wei / token minor units. Every cap below is REQUIRED (there is no
+# "unlimited" default): a missing cap fails the start. 0 means "nothing allowed".
+#
+# The numbers here follow the example scale of infra/assets.yaml (hot_floor 30 ETH, hot_ceiling 120 ETH):
+#   window_1h  = hot_floor / 3   (design 4.1: PROPOSED rule)
+#   window_24h = hot_ceiling
+#   max_per_tx = one peak hour of withdrawals (5 ETH/hour in that example)
+# Tune them with real load data, the same way as the Hot Floor/Ceiling.
+
+enabled: true                 # kill switch: false refuses every Sign Intent (restart to apply)
+chain_id: 31337               # the single pinned chain
+hot_address: "0x0000000000000000000000000000000000000001"   # REPLACE: printed by `init-token`; the HSM key must match it
+warm_address: "0x0000000000000000000000000000000000000002"  # REPLACE: Treasury Sweep destination (treasury.yaml); omit to disable the class
+denied_recipients: []         # addresses no payout may ever go to
+# fee_ceiling_wei: "50000000000"   # default 50 gwei (the existing decided DefaultFeeCeiling)
+# rate_per_minute: 120             # default 120 signatures/minute
+
+native:
+  # gas_cap: 21000                       # default
+  max_per_tx: "5000000000000000000"          # 5 ETH
+  treasury_max_per_tx: "120000000000000000000"  # up to the Hot Ceiling; Treasury Sweeps do not consume the windows
+  window_1h: "10000000000000000000"          # 10 ETH  (hot_floor / 3)
+  window_24h: "120000000000000000000"        # 120 ETH (hot_ceiling); also counts worst-case fees (gas * max_fee)
+
+tokens: []
+# tokens:
+#   - symbol: TT
+#     contract: "0x5FbDB2315678afecb367f032d93F642f64180aa3"
+#     # gas_cap: 100000                    # default
+#     max_per_tx: "1000000000000000000000"
+#     treasury_max_per_tx: "4000000000000000000000"
+#     window_1h: "333000000000000000000"
+#     window_24h: "4000000000000000000000"
