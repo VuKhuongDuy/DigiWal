@@ -4,3 +4,22 @@ bin/
 
 # Per-service leaf certs/keys (infra/pki/gen-leaf.sh). The CA key lives outside the repo.
 infra/pki/out/
+
+# Dev / e2e hsm-gateway host files (PIN, policy, callers): infra/hsm/prepare.sh, make hsm-setup
+e2e/hsm-config/
+dev/hsm/
+
+# sweep-signer host files (master-key, db-password, callers.yaml): make sweep-setup. Secrets: never committed.
+e2e/sweep-config/
+dev/sweep-config/
+
+# Secrets and key material by name, wherever they land (key-custody-hsm.md invariants 26-27, M4): the CA key, the HSM user PIN, the PIN guard, the
+# audit log, the verify bookkeeping, leaf keys. A copied-out directory or a stray file must not be committable either.
+ca-key.pem
+.digiwal-ca/
+hsm-user-pin
+pin-guard.json
+audit.log
+.verify-audit-head
+**/db-password
+**/keyadmin-db-password

@@ -152,3 +152,99 @@ groups:
         annotations:
           summary: "{{ $labels.service }}: database pool over 80% in use"
           description: "Objective: pool saturation below 80%."
+
+  # Key custody (docs/design/key-custody-hsm.md 5.6, M4). A policy refusal, a vault integrity refusal and a Sweep refusal are never "normal":
+  # each is a request the policy or an invariant said no to, so any one is worth a look. The `or ... unless ... offset` half catches the FIRST
+  # increment of a counter series that did not exist before (increase() alone misses it, a label set appears only when it first happens).
+  - name: key-custody
+    rules:
+      - alert: HsmPolicyRefusal
+        expr: >-
+          increase(digiwal_hsm_gateway_policy_refusals_total[10m]) > 0
+          or digiwal_hsm_gateway_policy_refusals_total unless digiwal_hsm_gateway_policy_refusals_total offset 10m
+        labels: {severity: critical}
+        annotations:
+          summary: "hsm-gateway refused to sign (policy rule {{ $labels.rule }})"
+          description: "The Signing Policy said no. Read the audit log entry for the rule and caller; raise a limit by editing the policy and restarting, or leave the request failed."
+      - alert: HsmGatewayDown
+        expr: up{service="hsm-gateway"} == 0
+        for: 1m
+        labels: {severity: critical}
+        annotations:
+          summary: "hsm-gateway is down: no Hot signing, no unseal"
+          description: "Also what a wrong PIN or a tripped PIN guard looks like (it exits and, with on-failure:3, stays down; never loop it: see the container log for 'ALERT HSM login refused'). Fix the secret file or investigate the guard before restarting."
+      - alert: HsmSelfTestFailing
+        expr: digiwal_hsm_gateway_self_test_ok == 0
+        for: 1m
+        labels: {severity: critical}
+        annotations:
+          summary: "hsm-gateway's self-test fails: it is not serving signatures"
+          description: "The periodic sign-and-recover check failed (wrong address, wrong v, key swapped or token unavailable). Investigate before re-enabling; a changed Hot address is never accepted without a cutover."
+      - alert: HsmNotServing
+        expr: increase(digiwal_hsm_gateway_sign_total{result="not_serving"}[5m]) > 0
+        labels: {severity: warning}
+        annotations:
+          summary: "hsm-gateway answered a sign request while not serving"
+          description: "Callers are being refused (self-test failed, kill switch enabled=false, or audit log unhealthy)."
+      - alert: HsmAuditWriteFailure
+        expr: >-
+          increase({__name__=~"digiwal_hsm_gateway_(sign|attest|vault)_total", result=~".*audit_error"}[5m]) > 0
+          or {__name__=~"digiwal_hsm_gateway_(sign|attest|vault)_total", result=~".*audit_error"} unless {__name__=~"digiwal_hsm_gateway_(sign|attest|vault)_total", result=~".*audit_error"} offset 5m
+        labels: {severity: critical}
+        annotations:
+          summary: "hsm-gateway could not write its audit log ({{ $labels.__name__ }}, {{ $labels.result }})"
+          description: "No signature is given without an audit line, so signing has stopped. Free disk space or repair the audit volume; the log is append-only."
+      - alert: HsmVaultIntegrityRefusal
+        expr: >-
+          increase(digiwal_hsm_gateway_vault_total{result=~".*(authentication_failed|caller_not_allowed|purpose_mismatch)"}[10m]) > 0
+          or digiwal_hsm_gateway_vault_total{result=~".*(authentication_failed|caller_not_allowed|purpose_mismatch)"} unless digiwal_hsm_gateway_vault_total{result=~".*(authentication_failed|caller_not_allowed|purpose_mismatch)"} offset 10m
+        labels: {severity: critical}
+        annotations:
+          summary: "hsm-gateway vault: {{ $labels.result }}"
+          description: "A tampered row, or an unseal/seal from a CN that must not ask. Treat as a possible sweep-signer or database compromise until explained."
+      - alert: HsmVaultUnsealRateHigh
+        expr: sum(increase(digiwal_hsm_gateway_vault_total{result=~"unseal_ok|unseal_rate_limited"}[1m])) > 48
+        labels: {severity: warning}
+        annotations:
+          summary: "Seed unseals at {{ $value }} per minute (the gateway caps at 60, VAULT_UNSEAL_PER_MIN)"
+          description: "Over 80% of the cap (initial; tune to the real Sweep rate). A rate_limited refusal means the cap was reached: sweeps are being delayed or something is draining the Seed."
+      - alert: HsmMaintenanceWindowLong
+        expr: digiwal_hsm_gateway_maintenance_window_open_seconds > 15 * 60
+        labels: {severity: warning}
+        annotations:
+          summary: "A Maintenance Window has been open for {{ $value | humanizeDuration }}"
+          description: "KEK administration is allowed while it is open. Close it with `make maintenance-close` on the gateway node (it also expires on its own after at most 1 h)."
+      - alert: SweepSignerRefusal
+        expr: >-
+          increase(sweep_signer_refusals_total[10m]) > 0
+          or sweep_signer_refusals_total unless sweep_signer_refusals_total offset 10m
+        labels: {severity: critical}
+        annotations:
+          summary: "sweep-signer refused a Sweep (rule {{ $labels.rule }})"
+          description: "A request broke one of the Sweep invariants (destination, asset, index, amount). The sweeper is not the only thing that can have asked: check the ALERT line in sweep-signer's log."
+      - alert: SweepSignerFrozen
+        expr: sweep_signer_signing_frozen == 1
+        for: 1m
+        labels: {severity: critical}
+        annotations:
+          summary: "sweep-signer has frozen all signing (Address Audit mismatch)"
+          description: "A deposit address no longer re-derives from the Seed. Do not restart it to clear the freeze; investigate wallet_addresses and the xpub first (it stays frozen on purpose)."
+      - alert: SweepSignerAddressAuditMismatch
+        expr: increase(sweep_signer_audit_mismatches_total[15m]) > 0
+        labels: {severity: critical}
+        annotations:
+          summary: "sweep-signer's Address Audit found a mismatch"
+          description: "wallet_addresses holds an address the Seed does not derive (database tampered, or a wrong xpub was attested)."
+      - alert: SweepSignerSeedNotLocked
+        expr: increase(sweep_signer_seed_pages_unlocked_total[10m]) > 0
+        labels: {severity: warning}
+        annotations:
+          summary: "sweep-signer could not mlock the Seed page"
+          description: "RLIMIT_MEMLOCK is too low or the host refuses: the Seed page may reach swap. Check the memlock ulimit in the compose file and that swap is off."
+      - alert: HotSignerBreakerOpen
+        expr: digiwal_hot_signer_breaker_open == 1
+        for: 1m
+        labels: {severity: critical}
+        annotations:
+          summary: "wallet-service's Hot signer circuit breaker has been open for a minute"
+          description: "hsm-gateway keeps failing (down, WireGuard, bad certificate, HSM error). Withdrawals stay reserved, Gas Top-Ups and Sweeps wait. See hsm-gateway's log and HsmGatewayDown."

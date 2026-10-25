@@ -61,21 +61,22 @@ type Chain interface {
 
 type Store interface {
 	LookupHotSignature(ctx context.Context, caller, key, requestHash string) (storage.HotSignature, error)
-	SignHotWallet(ctx context.Context, chainID int64, caller, key, requestHash string,
+	SignHotWallet(ctx context.Context, chainID int64, hot, caller, key, requestHash string,
 		seedNonce func(context.Context) (uint64, error), sign func(nonce uint64) ([]byte, error)) (storage.HotSignature, error)
 	GetHotKey(ctx context.Context, caller, key string) (storage.HotKey, error)
-	VoidHotKey(ctx context.Context, chainID int64, caller, key string, seedNonce func(context.Context) (uint64, error)) (storage.VoidResult, error)
-	ReplaceHotKey(ctx context.Context, chainID int64, caller, key string, seq int, kind string,
+	VoidHotKey(ctx context.Context, chainID int64, hot, caller, key string, seedNonce func(context.Context) (uint64, error)) (storage.VoidResult, error)
+	ReplaceHotKey(ctx context.Context, chainID int64, hot, caller, key string, seq int, kind string,
 		build func(storage.ReplaceInput) (storage.Built, error)) (storage.Replacement, error)
 }
 
 type Signer struct {
 	store   Store
-	wallet  *hdwallet.Wallet
+	hot     HotBackend
 	chain   Chain
 	assets  Assets
 	chainID int64
 	from    common.Address
+	hotKey  string // lower-case hex of from: the key of the Hot nonce state (invariant 24)
 	// feeCeiling is the hard cap on max fee per gas of any Fee Bump or Nonce Filler (invariant #21).
 	feeCeiling *big.Int
 }
@@ -90,19 +91,33 @@ func (s *Signer) WithFeeCeiling(wei *big.Int) *Signer {
 	return s
 }
 
-// New checks that the configured RPC really is the chain we were told it is, and
-// pins the Hot Wallet address. Only that one chain_id is ever signed for.
-func New(ctx context.Context, store Store, hot *hdwallet.Wallet, chain Chain, assets Assets) (*Signer, error) {
+// New is NewWithHot over the software backend: the Hot key is hot's key at hdwallet.HotWalletIndex
+// (dev profile and tests).
+func New(ctx context.Context, store Store, hot Backend, chain Chain, assets Assets) (*Signer, error) {
+	return NewWithHot(ctx, store, SoftwareHot(hot, hdwallet.HotWalletIndex), chain, assets)
+}
+
+// NewWithHot checks that the configured RPC really is the chain we were told it is (and the chain
+// the key's backend is pinned to, if it says), and pins the Hot Wallet address. Only that one
+// chain_id is ever signed for.
+func NewWithHot(ctx context.Context, store Store, hot HotBackend, chain Chain, assets Assets) (*Signer, error) {
 	id, err := chain.ChainID(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("reading chain id from RPC: %w", err)
 	}
-	addr, err := hot.AddressAt(hdwallet.HotWalletIndex)
+	if p, ok := hot.(pinnedChain); ok && p.PinnedChainID() != id.Uint64() {
+		return nil, fmt.Errorf("the Hot key backend is pinned to chain %d but the RPC is chain %d", p.PinnedChainID(), id)
+	}
+	addr, err := hot.HotAddress(ctx)
 	if err != nil {
 		return nil, err
 	}
-	return &Signer{store: store, wallet: hot, chain: chain, assets: assets, chainID: id.Int64(), from: common.HexToAddress(addr), feeCeiling: DefaultFeeCeiling}, nil
+	return &Signer{store: store, hot: hot, chain: chain, assets: assets, chainID: id.Int64(), from: addr,
+		hotKey: strings.ToLower(addr.Hex()), feeCeiling: DefaultFeeCeiling}, nil
 }
+
+// HotKey is the lower-case hex Hot address that keys the nonce state.
+func (s *Signer) HotKey() string { return s.hotKey }
 
 // ChainID is the chain this signer signs for (read from the RPC at startup).
 func (s *Signer) ChainID() int64 { return s.chainID }
@@ -125,17 +140,21 @@ func (s *Signer) Sign(ctx context.Context, caller string, req Request) (Response
 		return Response{}, err
 	}
 
+	// A known-down signer fails fast, before any RPC and before the DB lock (invariant 6a).
+	if err := s.hot.Available(); err != nil {
+		return Response{}, err
+	}
+
 	// Everything that needs the network happens before we touch the nonce.
 	body, err := buildBody(ctx, s.chain, s.from, to, amount, asset, maxGas)
 	if err != nil {
 		return Response{}, err
 	}
 
-	sig, err := s.store.SignHotWallet(ctx, s.chainID, caller, req.IdempotencyKey, hash,
+	meta := HotMeta{Operation: OpPayout, IdempotencyKey: req.IdempotencyKey, Caller: caller}
+	sig, err := s.store.SignHotWallet(ctx, s.chainID, s.hotKey, caller, req.IdempotencyKey, hash,
 		func(ctx context.Context) (uint64, error) { return s.chain.PendingNonceAt(ctx, s.from) },
-		func(nonce uint64) ([]byte, error) {
-			return signTx(s.wallet, hdwallet.HotWalletIndex, s.chainID, nonce, body)
-		})
+		func(nonce uint64) ([]byte, error) { return s.signHot(ctx, meta, nonce, body) })
 	if err != nil {
 		return Response{}, err
 	}
@@ -233,14 +252,28 @@ func buildBody(ctx context.Context, chain Chain, from, to common.Address, amount
 	return b, nil
 }
 
-func signTx(w *hdwallet.Wallet, index uint32, chainID int64, nonce uint64, b txBody) ([]byte, error) {
+// signHot signs a Hot Wallet transaction with the Hot backend and re-verifies the result: the
+// recovered sender must equal the pinned Hot address, or nothing is returned (and so nothing is
+// stored and no nonce consumed). This is the wallet-side half of invariant 5.
+func (s *Signer) signHot(ctx context.Context, meta HotMeta, nonce uint64, b txBody) ([]byte, error) {
 	unsigned := types.NewTx(&types.DynamicFeeTx{
-		ChainID: big.NewInt(chainID), Nonce: nonce, GasTipCap: b.tip, GasFeeCap: b.cap_,
+		ChainID: big.NewInt(s.chainID), Nonce: nonce, GasTipCap: b.tip, GasFeeCap: b.cap_,
 		Gas: b.gas, To: &b.to, Value: b.value, Data: b.data,
 	})
-	signed, err := w.SignTxAt(index, unsigned, big.NewInt(chainID))
+	signed, err := s.hot.SignHotTx(ctx, unsigned, big.NewInt(s.chainID), meta)
 	if err != nil {
-		return nil, fmt.Errorf("signing: %w", err)
+		var pr *PolicyRefusedError
+		if errors.As(err, &pr) || errors.Is(err, ErrSignerUnavailable) || errors.Is(err, ErrInvalidRequest) {
+			return nil, err
+		}
+		return nil, fmt.Errorf("%w: %v", ErrSignerUnavailable, err)
+	}
+	sender, err := types.Sender(types.LatestSignerForChainID(big.NewInt(s.chainID)), signed)
+	if err != nil || sender != s.from {
+		return nil, ErrSenderMismatch
+	}
+	if signed.Nonce() != nonce {
+		return nil, fmt.Errorf("%w: signed nonce %d, asked for %d", ErrSignerUnavailable, signed.Nonce(), nonce)
 	}
 	return signed.MarshalBinary()
 }

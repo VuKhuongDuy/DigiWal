@@ -57,7 +57,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("configuring mTLS client: %v", err)
 	}
-	rdb := redis.NewClient(&redis.Options{Addr: envOr("REDIS_ADDR", "localhost:6379")})
+	rdb := redis.NewClient(&redis.Options{Addr: envOr("REDIS_ADDR", "localhost:6379"), Password: os.Getenv("REDIS_PASSWORD")})
 	defer rdb.Close()
 	res := resolver.New(rdb,
 		&http.Client{Timeout: 10 * time.Second, Transport: &http.Transport{TLSClientConfig: tlsCfg}},

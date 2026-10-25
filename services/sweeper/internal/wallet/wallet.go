@@ -1,6 +1,8 @@
-// Package wallet is sweeper's mTLS client for wallet-service's two signing endpoints, with
-// sweeper's own certificate (CN=sweeper, service-auth-mtls.md). It sorts every failure into
-// the classes the sweep logic needs: an answer, "retry later", or "this can never work".
+// Package wallet is sweeper's mTLS client for the two signers, with sweeper's own certificate
+// (CN=sweeper, service-auth-mtls.md): wallet-service for the Hot Wallet (Gas Top-Ups, the Hot address) and, since
+// key-custody-hsm.md M3b, sweep-signer for the Sweep (POST /v1/sign/user-address, the same request and response
+// as before; only the target moved). It sorts every failure into the classes the sweep logic needs: an answer,
+// "retry later", or "this can never work".
 package wallet
 
 import (
@@ -24,14 +26,17 @@ import (
 var (
 	// ErrBelowGas: a native "max" Sweep has nothing left after reserving its own gas — dust.
 	ErrBelowGas = errors.New("balance does not cover the sweep's gas")
-	// ErrPermanent: wallet-service refused in a way retrying cannot fix (bad request, unknown
+	// ErrPermanent: the signer refused in a way retrying cannot fix (bad request, unknown
 	// user or asset, destination not the Hot Wallet, key reused with a different request).
 	ErrPermanent = errors.New("wallet-service refused the request")
 )
 
 type Client struct {
-	BaseURL string
-	HTTP    *http.Client
+	BaseURL string // wallet-service
+	// SweepSignerURL is sweep-signer (https://sweep-signer:8443): the only holder of the user_derivation seed. The Sweep
+	// signature is asked of it and of nothing else; wallet-service has no such endpoint any more.
+	SweepSignerURL string
+	HTTP           *http.Client
 }
 
 type HotRequest struct {
@@ -64,12 +69,12 @@ func (c *Client) SignHotWallet(ctx context.Context, req HotRequest) ([]byte, uin
 	return raw, out.Nonce, err
 }
 
-// SignUserAddress: POST /v1/sign/user-address (the Sweep: user address -> Hot Wallet).
+// SignUserAddress: POST /v1/sign/user-address on sweep-signer (the Sweep: user address -> Hot Wallet).
 func (c *Client) SignUserAddress(ctx context.Context, req UserRequest) ([]byte, error) {
 	var out struct {
 		SignedRawTx string `json:"signed_raw_tx"`
 	}
-	if err := c.post(ctx, "/v1/sign/user-address", req, &out); err != nil {
+	if err := c.postTo(ctx, c.SweepSignerURL, "sweep-signer", "/v1/sign/user-address", req, &out); err != nil {
 		return nil, err
 	}
 	return decodeTx(out.SignedRawTx)
@@ -110,34 +115,42 @@ func decodeTx(s string) ([]byte, error) {
 }
 
 func (c *Client) post(ctx context.Context, path string, body, out any) error {
+	return c.postTo(ctx, c.BaseURL, "wallet-service", path, body, out)
+}
+
+// postTo sends a JSON POST to base+path; peer names the callee in errors.
+func (c *Client) postTo(ctx context.Context, base, peer, path string, body, out any) error {
+	if base == "" {
+		return fmt.Errorf("no %s URL configured for %s", peer, path) // transient: configuration is fixed, then retried
+	}
 	b, err := json.Marshal(body)
 	if err != nil {
 		return err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(c.BaseURL, "/")+path, bytes.NewReader(b))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(base, "/")+path, bytes.NewReader(b))
 	if err != nil {
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
-		return fmt.Errorf("calling wallet-service %s: %w", path, err) // transient
+		return fmt.Errorf("calling %s %s: %w", peer, path, err) // transient
 	}
 	defer resp.Body.Close()
 	payload, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
 	switch {
 	case resp.StatusCode == http.StatusOK:
 		if err := json.Unmarshal(payload, out); err != nil {
-			return fmt.Errorf("wallet-service %s: unreadable response: %w", path, err)
+			return fmt.Errorf("%s %s: unreadable response: %w", peer, path, err)
 		}
 		return nil
 	case resp.StatusCode == http.StatusUnprocessableEntity && path == "/v1/sign/user-address":
 		return ErrBelowGas
 	case resp.StatusCode == http.StatusBadRequest, resp.StatusCode == http.StatusForbidden,
 		resp.StatusCode == http.StatusNotFound, resp.StatusCode == http.StatusConflict, resp.StatusCode == http.StatusUnprocessableEntity:
-		return fmt.Errorf("%w: %s %d %s", ErrPermanent, path, resp.StatusCode, strings.TrimSpace(string(payload)))
+		return fmt.Errorf("%w: %s %s %d %s", ErrPermanent, peer, path, resp.StatusCode, strings.TrimSpace(string(payload)))
 	default: // 5xx, 503 (frozen / not configured), 429, ...: try again later
-		return fmt.Errorf("wallet-service %s answered %d: %s", path, resp.StatusCode, strings.TrimSpace(string(payload)))
+		return fmt.Errorf("%s %s answered %d: %s", peer, path, resp.StatusCode, strings.TrimSpace(string(payload)))
 	}
 }
 

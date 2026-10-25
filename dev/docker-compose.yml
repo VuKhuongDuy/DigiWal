@@ -70,6 +70,7 @@ services:
       context: .
       dockerfile: cmd/sim/Dockerfile
     restart: unless-stopped
+    user: "10014:10014" # presents the sweeper's leaf (key 0400, owner 10014): it must run as that uid
     command: ["run", "--users", "${SIM_USERS:-25}", "--rate", "${SIM_RATE:-12}", "--workers", "${SIM_WORKERS:-16}"]
     environment:
       SIM_RPC_URL: http://anvil:8545

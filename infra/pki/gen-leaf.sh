@@ -5,6 +5,12 @@
 # name (the docker-compose network alias) plus localhost for local runs.
 # Output: infra/pki/out/<service-name>/{cert.pem,key.pem,ca-cert.pem}
 # (gitignored). Leaf certs are valid 2 years. Re-running rotates the cert.
+#
+# Permissions (key-custody-hsm.md invariant 27): key.pem 0400 and the directory 0500, readable only by the service's fixed uid
+# (infra/pki/leaf-uid.sh, applied by fix-perms.sh). Run as root the script chowns them to that uid. Run as an ordinary user (the operator machine, a developer
+# laptop) it leaves them owned by you: `make push-certs` chowns on the node, and Docker Desktop maps ownership for bind mounts, so
+# `make e2e` works unchanged. A plain Linux developer who is not root and runs the containers locally sets LEAF_LOOSE=1 (755/644,
+# the old behaviour, for a throwaway local stack only).
 set -euo pipefail
 
 if [[ $# -ne 1 ]]; then
@@ -25,6 +31,8 @@ OUT="$HERE/out/$SERVICE"
 
 umask 077
 mkdir -p "$OUT"
+chmod u+w "$OUT"
+rm -f "$OUT/key.pem" "$OUT/cert.pem" "$OUT/ca-cert.pem" # a re-issue replaces a 0400 key
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
@@ -41,10 +49,6 @@ openssl x509 -req -sha256 -days 730 -in "$TMP/leaf.csr" \
   -CAserial "$TMP/ca.srl" -extfile "$TMP/ext.cnf" -out "$OUT/cert.pem" 2>/dev/null
 
 cp "$CA_DIR/ca-cert.pem" "$OUT/ca-cert.pem"
-# Containers run as a non-root user and read these through a read-only bind mount.
-# The directory needs o+x too (mkdir ran under umask 077), or the container's
-# non-root user gets "permission denied" traversing it.
-chmod 755 "$OUT"
-chmod 644 "$OUT/cert.pem" "$OUT/ca-cert.pem" "$OUT/key.pem"
+"$HERE/fix-perms.sh" "$OUT"
 
 echo "issued $SERVICE → $OUT"

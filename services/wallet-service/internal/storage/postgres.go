@@ -117,7 +117,7 @@ func (s *Store) InitSeed(ctx context.Context, role string, sealedSeed []byte) er
 func (s *Store) SealedSeed(ctx context.Context, role string) ([]byte, error) {
 	var seed []byte
 	err := s.pool.QueryRow(ctx, `SELECT sealed_seed FROM wallet_seeds WHERE seed_role = $1`, role).Scan(&seed)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, pgx.ErrNoRows) || (err == nil && len(seed) == 0) { // no row, or a row that exists only in the 64-byte format
 		return nil, ErrNotFound
 	}
 	if err != nil {

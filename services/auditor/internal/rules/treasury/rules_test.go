@@ -89,6 +89,8 @@ func TestT3(t *testing.T) {
 		{"gas top-up by withdrawal-service", Signature{Key: "gas-topup:31337:0xab:0", CallerCN: CNWithdrawalService}, "T3"},
 		{"sweep", Signature{Key: "sweep:x", CallerCN: CNSweeper}, ""},
 		{"treasury by either", Signature{Key: "treasury:x", CallerCN: CNWithdrawalService}, ""},
+		{"hot cutover drain by the tool", Signature{Key: "hot-cutover:31337:abcd1234:asset:1", CallerCN: CNHotCutover}, ""},
+		{"hot cutover drain by the sweeper", Signature{Key: "hot-cutover:31337:abcd1234:asset:1", CallerCN: CNSweeper}, "T3"},
 		{"unknown purpose", Signature{Key: "mystery:1", CallerCN: CNSweeper}, "T3"},
 		{"unknown caller", Signature{Key: "gas-topup:1", CallerCN: "chain-watcher"}, "T3"},
 	}

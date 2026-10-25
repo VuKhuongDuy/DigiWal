@@ -1,15 +1,29 @@
-// Command service is wallet-service. Two modes:
+// Command service is wallet-service. Modes:
 //
-//	service -init-seed <role>     generate the seed for <role> (user_derivation | hot_wallet),
-//	                              seal it, store it, print the mnemonic once, exit. Run this
-//	                              exactly once per role, ever, per environment.
+//	service -init-seed hot_wallet  DEV profile only (a `!prod` build, SIGNER_BACKEND=software): generate the software Hot Wallet
+//	                              seed, seal it with MASTER_KEY_HEX, store it, print the mnemonic once, exit. The user_derivation
+//	                              seed is NOT created or read here any more: `key-admin init-seed user_derivation` makes it, and
+//	                              only sweep-signer opens it (key-custody-hsm.md M3b).
 //	service hot-wallet cancel --key <idempotency key>
 //	                              operator only (withdrawal-flow.md invariant #23): sign and broadcast
 //	                              a Nonce Filler — a 0-value Hot -> Hot tx at the key's nonce with
 //	                              higher fees — so the signed withdrawal can never land. Run it
 //	                              inside this container; there is no network endpoint for it.
-//	service                       normal mode: decrypt the sealed seeds already in Postgres
-//	                              (using MASTER_KEY_HEX) and serve the HTTP API.
+//	service                       normal mode: serve the HTTP API.
+//
+// wallet-service holds NO user_derivation seed and has no endpoint that signs with a user key: Sweeps are signed by sweep-signer,
+// and deposit addresses are issued from the Attested xpub (XPUB_ATTEST_PUBKEY_FILE, below), or not at all (503).
+//
+// SIGNER_BACKEND=software (default, DEV profile, `!prod` builds only) signs the Hot Wallet with the sealed hot_wallet seed, which is
+// the only thing MASTER_KEY_HEX is still used for here. With SIGNER_BACKEND=pkcs11 the Hot Wallet is signed by hsm-gateway
+// (HSM_GATEWAY_URL, mTLS) and MASTER_KEY_HEX is not needed; there is no software fallback. A `-tags prod` build contains no
+// software signer, no seed code and no MASTER_KEY_HEX handling at all.
+//
+// XPUB_ATTEST_PUBKEY_FILE=<file> (key-custody-hsm.md M3a): new deposit addresses are derived by public derivation from wallet_xpubs after
+// its attestation verifies, on every issuance, against the attestation public key in that file (kept outside the database; hex of
+// the 65-byte P-256 point from `hsm-gateway init-token`, or a PEM). A swapped or tampered row latches issuance off with an alert
+// (503 issuance_unavailable); stored addresses are still served. Unset = no new address can be issued (503): there is no
+// seed-based fallback any more.
 package main
 
 import (
@@ -22,19 +36,19 @@ import (
 	"net/http"
 	"os"
 	"strconv"
-	"strings"
+	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/redis/go-redis/v9"
 
 	"digiwal/pkg/metrics"
 	"digiwal/services/wallet-service/internal/api"
 	"digiwal/services/wallet-service/internal/authz"
-	"digiwal/services/wallet-service/internal/crypto"
-	"digiwal/services/wallet-service/internal/hdwallet"
 	"digiwal/services/wallet-service/internal/obs"
 	"digiwal/services/wallet-service/internal/signing"
 	"digiwal/services/wallet-service/internal/storage"
 	"digiwal/services/wallet-service/internal/treasury"
+	"digiwal/services/wallet-service/internal/xpub"
 )
 
 func main() {
@@ -42,17 +56,10 @@ func main() {
 		runHotWallet(context.Background(), os.Args[2:])
 		return
 	}
-	initSeed := flag.String("init-seed", "", "generate + seal + store the seed for this role (user_derivation|hot_wallet), print the mnemonic once, then exit")
+	initSeed := flag.String("init-seed", "", "DEV profile only: generate + seal + store the software hot_wallet seed, print the mnemonic once, then exit")
 	flag.Parse()
 
 	ctx := context.Background()
-
-	masterKeyHex := requireEnv("MASTER_KEY_HEX")
-	sealer, err := crypto.NewSealer(masterKeyHex)
-	if err != nil {
-		log.Fatal(err)
-	}
-
 	store, err := storage.ConnectWithPool(ctx, requireEnv("POSTGRES_DSN"), maxConns())
 	if err != nil {
 		log.Fatal(err)
@@ -60,14 +67,11 @@ func main() {
 	defer store.Close()
 
 	if *initSeed != "" {
-		if *initSeed != storage.RoleUserDerivation && *initSeed != storage.RoleHotWallet {
-			log.Fatalf("unknown seed role %q (want %s or %s)", *initSeed, storage.RoleUserDerivation, storage.RoleHotWallet)
-		}
-		runInit(ctx, store, sealer, *initSeed)
+		runInitSeed(ctx, store, *initSeed)
 		return
 	}
 
-	runServer(ctx, store, sealer)
+	runServer(ctx, store)
 }
 
 // runHotWallet is the operator CLI: `hot-wallet cancel --key <key>` (invariant #23). The Hot key never
@@ -83,18 +87,17 @@ func runHotWallet(ctx context.Context, args []string) {
 	if *key == "" {
 		log.Fatal("usage: service hot-wallet cancel --key <idempotency key>")
 	}
-	sealer, err := crypto.NewSealer(requireEnv("MASTER_KEY_HEX"))
-	if err != nil {
-		log.Fatal(err)
+	if err := signing.ProfileFromEnv(); err != nil {
+		log.Fatalf("signer profile: %v", err)
 	}
 	store, err := storage.Connect(ctx, requireEnv("POSTGRES_DSN"))
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer store.Close()
-	hot, err := loadWallet(ctx, store, sealer, storage.RoleHotWallet)
+	hot, err := loadHotBackend(ctx, store)
 	if err != nil {
-		log.Fatalf("loading the hot_wallet seed: %v", err)
+		log.Fatalf("hot key backend: %v", err)
 	}
 	assets, err := signing.LoadAssets(requireEnv("ASSETS_FILE"))
 	if err != nil {
@@ -104,13 +107,18 @@ func runHotWallet(ctx context.Context, args []string) {
 	if err != nil {
 		log.Fatal(err)
 	}
-	signer, err := signing.New(ctx, store, hot, rpc, assets)
+	signer, err := signing.NewWithHot(ctx, store, hot, rpc, assets)
 	if err != nil {
 		log.Fatalf("hot wallet signer: %v", err)
 	}
+	adoptLegacyRows(ctx, store, signer)
 	signer.WithFeeCeiling(feeCeiling())
 	f, err := signer.Cancel(ctx, *key)
 	if err != nil {
+		var pr *signing.PolicyRefusedError
+		if errors.As(err, &pr) {
+			log.Fatalf("not cancelled: the Signing Policy refused the Nonce Filler (rule %s)", pr.Rule)
+		}
 		log.Fatalf("not cancelled: %v", err)
 	}
 	if err := rpc.Broadcast(ctx, f.SignedRawTx); err != nil {
@@ -134,53 +142,19 @@ func feeCeiling() *big.Int {
 	return n
 }
 
-func runInit(ctx context.Context, store *storage.Store, sealer *crypto.Sealer, role string) {
-	mnemonic, err := hdwallet.NewMnemonic()
-	if err != nil {
-		log.Fatalf("generating mnemonic: %v", err)
+func runServer(ctx context.Context, store *storage.Store) {
+	if err := signing.ProfileFromEnv(); err != nil {
+		log.Fatalf("signer profile: %v", err)
 	}
-	sealed, err := sealer.Seal([]byte(mnemonic))
-	if err != nil {
-		log.Fatalf("sealing mnemonic: %v", err)
-	}
-	if err := store.InitSeed(ctx, role, sealed); err != nil {
-		log.Fatalf("storing %s seed: %v (if you meant to rotate it, that's not supported by this flag)", role, err)
-	}
-
-	fmt.Println("=====================================================================")
-	fmt.Printf(" %s SEED CREATED. THIS MNEMONIC WILL NEVER BE SHOWN AGAIN.\n", strings.ToUpper(role))
-	fmt.Println(" Write it down and store it offline. Anyone with this phrase can")
-	fmt.Println(" derive and spend from every address this system ever generates.")
-	fmt.Println("=====================================================================")
-	fmt.Println()
-	fmt.Println(mnemonic)
-	fmt.Println()
-	fmt.Println("=====================================================================")
-}
-
-func runServer(ctx context.Context, store *storage.Store, sealer *crypto.Sealer) {
-	rdb := redis.NewClient(&redis.Options{Addr: requireEnv("REDIS_ADDR")})
+	rdb := redis.NewClient(&redis.Options{Addr: requireEnv("REDIS_ADDR"), Password: os.Getenv("REDIS_PASSWORD")})
 	if err := rdb.Ping(ctx).Err(); err != nil {
 		log.Fatalf("connecting to redis: %v", err)
 	}
 	cache := storage.NewCache(rdb)
 
-	var signer api.Signer
-	userWallet, err := loadWallet(ctx, store, sealer, storage.RoleUserDerivation)
-	switch {
-	case err == nil:
-		signer = userWallet
-		log.Println("user_derivation wallet loaded")
-	case errors.Is(err, storage.ErrNotFound):
-		log.Println("WARNING: no user_derivation seed found — deposit-address requests will fail until you run with -init-seed user_derivation")
-	default:
-		log.Fatalf("loading user_derivation wallet: %v", err)
-	}
-
-	// The Hot Wallet is a separate seed (wallet-tiering.md invariant #1), one
-	// address at BIP44 index 0. Signing needs the seed, an EVM RPC (wallet-service
-	// builds the tx itself) and the asset list; without all three the endpoint
-	// answers 503 instead of guessing.
+	// The Hot Wallet: the HSM key (pkcs11), or in a dev profile a separate software seed (wallet-tiering.md invariant #1) at BIP44
+	// index 0. Signing needs the key, an EVM RPC (wallet-service builds the tx itself) and the asset list; without all three the
+	// endpoint answers 503 instead of guessing.
 	// The operator's Treasury file (Warm address per chain, wallet-tiering.md invariant #9).
 	// Required: a missing or malformed file stops startup rather than serve a Warm address we
 	// cannot trust.
@@ -190,15 +164,15 @@ func runServer(ctx context.Context, store *storage.Store, sealer *crypto.Sealer)
 	}
 
 	var hotSigner api.HotSigner
-	var userSign api.UserSigner
 	var system *api.SystemAddresses
-	hotWallet, err := loadWallet(ctx, store, sealer, storage.RoleHotWallet)
+	var hotKey string // keys the Hot nonce state (invariant 24)
+	hotBackend, err := loadHotBackend(ctx, store)
 	switch {
 	case err == nil:
-		var signer *signing.Signer
-		signer, userSign = buildSigners(ctx, store, hotWallet, userWallet)
+		signer := buildSigners(ctx, store, hotBackend)
 		if signer != nil {
 			hotSigner = signer
+			hotKey = signer.HotKey()
 			warm, err := treasuryFile.WarmFor(signer.ChainID(), signer.HotWalletAddress())
 			if err != nil {
 				log.Fatal(err)
@@ -217,13 +191,25 @@ func runServer(ctx context.Context, store *storage.Store, sealer *crypto.Sealer)
 	case errors.Is(err, storage.ErrNotFound):
 		log.Println("WARNING: no hot_wallet seed found — run with -init-seed hot_wallet before Hot Wallet signing is used")
 	default:
-		log.Fatalf("loading hot_wallet wallet: %v", err)
+		// Under pkcs11 this is "hsm-gateway unreachable at start": stop, never fall back to a software key.
+		log.Fatalf("loading the Hot Wallet signer: %v", err)
 	}
 
 	// Metrics: HTTP latency, the connection pool and the Go runtime, on their own internal port. Nothing key-related
 	// is exported, and the signing listener never serves /metrics.
 	reg := metrics.NewRegistry()
-	reg.MustRegister(obs.Collector(store), metrics.PoolCollector("wallet-service", func() metrics.PoolStat { return metrics.PoolFromPgx(store.PoolStat()) }))
+	reg.MustRegister(obs.Collector(nonceSource{store, hotKey}), metrics.PoolCollector("wallet-service", func() metrics.PoolStat { return metrics.PoolFromPgx(store.PoolStat()) }))
+	if b, ok := hotBackend.(interface{ BreakerOpen() bool }); ok {
+		// pkcs11 only: 1 while the Hot signer's circuit breaker is tripped (hsm-gateway failing), see alerts.yml HotSignerBreakerOpen.
+		reg.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{Name: "digiwal_hot_signer_breaker_open",
+			Help: "1 while the circuit breaker towards hsm-gateway is tripped (3 consecutive failures, no success since), else 0."},
+			func() float64 {
+				if b.BreakerOpen() {
+					return 1
+				}
+				return 0
+			}))
+	}
 	httpm := metrics.NewHTTP(reg, "wallet-service")
 	go func() {
 		addr := ":" + envOr("METRICS_PORT", metrics.DefaultPort)
@@ -233,7 +219,10 @@ func runServer(ctx context.Context, store *storage.Store, sealer *crypto.Sealer)
 		}
 	}()
 
-	server := api.NewServer(store, cache, signer, hotSigner, userSign)
+	server := api.NewServer(store, cache, nil, hotSigner) // no seed-based Signer: issuance is xpub-only
+	if pinFile := os.Getenv("XPUB_ATTEST_PUBKEY_FILE"); pinFile != "" {
+		server.WithXPubIssuance(buildXPubIssuer(ctx, store, pinFile))
+	}
 	if system != nil {
 		server.WithSystemAddresses(*system)
 	}
@@ -263,14 +252,40 @@ func runServer(ctx context.Context, store *storage.Store, sealer *crypto.Sealer)
 	log.Fatal(http.ListenAndServe(":"+port, httpm.Wrap(server.Routes())))
 }
 
-// buildSigners wires the Hot Wallet signer and, if the user_derivation seed is
-// loaded too, the Sweep (user-address) signer. Returns nils (endpoints answer
-// 503) when RPC_URL / ASSETS_FILE aren't configured.
-func buildSigners(ctx context.Context, store *storage.Store, hot, users *hdwallet.Wallet) (*signing.Signer, api.UserSigner) {
+// buildXPubIssuer loads the pinned attestation public key (a pin that cannot be read stops the service: verification is never
+// skipped) and verifies the stored xpub once at startup. A bad row latches issuance off with an alert (the service keeps serving
+// stored addresses); a missing row only means `key-admin migrate-xpub` has not run yet.
+func buildXPubIssuer(ctx context.Context, store *storage.Store, pinFile string) *xpub.Issuer {
+	pin, err := xpub.LoadPinned(pinFile)
+	if err != nil {
+		log.Fatalf("XPUB_ATTEST_PUBKEY_FILE: %v", err)
+	}
+	iss, err := xpub.NewIssuer(pin)
+	if err != nil {
+		log.Fatal(err)
+	}
+	switch row, err := store.XPub(ctx, "evm"); {
+	case err == nil:
+		if cerr := iss.Check(row.Record()); cerr != nil {
+			log.Printf("ALERT the stored xpub does not verify against the pinned attestation key; new deposit addresses are refused until restart")
+		} else {
+			log.Printf("deposit addresses issue from the attested xpub (fingerprint %s, attestation key %.16s...), the seed is not used for issuance", xpub.Fingerprint(row.XPub), xpub.PinnedHex(pin))
+		}
+	case errors.Is(err, storage.ErrNotFound):
+		log.Println("WARNING: XPUB_ATTEST_PUBKEY_FILE is set but wallet_xpubs is empty: new deposit addresses answer 503 until `key-admin migrate-xpub` has run")
+	default:
+		log.Fatalf("reading wallet_xpubs: %v", err)
+	}
+	return iss
+}
+
+// buildSigners wires the Hot Wallet signer. Returns nil (the endpoints answer 503) when RPC_URL / ASSETS_FILE aren't configured.
+// There is no Sweep signer here any more: sweep-signer owns that.
+func buildSigners(ctx context.Context, store *storage.Store, hot signing.HotBackend) *signing.Signer {
 	rpcURL, assetsFile := os.Getenv("RPC_URL"), os.Getenv("ASSETS_FILE")
 	if rpcURL == "" || assetsFile == "" {
 		log.Println("WARNING: RPC_URL / ASSETS_FILE not set — signing endpoints disabled")
-		return nil, nil
+		return nil
 	}
 	assets, err := signing.LoadAssets(assetsFile)
 	if err != nil {
@@ -280,36 +295,74 @@ func buildSigners(ctx context.Context, store *storage.Store, hot, users *hdwalle
 	if err != nil {
 		log.Fatal(err)
 	}
-	hotSigner, err := signing.New(ctx, store, hot, chain, assets)
+	hotSigner, err := signing.NewWithHot(ctx, store, hot, chain, assets)
 	if err != nil {
 		log.Fatalf("hot wallet signer: %v", err)
 	}
+	adoptLegacyRows(ctx, store, hotSigner)
 	hotSigner.WithFeeCeiling(feeCeiling())
 	log.Printf("hot_wallet signing enabled, address %s", hotSigner.HotWalletAddress())
-	if users == nil {
-		return hotSigner, nil
-	}
-	userSigner, err := signing.NewUserSigner(ctx, store, users, chain, assets, hotSigner.HotWalletAddress())
-	if err != nil {
-		log.Fatalf("user-address signer: %v", err)
-	}
-	log.Println("user-address (sweep) signing enabled")
-	return hotSigner, userSigner
+	return hotSigner
 }
 
-// loadWallet decrypts the sealed seed for a role and builds an in-memory
-// wallet from it. Returns storage.ErrNotFound if the role's seed hasn't
-// been initialized yet.
-func loadWallet(ctx context.Context, store *storage.Store, sealer *crypto.Sealer, role string) (*hdwallet.Wallet, error) {
-	sealed, err := store.SealedSeed(ctx, role)
-	if err != nil {
-		return nil, err
+// signerBackend is SIGNER_BACKEND (default software).
+func signerBackend() string {
+	if b := os.Getenv("SIGNER_BACKEND"); b != "" {
+		return b
 	}
-	mnemonic, err := sealer.Open(sealed)
-	if err != nil {
-		return nil, fmt.Errorf("decrypting %s seed (wrong MASTER_KEY_HEX?): %w", role, err)
+	return signing.BackendSoftware
+}
+
+// loadHotBackend builds the Hot Wallet's key backend. pkcs11: an mTLS client to hsm-gateway, which
+// pins the Hot address at start, and the hot_wallet seed is never read. software: the sealed
+// hot_wallet seed at the Hot index (storage.ErrNotFound while it has not been initialised).
+func loadHotBackend(ctx context.Context, store *storage.Store) (signing.HotBackend, error) {
+	switch b := signerBackend(); b {
+	case signing.BackendPKCS11:
+		tlsCfg, err := signing.GatewayTLSConfig(requireEnv("TLS_CERT_FILE"), requireEnv("TLS_KEY_FILE"), requireEnv("TLS_CA_FILE"))
+		if err != nil {
+			return nil, fmt.Errorf("hsm-gateway client TLS: %w", err)
+		}
+		g, err := signing.NewGatewayHot(ctx, signing.GatewayConfig{
+			BaseURL: requireEnv("HSM_GATEWAY_URL"), TLS: tlsCfg, CallerCN: "wallet-service", StartRetry: 60 * time.Second,
+		})
+		if err != nil {
+			return nil, err
+		}
+		log.Printf("Hot Key: hsm-gateway at %s, address %s, chain %d (the hot_wallet seed is not loaded)", os.Getenv("HSM_GATEWAY_URL"), mustAddr(g), g.PinnedChainID())
+		return g, nil
+	case signing.BackendSoftware:
+		return loadSoftwareHot(ctx, store)
+	default:
+		return nil, fmt.Errorf("unknown SIGNER_BACKEND %q (want %q or %q)", b, signing.BackendSoftware, signing.BackendPKCS11)
 	}
-	return hdwallet.FromMnemonic(string(mnemonic))
+}
+
+func mustAddr(h signing.HotBackend) string {
+	a, _ := h.HotAddress(context.Background())
+	return a.Hex()
+}
+
+// adoptLegacyRows attributes the unattributed (pre-migration-000005) Hot nonce state to the software
+// Hot address. Only the software backend does it: a new HSM address must start from its own nonce
+// (key-custody-hsm.md invariant 24) and the old rows stay with the old address until the cutover.
+func adoptLegacyRows(ctx context.Context, store *storage.Store, s *signing.Signer) {
+	if signerBackend() != signing.BackendSoftware {
+		return
+	}
+	if err := store.AdoptLegacyHotAddress(ctx, s.HotKey()); err != nil {
+		log.Fatalf("attributing legacy Hot Wallet nonce state to %s: %v", s.HotKey(), err)
+	}
+}
+
+// nonceSource exports the nonce state of the current Hot address only.
+type nonceSource struct {
+	store *storage.Store
+	hot   string
+}
+
+func (n nonceSource) NonceStates(ctx context.Context) ([]storage.NonceState, error) {
+	return n.store.NonceStates(ctx, n.hot)
 }
 
 func requireEnv(key string) string {

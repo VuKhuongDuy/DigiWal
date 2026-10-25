@@ -18,13 +18,14 @@ import (
 	"digiwal/services/api-gateway/internal/api"
 	"digiwal/services/api-gateway/internal/obs"
 	"digiwal/services/api-gateway/internal/store"
+	"github.com/redis/go-redis/v9"
 )
 
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	st, err := store.ConnectWithPool(ctx, requireEnv("POSTGRES_DSN"), int32(envInt("POSTGRES_MAX_CONNS", 0)))
+	st, err := store.ConnectWithPool(ctx, requireEnv("POSTGRES_DSN"), int32(envPositiveInt("POSTGRES_MAX_CONNS", 0)))
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -46,6 +47,26 @@ func main() {
 		Withdrawals: &api.WithdrawalClient{BaseURL: requireEnv("WITHDRAWAL_SERVICE_URL"),
 			HTTP: &http.Client{Timeout: 15 * time.Second, Transport: pooledTransport(tlsCfg)}},
 	}
+	// Rate limits, requests per minute; 0 disables. In-memory and per instance by default; with
+	// REDIS_ADDR the budget is shared across instances, falling back to the in-memory limiter
+	// (fail-open) whenever Redis errors.
+	var rdb *redis.Client
+	if addr := os.Getenv("REDIS_ADDR"); addr != "" {
+		rdb = redis.NewClient(&redis.Options{Addr: addr, Password: os.Getenv("REDIS_PASSWORD"), MaxRetries: -1, DialTimeout: 100 * time.Millisecond})
+		defer rdb.Close()
+	}
+	newLimiter := func(prefix string, perMin int) api.RateLimiter {
+		if perMin <= 0 {
+			return nil
+		}
+		local := api.NewLimiter(perMin, time.Minute)
+		if rdb == nil {
+			return local
+		}
+		return &api.RedisLimiter{Client: rdb, Prefix: "ratelimit:" + prefix + ":", Limit: perMin, Window: time.Minute, Fallback: local}
+	}
+	s.IPLimit = newLimiter("ip", envInt("RATE_LIMIT_IP_PER_MIN", 1200))
+	s.UserLimit = newLimiter("user", envInt("RATE_LIMIT_USER_PER_MIN", 600))
 	// Metrics: their own internal port, never the public listener (monitoring-dashboard.md invariant 6).
 	reg := metrics.NewRegistry()
 	reg.MustRegister(obs.Collector(st), metrics.PoolCollector("api-gateway", func() metrics.PoolStat { return metrics.PoolFromPgx(st.Pool().Stat()) }))
@@ -78,6 +99,18 @@ func requireEnv(key string) string {
 	return v
 }
 
+func envInt(key string, def int) int {
+	v := os.Getenv(key)
+	if v == "" {
+		return def
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 0 {
+		log.Fatalf("env var %s must be a non-negative integer, got %q", key, v)
+	}
+	return n
+}
+
 func envOr(key, def string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
@@ -98,8 +131,9 @@ func pooledTransport(tlsCfg *tls.Config) *http.Transport {
 	return t
 }
 
-// envInt reads a positive integer from the environment, or def when unset or not a positive integer.
-func envInt(key string, def int) int {
+// envPositiveInt reads a positive integer from the environment, or def when unset or not a positive integer
+// (envInt above is the strict one: it refuses an invalid value, and 0 is allowed).
+func envPositiveInt(key string, def int) int {
 	if n, err := strconv.Atoi(os.Getenv(key)); err == nil && n > 0 {
 		return n
 	}

@@ -8,6 +8,7 @@ import (
 	"digiwal/pkg/metrics"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"github.com/prometheus/client_golang/prometheus"
 	"net/http"
 	"net/http/httptest"
@@ -90,12 +91,29 @@ func TestSignHotWallet_ResponseAndErrorMapping(t *testing.T) {
 		storage.ErrIdempotencyKeyReused: 409,
 		signing.ErrGasCeilingExceeded:   422,
 		storage.ErrNonceGapOpen:         503,
+		storage.ErrHotCutover:           503,
 		errors.New("db exploded"):       500,
+		signing.ErrSignerUnavailable:    503,
+		signing.ErrSenderMismatch:       503,
+		fmt.Errorf("sign: %w", &signing.PolicyRefusedError{Rule: "max_per_tx"}): 422,
 	}
 	for err, want := range cases {
 		if got := call(t, &fakeHot{err: err}, "sweeper", `{}`).Code; got != want {
 			t.Errorf("%v → %d, want %d", err, got, want)
 		}
+	}
+	// the rule id reaches the caller; an HSM failure is a 503 with a stable code
+	pr := call(t, &fakeHot{err: &signing.PolicyRefusedError{Rule: "window_1h"}}, "sweeper", `{}`)
+	if pr.Code != 422 || !strings.Contains(pr.Body.String(), `"error":"policy_refused"`) || !strings.Contains(pr.Body.String(), `"rule":"window_1h"`) {
+		t.Errorf("policy refusal: %d %s", pr.Code, pr.Body)
+	}
+	un := call(t, &fakeHot{err: signing.ErrSignerUnavailable}, "sweeper", `{}`)
+	if un.Code != 503 || !strings.Contains(un.Body.String(), `"error":"hsm_unavailable"`) {
+		t.Errorf("signer unavailable: %d %s", un.Code, un.Body)
+	}
+	// a Hot cutover freeze is a 503 whose message names it (withdrawal-service retries; the freeze ends with the cutover)
+	if fr := call(t, &fakeHot{err: storage.ErrHotCutover}, "sweeper", `{}`); fr.Code != 503 || !strings.Contains(fr.Body.String(), "hot_cutover") {
+		t.Errorf("cutover freeze: %d %s", fr.Code, fr.Body)
 	}
 	if got := call(t, &fakeHot{}, "sweeper", `not json`).Code; got != 400 {
 		t.Errorf("malformed body → %d", got)
@@ -109,52 +127,28 @@ func TestSignHotWallet_ResponseAndErrorMapping(t *testing.T) {
 	}
 }
 
-type fakeUser struct {
-	err error
-	n   int
-}
-
-func (f *fakeUser) Sign(context.Context, signing.UserRequest) (signing.UserResponse, error) {
-	f.n++
-	return signing.UserResponse{SignedRawTx: "0x02"}, f.err
-}
-
-func callUser(t *testing.T, u *fakeUser, cn string) *httptest.ResponseRecorder {
-	t.Helper()
-	srv := &Server{userSign: u}
-	req := httptest.NewRequest("POST", "/v1/sign/user-address", strings.NewReader(`{"user_id":"alice"}`))
-	if cn != "" {
-		req = withPeer(req, cn)
+// key-custody-hsm.md M3b: Sweep signing moved to sweep-signer. wallet-service has no endpoint that signs with a user key,
+// whoever calls it (it used to be sweeper-only, invariant #4): there is no route, so every CN gets a 404.
+func TestSignUserAddress_EndpointIsGone(t *testing.T) {
+	srv := &Server{}
+	for _, cn := range []string{"sweeper", "withdrawal-service", "chain-watcher", "api-gateway", "sweep-signer", ""} {
+		for _, method := range []string{"POST", "GET", "PUT"} {
+			req := httptest.NewRequest(method, "/v1/sign/user-address", strings.NewReader(`{"user_id":"alice"}`))
+			if cn != "" {
+				req = withPeer(req, cn)
+			}
+			rec := httptest.NewRecorder()
+			srv.MTLSRoutes().ServeHTTP(rec, req)
+			if rec.Code != 404 && rec.Code != 405 {
+				t.Errorf("CN=%q %s /v1/sign/user-address: %d, want 404 (no such endpoint)", cn, method, rec.Code)
+			}
+		}
 	}
+	// and the plain listener never had it
 	rec := httptest.NewRecorder()
-	srv.MTLSRoutes().ServeHTTP(rec, req)
-	return rec
-}
-
-// service-auth-mtls.md invariant #4: withdrawal-service can never pick a user key.
-func TestSignUserAddress_OnlySweeperMayCall(t *testing.T) {
-	for cn, want := range map[string]int{"sweeper": 200, "withdrawal-service": 403, "chain-watcher": 403, "api-gateway": 403, "": 403} {
-		u := &fakeUser{}
-		if got := callUser(t, u, cn).Code; got != want {
-			t.Errorf("CN=%q: %d, want %d", cn, got, want)
-		}
-		if want == 403 && u.n != 0 {
-			t.Errorf("CN=%q reached the signer", cn)
-		}
-	}
-}
-
-func TestSignUserAddress_ErrorMapping(t *testing.T) {
-	cases := map[error]int{
-		signing.ErrDestinationNotHotWallet: 403,
-		signing.ErrUnknownUser:             404,
-		signing.ErrInvalidRequest:          400,
-		errors.New("boom"):                 500,
-	}
-	for err, want := range cases {
-		if got := callUser(t, &fakeUser{err: err}, "sweeper").Code; got != want {
-			t.Errorf("%v → %d, want %d", err, got, want)
-		}
+	srv.Routes().ServeHTTP(rec, httptest.NewRequest("POST", "/v1/sign/user-address", strings.NewReader("{}")))
+	if rec.Code != 404 && rec.Code != 405 {
+		t.Errorf("plain listener: %d", rec.Code)
 	}
 }
 
@@ -315,7 +309,7 @@ type fakeGaps struct {
 	got   []uint64
 }
 
-func (f *fakeGaps) FreezeNonceGap(_ context.Context, chainID int64, from uint64) (storage.NonceFreeze, error) {
+func (f *fakeGaps) FreezeNonceGap(_ context.Context, chainID int64, _ string, from uint64) (storage.NonceFreeze, error) {
 	f.calls++
 	f.got = append(f.got, from)
 	if f.err != nil {
@@ -331,7 +325,7 @@ func TestNonceGap(t *testing.T) {
 			req = withPeer(req, cn)
 		}
 		rec := httptest.NewRecorder()
-		(&Server{nonceGaps: g}).MTLSRoutes().ServeHTTP(rec, req)
+		(&Server{nonceGaps: g, hotSigner: &fakeHot{}}).MTLSRoutes().ServeHTTP(rec, req)
 		return rec
 	}
 	// withdrawal-service only: the sweeper (or anyone else) can never freeze Hot Wallet signing.
@@ -361,7 +355,7 @@ func TestNonceGap(t *testing.T) {
 	for _, m := range []string{"DELETE", "PUT", "PATCH"} {
 		req := withPeer(httptest.NewRequest(m, "/v1/wallet/nonce-gap", nil), "withdrawal-service")
 		rec := httptest.NewRecorder()
-		(&Server{nonceGaps: &fakeGaps{}}).MTLSRoutes().ServeHTTP(rec, req)
+		(&Server{nonceGaps: &fakeGaps{}, hotSigner: &fakeHot{}}).MTLSRoutes().ServeHTTP(rec, req)
 		if rec.Code != 405 {
 			t.Errorf("%s: %d, want 405", m, rec.Code)
 		}

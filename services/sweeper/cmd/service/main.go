@@ -57,7 +57,9 @@ func main() {
 	}
 	w := &wallet.Client{
 		BaseURL: requireEnv("WALLET_SERVICE_URL"),
-		HTTP:    &http.Client{Timeout: 30 * time.Second, Transport: &http.Transport{TLSClientConfig: tlsCfg}},
+		// Sweeps are signed by sweep-signer (key-custody-hsm.md M3b), the only holder of the user_derivation seed.
+		SweepSignerURL: requireEnv("SWEEP_SIGNER_URL"),
+		HTTP:           &http.Client{Timeout: 30 * time.Second, Transport: &http.Transport{TLSClientConfig: tlsCfg}},
 	}
 
 	// ledger-service, over mTLS as CN=sweeper: only POST /v1/ledger/gas-fees (ledger.md invariant #12).

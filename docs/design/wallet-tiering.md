@@ -32,8 +32,10 @@ Warm/Cold. The shape:
 - **Wallet Tier** — `hot | warm | cold`. Classifies which key material
   an address's private key belongs to, and therefore how reachable that
   key is to an automated process.
-- **Hot Wallet** — the address `wallet-service` holds a continuously
-  decrypted key for; the only tier capable of fully automatic signing.
+- **Hot Wallet** — the address of the Hot Key held in the HSM behind
+  `hsm-gateway` (`key-custody-hsm.md`); the only tier capable of fully
+  automatic signing, within the Signing Policy. *(The derivation-path
+  detail that follows describes the earlier software key; superseded.)*
   Used exclusively for `withdrawal-service`'s automatic payouts and for
   Treasury Sweeps out of itself. **Decided: derived at `m/44'/60'/0'/0/0`
   — index 0 of Hot's own dedicated seed** (invariant #1), reusing the
@@ -96,18 +98,20 @@ Warm/Cold. The shape:
 
 ## Aggregates & invariants
 
-1. **Hot's signing key is a separate seed from the one deriving user
-   deposit addresses.** Even though user addresses only transiently
-   hold funds before being swept (per `deposit-flow.md`'s sweep
-   addition), one compromised seed must never expose both "every user's
-   transient private key" and "the automated payout key." This revises
-   `docs/ARCHITECTURE.md`'s current "one master mnemonic for the entire
-   system" line — flagged explicitly in Open Questions #1, your call.
-2. **Warm's and Cold's sealed seeds never appear in any always-on
-   service's environment or config.** They're decrypted only inside the
-   local signing CLI, run manually by the operator. If a seed for a tier
-   is present in `docker-compose.yml`/`.env`/a running container, that
-   tier isn't actually Warm or Cold — it's Hot with a different label.
+1. **Hot's signing key is not derived from the seed that derives user
+   deposit addresses, and no service holds it.** It is a secp256k1 key
+   generated inside the HSM token behind `hsm-gateway`, which signs under
+   a Signing Policy (`key-custody-hsm.md` 4.1). The user-address seed is a
+   Sealed Secret opened only by `sweep-signer` (4.3, 4.4). One compromised
+   process therefore never exposes both "every user's transient private
+   key" and "the automated payout key." (Supersedes `docs/ARCHITECTURE.md`'s
+   old "one master mnemonic" line: done.)
+2. **Warm's and Cold's keys are never in any always-on service, the HSM
+   or the vault.** **Not built (M5, `key-custody-hsm.md` 5.9):** today
+   Warm and Cold are only public addresses in `infra/treasury.yaml`; the
+   multisig and the offline signer procedure come with that milestone. A
+   Warm or Cold key present in `docker-compose.yml`/`.env`/a running
+   container would make that tier Hot with a different label.
 3. **An automated process can only ever move funds it's authorized to
    sign for.** Hot's key authorizes payouts and upward sweeps out of
    Hot; it grants no access to Warm's or Cold's balances. This is what
@@ -141,13 +145,13 @@ Warm/Cold. The shape:
    separate crossing of Ceiling (after the row closes) mints a new row
    and a new key — so two genuinely distinct sweeps are never conflated,
    unlike the time-bucket alternative.
-7. **Each tier's address is always index 0 of its own dedicated seed,
-   never incremented.** `m/44'/60'/0'/0/0` for Hot, Warm, and Cold
-   alike, each under a seed unique to that tier. There is no
-   multi-account or multi-address scheme within a tier — one seed, one
-   address, for the lifetime of that tier's key material. If a tier
-   ever needs a second address (not designed for here), that's a new
-   seed and a new tier label, not a second index under an existing one.
+7. **Each tier has exactly one address for the lifetime of its key
+   material.** Hot: the address of the HSM key (one nonce row per
+   `(chain, hot_address)`, `key-custody-hsm.md` invariant 24); it changes
+   only by a Hot cutover (`docs/runbooks/hot-cutover.md`). Warm and Cold:
+   the configured public addresses (multisig in M5). User deposit
+   addresses are the only many-address scheme (xpub indexes, never a
+   tier address). A tier that needs a second address is a new tier label.
 8. **The sweep-monitor loop learns the Hot Wallet's own address from
    `wallet-service` (`GET /v1/wallet/hot-address`), once at startup —
    never a locally-configured constant.** New, Tech Lead review. Same

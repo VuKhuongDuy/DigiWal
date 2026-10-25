@@ -20,7 +20,7 @@ func serve(t *testing.T, status int, body string) (*Client, *[]string) {
 		_, _ = w.Write([]byte(body))
 	}))
 	t.Cleanup(srv.Close)
-	return &Client{BaseURL: srv.URL, HTTP: srv.Client()}, &seen
+	return &Client{BaseURL: srv.URL, SweepSignerURL: srv.URL, HTTP: srv.Client()}, &seen
 }
 
 func TestSignHotWalletSendsTheDocumentedShape(t *testing.T) {
@@ -49,6 +49,42 @@ func TestSignUserAddressSendsUserIDNotAFromAddress(t *testing.T) {
 	_ = json.Unmarshal([]byte((*seen)[0][len("POST /v1/sign/user-address "):]), &sent)
 	if sent["user_id"] != "alice" || sent["amount"] != "max" || sent["from_address"] != nil || len(sent) != 5 {
 		t.Fatalf("body = %v", sent)
+	}
+}
+
+// key-custody-hsm.md M3b: the Sweep signature is asked of sweep-signer and never of wallet-service (which has no such endpoint),
+// while the Hot Wallet calls keep going to wallet-service. Two servers prove each call lands where it should.
+func TestSweepGoesToSweepSignerAndHotCallsToWalletService(t *testing.T) {
+	hit := map[string][]string{}
+	mk := func(name string) *httptest.Server {
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			hit[name] = append(hit[name], r.Method+" "+r.URL.Path)
+			_, _ = w.Write([]byte(`{"signed_raw_tx":"0x01","nonce":1}`))
+		}))
+	}
+	ws, ss := mk("wallet-service"), mk("sweep-signer")
+	defer ws.Close()
+	defer ss.Close()
+	c := &Client{BaseURL: ws.URL, SweepSignerURL: ss.URL, HTTP: http.DefaultClient}
+	if _, err := c.SignUserAddress(context.Background(), UserRequest{UserID: "alice"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := c.SignHotWallet(context.Background(), HotRequest{IdempotencyKey: "k"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(hit["sweep-signer"]) != 1 || hit["sweep-signer"][0] != "POST /v1/sign/user-address" {
+		t.Fatalf("sweep-signer saw %v", hit["sweep-signer"])
+	}
+	if len(hit["wallet-service"]) != 1 || hit["wallet-service"][0] != "POST /v1/sign/hot-wallet" {
+		t.Fatalf("wallet-service saw %v (it must not be asked for a Sweep)", hit["wallet-service"])
+	}
+	// no sweep-signer configured: a transient error, never a fallback to wallet-service
+	c.SweepSignerURL = ""
+	if _, err := c.SignUserAddress(context.Background(), UserRequest{}); err == nil || errors.Is(err, ErrPermanent) {
+		t.Fatalf("err = %v", err)
+	}
+	if len(hit["wallet-service"]) != 1 {
+		t.Fatal("a Sweep fell back to wallet-service")
 	}
 }
 
@@ -93,7 +129,7 @@ func TestUnusableSuccessResponsesAreNotAnswers(t *testing.T) {
 
 func TestUnreachableWalletServiceIsTransient(t *testing.T) {
 	c, _ := serve(t, 200, "")
-	c.BaseURL = "http://127.0.0.1:1"
+	c.SweepSignerURL = "http://127.0.0.1:1"
 	_, err := c.SignUserAddress(context.Background(), UserRequest{})
 	if err == nil || errors.Is(err, ErrPermanent) || errors.Is(err, ErrBelowGas) {
 		t.Fatalf("err = %v", err)

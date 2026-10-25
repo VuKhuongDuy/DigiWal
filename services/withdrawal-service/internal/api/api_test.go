@@ -23,14 +23,19 @@ type fakeRequests struct {
 
 func newFake() *fakeRequests { return &fakeRequests{rows: map[[2]string]store.Withdrawal{}} }
 
-func (f *fakeRequests) Create(_ context.Context, r store.NewRequest) (store.Withdrawal, bool, error) {
+func (f *fakeRequests) Create(ctx context.Context, r store.NewRequest) (store.Withdrawal, bool, error) {
+	return f.CreateWithStatus(ctx, r, store.StatusRequested, nil)
+}
+
+// CreateWithStatus inserts the row already in its verdict state, like the real store (one winning insert per key).
+func (f *fakeRequests) CreateWithStatus(_ context.Context, r store.NewRequest, status string, reason *string) (store.Withdrawal, bool, error) {
 	f.calls++
 	k := [2]string{r.UserID, r.IdempotencyKey}
 	if w, ok := f.rows[k]; ok {
 		return w, false, nil
 	}
 	w := store.Withdrawal{ID: "id-" + r.UserID + "-" + r.IdempotencyKey, UserID: r.UserID, IdempotencyKey: r.IdempotencyKey,
-		AssetID: r.AssetID, Amount: r.Amount, ToAddress: r.ToAddress, Status: store.StatusRequested}
+		AssetID: r.AssetID, Amount: r.Amount, ToAddress: r.ToAddress, Status: status, RejectReason: reason}
 	f.rows[k] = w
 	return w, true, nil
 }

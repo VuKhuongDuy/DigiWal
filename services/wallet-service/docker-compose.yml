@@ -10,7 +10,7 @@ services:
       PORT: "8080"
       POSTGRES_DSN: postgres://custody:custody@postgres:5432/custody?sslmode=disable
       REDIS_ADDR: redis:6379
-      # Set in .env (gitignored) — `make gen-key` creates one.
+      # LEGACY software Hot Wallet of this standalone dev compose only (a !prod build); not part of any node bring-up. `make gen-key` creates one.
       MASTER_KEY_HEX: ${MASTER_KEY_HEX:?run 'make gen-key' first, see README}
       # mTLS listener for /v1/sign/* — certs from `make certs` (infra/pki).
       TLS_CERT_FILE: /certs/cert.pem
@@ -22,6 +22,9 @@ services:
       ASSETS_FILE: /config/assets.yaml
       # The operator's Treasury file (Warm address per chain) — wallet-service only, required.
       TREASURY_FILE: /config/treasury.yaml
+      # software (default) or pkcs11 (the Hot Wallet is signed by hsm-gateway, key-custody-hsm.md; no software fallback).
+      SIGNER_BACKEND: ${SIGNER_BACKEND:-software}
+      HSM_GATEWAY_URL: ${HSM_GATEWAY_URL:-}
     volumes:
       - ../../infra/pki/out/wallet-service:/certs:ro
       - ../../infra/assets.yaml:/config/assets.yaml:ro
