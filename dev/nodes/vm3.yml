@@ -1,6 +1,6 @@
 # Node overlay for vm3 (10.10.0.2): custody and chain. See vm2.yml for how the two overlays fit together.
 #   here:      postgres (custody, withdrawal, chain_watcher), kafka, redis, anvil, wallet-service,
-#              withdrawal-service, chain-watcher, sweeper, simulator
+#              withdrawal-service, chain-watcher, sweeper, sweep-signer, simulator
 #   on vm2:    ledger-service, api-gateway, history-service, mongo
 networks:
   default:
@@ -14,6 +14,8 @@ services:
   history-service: {profiles: [elsewhere]}
   prometheus: {profiles: [elsewhere]}
   grafana: {profiles: [elsewhere]}
+  hsm-gateway: {profiles: [elsewhere]}
+  hsm-perms: {profiles: [elsewhere]}
 
   postgres:
     command: [postgres, -c, hba_file=/etc/postgresql/pg_hba.conf, -c, shared_preload_libraries=pg_stat_statements,
@@ -56,8 +58,29 @@ services:
     environment:
       POSTGRES_DSN: postgres://svc_wallet:${SVC_WALLET_PASSWORD}@postgres:5432/custody?sslmode=disable
       REDIS_PASSWORD: ${REDIS_PASSWORD:?run make env}
+      # pkcs11 (the only backend of this stack): the Hot Wallet is signed by hsm-gateway on vm2 over WireGuard,
+      # pinned to wallet-service's leaf (CN wallet-service, the same /certs); the hot_wallet seed is not loaded.
+      SIGNER_BACKEND: ${SIGNER_BACKEND:-pkcs11}
+      HSM_GATEWAY_URL: https://hsm-gateway:8445
+    extra_hosts: ["hsm-gateway:10.10.0.1"]
     ports: !override ["10.10.0.2:8443:8443", "10.10.0.2:8080:8080"] # gateway (plain HTTP: a documented gap, now private), peers
     mem_limit: 300m
+    memswap_limit: 300m
+
+  # The Hot cutover job (docs/runbooks/hot-cutover.md) runs here: it needs custody's database and wallet-service's leaf.
+  hot-cutover:
+    environment:
+      POSTGRES_DSN: postgres://svc_wallet:${SVC_WALLET_PASSWORD}@postgres:5432/custody?sslmode=disable
+      HSM_GATEWAY_URL: https://hsm-gateway:8445
+      LEDGER_SERVICE_URL: https://ledger-service:8444
+    extra_hosts: ["hsm-gateway:10.10.0.1", "ledger-service:10.10.0.1"]
+
+  # key-admin (docs/runbooks/dev-hsm-bringup.md): custody's database and the gateway over WireGuard, as its own pinned leaf (CN key-admin).
+  key-admin:
+    environment:
+      POSTGRES_DSN: postgres://svc_wallet:${SVC_WALLET_PASSWORD}@postgres:5432/custody?sslmode=disable
+      HSM_GATEWAY_URL: https://hsm-gateway:8445
+    extra_hosts: ["hsm-gateway:10.10.0.1"]
 
   withdrawal-service:
     environment:
@@ -86,8 +109,18 @@ services:
     depends_on: !override
       kafka: {condition: service_healthy}
       anvil: {condition: service_healthy}
+      sweep-signer: {condition: service_healthy}
     ports: !override []
     mem_limit: 200m
+
+  # sweep-signer (key-custody-hsm.md M3b): the only holder of the user_derivation seed, next to custody's database. No published port: sweeper
+  # reaches it on this node's compose network (mTLS, CN sweeper, pinned leaf). With SIGNER_BACKEND=pkcs11 it pins the Hot address from hsm-gateway
+  # over WireGuard (as its own pinned leaf, CN sweep-signer), and gets the seed by POST /v1/vault/unseal on the same gateway. Hardening is in e2e/docker-compose.yml
+  # and checked by `make verify`; its secrets are files from `make vault-files`.
+  sweep-signer:
+    environment:
+      HSM_GATEWAY_URL: https://hsm-gateway:8445
+    extra_hosts: ["hsm-gateway:10.10.0.1"]
 
   simulator:
     environment:

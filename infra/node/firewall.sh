@@ -14,6 +14,13 @@ WG_IF=${WG_IF:-wg0}
 WG_NET=${WG_NET:-10.10.0.0/24}
 WG_PORT=${WG_PORT:-51820}
 SSH_PORT=${SSH_PORT:-22}
+# hsm-gateway (key-custody-hsm.md M2b): published on vm2's WireGuard address only, and reachable only by the peer node's
+# WireGuard address (wallet-service on vm3). Nothing else on wg0, no bridge-forwarded connection, nothing public.
+HSM_GATEWAY_PORT=${HSM_GATEWAY_PORT:-8445}
+HSM_GATEWAY_PEER=${HSM_GATEWAY_PEER:-10.10.0.2}
+# sweep-signer (key-custody-hsm.md M3b, invariant 16) is deliberately NOT here: it publishes no port at all (sweeper reaches it on vm3's own compose
+# network over mTLS), so there is nothing to admit and nothing to drop. `dev/verify.sh` section 7 asserts the container publishes nothing, and
+# section 2 already proves 8443 is closed on the peer's public address.
 if [ -z "${PUBLIC_IF:-}" ]; then
 	PUBLIC_IF=$(ip -4 route show default | awk '{print $5; exit}')
 fi
@@ -54,6 +61,10 @@ apply() {
 	iptables -N DOCKER-USER 2>/dev/null || true
 	iptables -N DIGIWAL-DOCKER
 	iptables -A DIGIWAL-DOCKER -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN
+	# before the generic wg0 allowance: a NEW connection to the gateway's published port is admitted from the peer's
+	# WireGuard address on wg0 and from nowhere else (a conntrack DNAT match, so it follows the published port).
+	iptables -A DIGIWAL-DOCKER -p tcp -i "$WG_IF" -s "$HSM_GATEWAY_PEER" -m conntrack --ctstate DNAT --ctorigdstport "$HSM_GATEWAY_PORT" -j RETURN
+	iptables -A DIGIWAL-DOCKER -p tcp -m conntrack --ctstate DNAT --ctorigdstport "$HSM_GATEWAY_PORT" -j DROP
 	iptables -A DIGIWAL-DOCKER -i "$WG_IF" -j RETURN
 	iptables -A DIGIWAL-DOCKER ! -i "$PUBLIC_IF" -j RETURN
 	iptables -A DIGIWAL-DOCKER -i "$PUBLIC_IF" -m conntrack --ctstate DNAT -j DROP

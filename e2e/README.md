@@ -15,6 +15,33 @@ The stack always starts on a **fresh chain**: the test deploys `contracts/MockER
 `assets.yaml` registers the address Anvil gives account #0's first contract. If `make test` says the
 token landed elsewhere, run `make down up`.
 
+## Sweeps go through sweep-signer (M3b)
+
+`make up` runs the HSM ceremony (SoftHSM token with the Hot Key, the attestation key and the KEK; pins; `hsm-gateway` up), then `make init`: custody migrations, the roles
+`svc_sweepsigner` and `svc_keyadmin` and the `vault` schema with their proofs, and `key-admin init` (generate the seed, have the gateway seal it, attest the xpub, prove
+address parity, activate). Then it starts `sweep-signer`: a `scratch` image, read-only, no capabilities, no published port, which gets the seed per Sweep by gateway unseal
+and signs the Sweeps (`sweeper` -> `SWEEP_SIGNER_URL`). This is the same in `make e2e` (software Hot Wallet, the legacy regression baseline) and `make e2e-hsm`.
+`wallet-service` has no user seed and no `/v1/sign/user-address`. The deposit-credit and sweep
+assertions below therefore only pass if sweep-signer signed.
+
+## The same flow through a real HSM gateway
+
+`make e2e-hsm` runs the same tests with `SIGNER_BACKEND=pkcs11`: `docker-compose.hsm.yml` adds `hsm-gateway` (a real
+SoftHSMv2 token, the Hot Key generated inside it, real mTLS with the pinned wallet-service leaf, a Signing Policy file
+and an Audit Log), `make hsm-setup` does the ceremony, and wallet-service signs every Hot Wallet transaction (payouts,
+Gas Top-Ups, the Fee Bump and the Nonce Filler) through it and never loads the `hot_wallet` seed. `make down` drops the
+token and `hsm-config/`. Without `SIGNER_BACKEND` nothing changes.
+
+## The Hot cutover rehearsal
+
+`make e2e-cutover` rehearses `docs/runbooks/hot-cutover.md` (key-custody-hsm.md 5.5): the stack starts on the **software** Hot with the
+dev auditor watching; `cutover_test.go` phase `before` leaves the old Hot with native + ERC-20, a withdrawal whose signed tx was dropped
+from the mempool (stuck) and a Gas Top-Up in flight; a new key is created in SoftHSM and `hsm-gateway` started; then freeze, settle,
+drain, switch wallet-service to `pkcs11`, verify, complete (each twice), with a withdrawal attempted during the freeze (`frozen`
+phase); phase `after` proves the old Hot is empty, the new Hot holds the funds, the stuck tx and top-up resolved, withdrawals are signed
+by the new Hot, and the ledger/nonce invariants hold; finally the auditor must have no open warn/critical finding. Single steps:
+`make hot-cutover-<step>` (`DRY_RUN=1` to print only).
+
 ## What is asserted
 
 1. `POST /users` and `GET /v1/deposit-address` — stable address per user, distinct across users.

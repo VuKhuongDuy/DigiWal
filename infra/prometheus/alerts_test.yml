@@ -463,3 +463,218 @@ tests:
       exp_annotations:
         summary: 'ledger-service: database pool over 80% in use'
         description: 'Objective: pool saturation below 80%.'
+# ---- key custody (docs/design/key-custody-hsm.md 5.6, M4)
+- interval: 1m
+  # a refusal series that is born at 1 (the first refusal ever of that rule) must fire; a quiet one (4 since minute 0) must not
+  input_series:
+  - series: digiwal_hsm_gateway_policy_refusals_total{service="hsm-gateway",rule="per_tx_max"}
+    values: _x12 1+0x30
+  - series: digiwal_hsm_gateway_policy_refusals_total{service="hsm-gateway",rule="dest_not_allowed"}
+    values: 4+0x45
+  alert_rule_test:
+  - eval_time: 11m
+    alertname: HsmPolicyRefusal
+    exp_alerts: []
+  - eval_time: 14m
+    alertname: HsmPolicyRefusal
+    exp_alerts:
+    - exp_labels:
+        severity: critical
+        service: hsm-gateway
+        rule: per_tx_max
+      exp_annotations:
+        summary: hsm-gateway refused to sign (policy rule per_tx_max)
+        description: The Signing Policy said no. Read the audit log entry for the rule and caller; raise a limit by editing the policy and restarting, or leave the request failed.
+  - eval_time: 30m
+    alertname: HsmPolicyRefusal
+    exp_alerts: []
+- interval: 1m
+  input_series:
+  - series: up{service="hsm-gateway",instance="hsm-gateway:9100"}
+    values: 1 1 0 0 0 0
+  alert_rule_test:
+  - eval_time: 2m
+    alertname: HsmGatewayDown
+    exp_alerts: []
+  - eval_time: 5m
+    alertname: HsmGatewayDown
+    exp_alerts:
+    - exp_labels:
+        severity: critical
+        service: hsm-gateway
+        instance: hsm-gateway:9100
+      exp_annotations:
+        summary: 'hsm-gateway is down: no Hot signing, no unseal'
+        description: "Also what a wrong PIN or a tripped PIN guard looks like (it exits and, with on-failure:3, stays down; never loop it: see the container log for 'ALERT HSM login refused'). Fix the secret file or investigate the guard before restarting."
+- interval: 1m
+  input_series:
+  - series: digiwal_hsm_gateway_self_test_ok{service="hsm-gateway"}
+    values: 1 1 0 0 0 0
+  - series: digiwal_hsm_gateway_sign_total{service="hsm-gateway",result="not_serving"}
+    values: 0 0 0 1 2 3
+  alert_rule_test:
+  - eval_time: 2m
+    alertname: HsmSelfTestFailing
+    exp_alerts: []
+  - eval_time: 4m
+    alertname: HsmSelfTestFailing
+    exp_alerts:
+    - exp_labels:
+        severity: critical
+        service: hsm-gateway
+      exp_annotations:
+        summary: "hsm-gateway's self-test fails: it is not serving signatures"
+        description: The periodic sign-and-recover check failed (wrong address, wrong v, key swapped or token unavailable). Investigate before re-enabling; a changed Hot address is never accepted without a cutover.
+  - eval_time: 5m
+    alertname: HsmNotServing
+    exp_alerts:
+    - exp_labels:
+        severity: warning
+        service: hsm-gateway
+        result: not_serving
+      exp_annotations:
+        summary: hsm-gateway answered a sign request while not serving
+        description: Callers are being refused (self-test failed, kill switch enabled=false, or audit log unhealthy).
+- interval: 1m
+  # audit write failure on any of the three paths; ok results never fire
+  input_series:
+  - series: digiwal_hsm_gateway_sign_total{service="hsm-gateway",result="signed"}
+    values: 5 6 7 8 9 10
+  - series: digiwal_hsm_gateway_vault_total{service="hsm-gateway",result="unseal_audit_error"}
+    values: _ _ 1 1 1 1
+  alert_rule_test:
+  - eval_time: 1m
+    alertname: HsmAuditWriteFailure
+    exp_alerts: []
+  - eval_time: 3m
+    alertname: HsmAuditWriteFailure
+    exp_alerts:
+    - exp_labels:
+        severity: critical
+        service: hsm-gateway
+        result: unseal_audit_error
+      exp_annotations:
+        summary: hsm-gateway could not write its audit log (digiwal_hsm_gateway_vault_total, unseal_audit_error)
+        description: No signature is given without an audit line, so signing has stopped. Free disk space or repair the audit volume; the log is append-only.
+- interval: 1m
+  input_series:
+  - series: digiwal_hsm_gateway_vault_total{service="hsm-gateway",result="unseal_caller_not_allowed"}
+    values: _ 1 1 1
+  - series: digiwal_hsm_gateway_vault_total{service="hsm-gateway",result="seal_maintenance_window_closed"}
+    values: 1 1 2 3
+  alert_rule_test:
+  - eval_time: 0m
+    alertname: HsmVaultIntegrityRefusal
+    exp_alerts: []
+  - eval_time: 2m
+    alertname: HsmVaultIntegrityRefusal
+    exp_alerts:
+    - exp_labels:
+        severity: critical
+        service: hsm-gateway
+        result: unseal_caller_not_allowed
+      exp_annotations:
+        summary: "hsm-gateway vault: unseal_caller_not_allowed"
+        description: A tampered row, or an unseal/seal from a CN that must not ask. Treat as a possible sweep-signer or database compromise until explained.
+- interval: 1m
+  # 60 unseals in the first minutes (over 80% of the cap), then quiet
+  input_series:
+  - series: digiwal_hsm_gateway_vault_total{service="hsm-gateway",result="unseal_ok"}
+    values: 0 60 120 125 130 135
+  alert_rule_test:
+  - eval_time: 1m
+    alertname: HsmVaultUnsealRateHigh
+    exp_alerts:
+    - exp_labels:
+        severity: warning
+      exp_annotations:
+        summary: Seed unseals at 60 per minute (the gateway caps at 60, VAULT_UNSEAL_PER_MIN)
+        description: "Over 80% of the cap (initial; tune to the real Sweep rate). A rate_limited refusal means the cap was reached: sweeps are being delayed or something is draining the Seed."
+  - eval_time: 5m
+    alertname: HsmVaultUnsealRateHigh
+    exp_alerts: []
+- interval: 1m
+  input_series:
+  - series: digiwal_hsm_gateway_maintenance_window_open_seconds{service="hsm-gateway"}
+    values: 0 60 600 1200 0
+  alert_rule_test:
+  - eval_time: 2m
+    alertname: HsmMaintenanceWindowLong
+    exp_alerts: []
+  - eval_time: 3m
+    alertname: HsmMaintenanceWindowLong
+    exp_alerts:
+    - exp_labels:
+        severity: warning
+        service: hsm-gateway
+      exp_annotations:
+        summary: A Maintenance Window has been open for 20m 0s
+        description: KEK administration is allowed while it is open. Close it with `make maintenance-close` on the gateway node (it also expires on its own after at most 1 h).
+  - eval_time: 4m
+    alertname: HsmMaintenanceWindowLong
+    exp_alerts: []
+- interval: 1m
+  input_series:
+  - series: sweep_signer_refusals_total{service="sweep-signer",rule="destination"}
+    values: _ _ 1 1 1
+  - series: sweep_signer_signing_frozen{service="sweep-signer"}
+    values: 0 0 1 1 1 1
+  - series: sweep_signer_audit_mismatches_total{service="sweep-signer"}
+    values: 0 0 1 1 1 1
+  - series: sweep_signer_seed_pages_unlocked_total{service="sweep-signer"}
+    values: 0 0 0 0 0 0
+  alert_rule_test:
+  - eval_time: 1m
+    alertname: SweepSignerRefusal
+    exp_alerts: []
+  - eval_time: 3m
+    alertname: SweepSignerRefusal
+    exp_alerts:
+    - exp_labels:
+        severity: critical
+        service: sweep-signer
+        rule: destination
+      exp_annotations:
+        summary: sweep-signer refused a Sweep (rule destination)
+        description: "A request broke one of the Sweep invariants (destination, asset, index, amount). The sweeper is not the only thing that can have asked: check the ALERT line in sweep-signer's log."
+  - eval_time: 5m
+    alertname: SweepSignerFrozen
+    exp_alerts:
+    - exp_labels:
+        severity: critical
+        service: sweep-signer
+      exp_annotations:
+        summary: sweep-signer has frozen all signing (Address Audit mismatch)
+        description: A deposit address no longer re-derives from the Seed. Do not restart it to clear the freeze; investigate wallet_addresses and the xpub first (it stays frozen on purpose).
+  - eval_time: 3m
+    alertname: SweepSignerAddressAuditMismatch
+    exp_alerts:
+    - exp_labels:
+        severity: critical
+        service: sweep-signer
+      exp_annotations:
+        summary: "sweep-signer's Address Audit found a mismatch"
+        description: wallet_addresses holds an address the Seed does not derive (database tampered, or a wrong xpub was attested).
+  - eval_time: 5m
+    alertname: SweepSignerSeedNotLocked
+    exp_alerts: []
+- interval: 1m
+  input_series:
+  - series: digiwal_hot_signer_breaker_open{service="wallet-service"}
+    values: 0 1 1 1 1 0
+  alert_rule_test:
+  - eval_time: 1m
+    alertname: HotSignerBreakerOpen
+    exp_alerts: []
+  - eval_time: 4m
+    alertname: HotSignerBreakerOpen
+    exp_alerts:
+    - exp_labels:
+        severity: critical
+        service: wallet-service
+      exp_annotations:
+        summary: "wallet-service's Hot signer circuit breaker has been open for a minute"
+        description: hsm-gateway keeps failing (down, WireGuard, bad certificate, HSM error). Withdrawals stay reserved, Gas Top-Ups and Sweeps wait. See hsm-gateway's log and HsmGatewayDown.
+  - eval_time: 5m
+    alertname: HotSignerBreakerOpen
+    exp_alerts: []

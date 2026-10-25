@@ -9,7 +9,7 @@ COPY contracts contracts
 RUN CGO_ENABLED=0 go build -o /out/sim ./cmd/sim
 
 FROM alpine:3.20
-RUN adduser -D -H app && mkdir /data && chown app /data
+RUN adduser -D -H -u 10014 app && mkdir /data && chown app /data
 USER app
 COPY --from=build /out/sim /usr/local/bin/sim
 ENV SIM_STATE_FILE=/data/state.json

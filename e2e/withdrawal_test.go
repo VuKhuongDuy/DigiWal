@@ -298,7 +298,7 @@ func TestWithdrawals(t *testing.T) {
 			return st == "disputed", st
 		})
 		waitFor(t, 60*time.Second, "wallet-service freeze", func() (bool, string) {
-			f := psql(t, "custody", `SELECT coalesce(frozen_from_nonce::text, '') FROM hot_wallet_nonces`)
+			f := psql(t, "custody", fmt.Sprintf(`SELECT coalesce(frozen_from_nonce::text, '') FROM hot_wallet_nonces WHERE lower(hot_address) = lower('%s')`, hot.Hex()))
 			return f == fmt.Sprint(nonceBefore), "frozen_from_nonce=" + f
 		})
 
@@ -515,9 +515,6 @@ func compose(t *testing.T, args ...string) string {
 	full := append([]string{"compose", "-p", "digiwal-e2e", "--project-directory", ".", "-f", "../infra/docker-compose.yml", "-f", "docker-compose.yml"}, args...)
 	cmd := exec.Command("docker", full...)
 	cmd.Env = os.Environ()
-	if os.Getenv("MASTER_KEY_HEX") == "" { // only parsed by compose; `make test` exports the same throwaway value
-		cmd.Env = append(cmd.Env, "MASTER_KEY_HEX=0000000000000000000000000000000000000000000000000000000000000001")
-	}
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("docker %s: %v\n%s", strings.Join(args, " "), err, out)

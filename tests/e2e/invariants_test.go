@@ -35,8 +35,14 @@ func checkInvariants(t testing.TB) {
 	}
 	// wallet side (I8)
 	wchecks := []chk{
-		{"W1 hot-wallet nonces unique and dense", `SELECT count(*) FROM (SELECT chain_id FROM hot_wallet_signatures GROUP BY chain_id HAVING count(DISTINCT nonce)<>count(*) OR max(nonce)-min(nonce)+1<>count(*)) x`},
-		{"W2 next_nonce = max signed + 1", `SELECT count(*) FROM hot_wallet_nonces n WHERE n.next_nonce <> COALESCE((SELECT max(nonce)+1 FROM hot_wallet_signatures s WHERE s.chain_id=n.chain_id), n.next_nonce)`},
+		// Nonce state is per (chain_id, hot_address) (key-custody-hsm.md invariant 24): each Hot address, the
+		// current one and any previous one (hot_address '' = legacy rows not yet attributed), has its own dense
+		// counter. Grouping by address keeps the check as strict as before for every address, and stops two
+		// addresses on one chain from being read as one gappy sequence (or from masking each other's gap).
+		{"W1 hot-wallet nonces unique and dense per Hot address", `SELECT count(*) FROM (SELECT chain_id, hot_address FROM hot_wallet_signatures GROUP BY chain_id, hot_address HAVING count(DISTINCT nonce)<>count(*) OR max(nonce)-min(nonce)+1<>count(*)) x`},
+		{"W2 next_nonce = max signed + 1 per Hot address", `SELECT count(*) FROM hot_wallet_nonces n WHERE n.next_nonce <> COALESCE((SELECT max(nonce)+1 FROM hot_wallet_signatures s WHERE s.chain_id=n.chain_id AND s.hot_address=n.hot_address), n.next_nonce)`},
+		// W2b: every signature has a counter row of its own address, so W2 cannot pass for want of a row.
+		{"W2b every signature's Hot address has a nonce row", `SELECT count(*) FROM hot_wallet_signatures s WHERE NOT EXISTS (SELECT 1 FROM hot_wallet_nonces n WHERE n.chain_id=s.chain_id AND n.hot_address=s.hot_address)`},
 		{"W3 derivation indices unique and < next_index", `SELECT count(*) FROM (SELECT derivation_index FROM wallet_addresses GROUP BY derivation_index HAVING count(*)>1) x`},
 		{"W3b indices < next_index", `SELECT count(*) FROM wallet_addresses a, wallet_seeds s WHERE s.seed_role='user_derivation' AND a.derivation_index >= s.next_index`},
 	}
@@ -60,7 +66,9 @@ func qa(t *testing.T) *testing.T {
 	return t
 }
 
-// syncHot is what a recovery job would do: rebroadcast every stored Hot Wallet signature the chain hasn't seen.
+// syncHot is what a recovery job would do: rebroadcast every stored signature of the CURRENT Hot address
+// (hotAddr, recovered from the signature itself, so a previous Hot address's rows are never replayed) the chain
+// hasn't seen.
 // Tests that sign without broadcasting would otherwise leave a real nonce gap for the tests after them.
 func syncHot(t testing.TB) {
 	t.Helper()
@@ -84,11 +92,20 @@ func syncHot(t testing.TB) {
 		if len(raws) == 0 {
 			return
 		}
+		sent := 0
 		for _, b := range raws {
 			var tx types.Transaction
-			if tx.UnmarshalBinary(b) == nil {
-				_ = cl.SendTransaction(ctx, &tx)
+			if tx.UnmarshalBinary(b) != nil {
+				continue
 			}
+			if from, err := types.Sender(types.LatestSignerForChainID(tx.ChainId()), &tx); err != nil || from != hotAddr {
+				continue
+			}
+			sent++
+			_ = cl.SendTransaction(ctx, &tx)
+		}
+		if sent == 0 {
+			return
 		}
 		mine(t, 1)
 	}

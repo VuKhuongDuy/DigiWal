@@ -34,5 +34,9 @@ scrape_configs:
         labels: {service: sweeper}
       - targets: ["history-service:9100"]
         labels: {service: history-service}
+      - targets: ["hsm-gateway:9100"] # key-custody-hsm.md M4; absent in a stack without the `hsm` profile (then TargetDown, like the auditor)
+        labels: {service: hsm-gateway}
+      - targets: ["sweep-signer:9100"]
+        labels: {service: sweep-signer}
       - targets: ["auditor:9100"] # dev environment only
         labels: {service: auditor}
