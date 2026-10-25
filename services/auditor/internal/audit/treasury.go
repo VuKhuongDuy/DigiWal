@@ -19,6 +19,10 @@ import (
 // signing"). Warm and Cold are moved by an offline CLI that records nothing, so the chain is the only source.
 // All rules are Immediate: they compare the chain with signatures wallet-service wrote before it broadcast.
 //
+// Hot Wallet nonce state is per Hot address: T1, T2 and T4 reconcile the CURRENT Hot address (Tiers.Hot, which
+// the auditor learns from wallet-service's system-addresses) and never mix in another address's counter; T3
+// looks at every signature. See source.hotScope for how pre-migration (hot_address is empty) rows are attributed.
+//
 // The tier addresses come from configuration, not from wallet-service: the auditor calls no service API, and
 // the system-addresses endpoint is withdrawal-service's (task A8 adds Cold and the auditor there).
 type TreasuryAudit struct {
@@ -85,7 +89,12 @@ func (a *TreasuryAudit) Run(ctx context.Context) (job.Outcome, error) {
 		}
 	}
 
-	// T1: read the chain first, then the database (next_nonce only grows, so this order cannot false-alarm).
+	if !strings.EqualFold(a.Src.Hot, a.Tiers.Hot) {
+		return job.Outcome{}, fmt.Errorf("treasury audit: source scoped to Hot %q but tiers say %q", a.Src.Hot, a.Tiers.Hot)
+	}
+
+	// T1 (per Hot address, key-custody-hsm.md invariant 24): read the chain first, then the database (next_nonce only grows, so this order cannot false-alarm).
+	nonceRef := treasury.NonceRef(a.ChainID, a.Tiers.Hot)
 	count, err := a.Src.Chain.TxCount(ctx, a.Tiers.Hot)
 	if err != nil {
 		return job.Outcome{}, err
@@ -97,7 +106,7 @@ func (a *TreasuryAudit) Run(ctx context.Context) (job.Outcome, error) {
 	if !ok {
 		next = 0
 	}
-	add(treasury.NonceRef(a.ChainID), treasury.T1(count, next))
+	add(nonceRef, treasury.T1(count, next))
 
 	// T3: every signature, each run.
 	sigs, err := a.Src.Signatures(ctx)
@@ -126,8 +135,16 @@ func (a *TreasuryAudit) Run(ctx context.Context) (job.Outcome, error) {
 	for _, ref := range open {
 		switch {
 		case touched[ref]:
-		case strings.HasPrefix(ref, "nonce:"), strings.HasPrefix(ref, "sig:"):
+		case strings.HasPrefix(ref, "sig:"):
 			touched[ref] = true // fully recomputed above and not violating now
+		case strings.HasPrefix(ref, "nonce:"):
+			// "nonce:<chain>:<hot>" was recomputed above only if it is the current Hot's (touched, handled
+			// first). One for a previous Hot address stays open: nobody re-checks that address, so it must not
+			// be resolved by silence. The old "nonce:<chain>" form (before per-address state) was the one Hot
+			// address of its day and is resolved here like the current one.
+			if len(strings.Split(ref, ":")) == 2 {
+				touched[ref] = true
+			}
 		case strings.HasPrefix(ref, "tx:"):
 			parts := strings.Split(ref, ":")
 			if len(parts) != 3 {

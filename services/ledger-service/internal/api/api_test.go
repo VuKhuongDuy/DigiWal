@@ -264,7 +264,7 @@ const gasBody = `{"chain_id":31337,"tx_hash":"0x11111111111111111111111111111111
 // ledger.md invariant #12: gas-fees has its own allow-list (the two signers), and sweeper still cannot
 // reach apply, the Locks, or anything else.
 func TestGasFeesAreReportedByTheTwoSignersOnly(t *testing.T) {
-	for cn, want := range map[string]int{"withdrawal-service": 200, "sweeper": 200, "api-gateway": 403, "chain-watcher": 403, "": 403} {
+	for cn, want := range map[string]int{"withdrawal-service": 200, "sweeper": 200, "hot-cutover": 200, "api-gateway": 403, "chain-watcher": 403, "": 403} {
 		f := &fake{gas: ledger.GasFeeResult{TransactionID: "tx1", Amount: big.NewInt(42)}}
 		if got := call(t, f, cn, "/v1/ledger/gas-fees", gasBody).Code; got != want {
 			t.Errorf("CN=%q: %d, want %d", cn, got, want)
@@ -273,9 +273,11 @@ func TestGasFeesAreReportedByTheTwoSignersOnly(t *testing.T) {
 			t.Errorf("CN=%q reached the ledger", cn)
 		}
 	}
-	for path, body := range endpoints { // sweeper is still 403 on apply and the Lock trio
-		if got := call(t, &fake{}, "sweeper", path, body).Code; got != 403 {
-			t.Errorf("sweeper reached %s: %d", path, got)
+	for path, body := range endpoints { // sweeper (and the operator's hot-cutover) are still 403 on apply and the Lock trio
+		for _, cn := range []string{"sweeper", "hot-cutover"} {
+			if got := call(t, &fake{}, cn, path, body).Code; got != 403 {
+				t.Errorf("%s reached %s: %d", cn, path, got)
+			}
 		}
 	}
 }

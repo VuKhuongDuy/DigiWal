@@ -71,7 +71,7 @@ func lookupHotSignature(ctx context.Context, q queryRower, caller, key, requestH
 //   - An open Nonce Gap refuses new allocation (ErrNonceGapOpen) but still lets
 //     an already-stored key replay.
 func (s *Store) SignHotWallet(
-	ctx context.Context, chainID int64, caller, key, requestHash string,
+	ctx context.Context, chainID int64, hot, caller, key, requestHash string,
 	seedNonce func(context.Context) (uint64, error),
 	sign func(nonce uint64) ([]byte, error),
 ) (HotSignature, error) {
@@ -81,7 +81,7 @@ func (s *Store) SignHotWallet(
 	}
 	defer tx.Rollback(ctx)
 
-	next, frozen, err := lockNonceRow(ctx, tx, chainID, seedNonce)
+	next, frozen, err := lockNonceRow(ctx, tx, chainID, hot, seedNonce)
 	if err != nil {
 		return HotSignature{}, err
 	}
@@ -106,17 +106,27 @@ func (s *Store) SignHotWallet(
 		return HotSignature{}, ErrNonceGapOpen
 	}
 
+	// An open Hot cutover freezes new allocation on the whole chain (key-custody-hsm.md 5.5, migration 000006). Read
+	// under the nonce-row lock that FreezeHotSigning also takes, so no sign straddles the freeze.
+	var cutover bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM hot_cutover WHERE chain_id = $1 AND state <> 'done')`, chainID).Scan(&cutover); err != nil {
+		return HotSignature{}, fmt.Errorf("reading hot cutover state: %w", err)
+	}
+	if cutover {
+		return HotSignature{}, ErrHotCutover
+	}
+
 	raw, err := sign(uint64(next))
 	if err != nil {
 		return HotSignature{}, err
 	}
 	if _, err := tx.Exec(ctx,
-		`INSERT INTO hot_wallet_signatures (idempotency_key, chain_id, nonce, request_hash, signed_raw_tx, caller_cn)
-		 VALUES ($1, $2, $3, $4, $5, $6)`, key, chainID, next, requestHash, raw, caller); err != nil {
+		`INSERT INTO hot_wallet_signatures (idempotency_key, chain_id, hot_address, nonce, request_hash, signed_raw_tx, caller_cn)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7)`, key, chainID, hot, next, requestHash, raw, caller); err != nil {
 		return HotSignature{}, fmt.Errorf("storing signature: %w", err)
 	}
 	if _, err := tx.Exec(ctx,
-		`UPDATE hot_wallet_nonces SET next_nonce = next_nonce + 1 WHERE chain_id = $1`, chainID); err != nil {
+		`UPDATE hot_wallet_nonces SET next_nonce = next_nonce + 1 WHERE chain_id = $1 AND hot_address = $2`, chainID, hot); err != nil {
 		return HotSignature{}, fmt.Errorf("advancing nonce: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -141,18 +151,18 @@ type NonceFreeze struct {
 // wins, so a repeat is a no-op and a lower report only widens it (#8). Returns the effective
 // freeze. ErrNotFound if the chain has never signed anything (no gap can exist);
 // ErrNonceNotAllocated if fromNonce >= next_nonce.
-func (s *Store) FreezeNonceGap(ctx context.Context, chainID int64, fromNonce uint64) (NonceFreeze, error) {
+func (s *Store) FreezeNonceGap(ctx context.Context, chainID int64, hot string, fromNonce uint64) (NonceFreeze, error) {
 	var from int64
 	var at time.Time
 	err := s.pool.QueryRow(ctx, `
 		UPDATE hot_wallet_nonces
 		   SET frozen_from_nonce = LEAST(COALESCE(frozen_from_nonce, $2), $2),
 		       frozen_at = COALESCE(frozen_at, now())
-		 WHERE chain_id = $1 AND $2 < next_nonce
-		RETURNING frozen_from_nonce, frozen_at`, chainID, int64(fromNonce)).Scan(&from, &at)
+		 WHERE chain_id = $1 AND hot_address = $3 AND $2 < next_nonce
+		RETURNING frozen_from_nonce, frozen_at`, chainID, int64(fromNonce), hot).Scan(&from, &at)
 	if errors.Is(err, pgx.ErrNoRows) {
 		var exists bool
-		if err := s.pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM hot_wallet_nonces WHERE chain_id = $1)`, chainID).Scan(&exists); err != nil {
+		if err := s.pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM hot_wallet_nonces WHERE chain_id = $1 AND hot_address = $2)`, chainID, hot).Scan(&exists); err != nil {
 			return NonceFreeze{}, err
 		}
 		if !exists {
@@ -169,9 +179,9 @@ func (s *Store) FreezeNonceGap(ctx context.Context, chainID int64, fromNonce uin
 // ResolveNonceGap clears the freeze flag (operator action, invariant #9). It does
 // not touch next_nonce: what the sequence should look like afterwards depends on
 // how the operator resolved the gap, which the design docs don't yet specify.
-func (s *Store) ResolveNonceGap(ctx context.Context, chainID int64) error {
+func (s *Store) ResolveNonceGap(ctx context.Context, chainID int64, hot string) error {
 	tag, err := s.pool.Exec(ctx,
-		`UPDATE hot_wallet_nonces SET frozen_from_nonce = NULL, frozen_at = NULL WHERE chain_id = $1`, chainID)
+		`UPDATE hot_wallet_nonces SET frozen_from_nonce = NULL, frozen_at = NULL WHERE chain_id = $1 AND hot_address = $2`, chainID, hot)
 	if err != nil {
 		return fmt.Errorf("resolving nonce gap: %w", err)
 	}
@@ -181,12 +191,13 @@ func (s *Store) ResolveNonceGap(ctx context.Context, chainID int64) error {
 	return nil
 }
 
-// lockNonceRow locks the chain's nonce row FOR UPDATE — the one lock every signer, voider and
-// replacer of that chain serialises on — creating it from seedNonce the first time the chain is used.
-func lockNonceRow(ctx context.Context, tx pgx.Tx, chainID int64, seedNonce func(context.Context) (uint64, error)) (next int64, frozen *int64, err error) {
+// lockNonceRow locks the nonce row of (chain, Hot address) FOR UPDATE — the one lock every signer, voider and
+// replacer of that chain serialises on — creating it from seedNonce the first time that address is used on the chain: a new Hot address
+// never inherits another address's counter (key-custody-hsm.md invariant 24).
+func lockNonceRow(ctx context.Context, tx pgx.Tx, chainID int64, hot string, seedNonce func(context.Context) (uint64, error)) (next int64, frozen *int64, err error) {
 	lock := func() error {
 		return tx.QueryRow(ctx,
-			`SELECT next_nonce, frozen_from_nonce FROM hot_wallet_nonces WHERE chain_id = $1 FOR UPDATE`, chainID).
+			`SELECT next_nonce, frozen_from_nonce FROM hot_wallet_nonces WHERE chain_id = $1 AND hot_address = $2 FOR UPDATE`, chainID, hot).
 			Scan(&next, &frozen)
 	}
 	err = lock()
@@ -199,8 +210,8 @@ func lockNonceRow(ctx context.Context, tx pgx.Tx, chainID int64, seedNonce func(
 			return 0, nil, fmt.Errorf("seeding hot wallet nonce: %w", serr)
 		}
 		if _, err := tx.Exec(ctx,
-			`INSERT INTO hot_wallet_nonces (chain_id, next_nonce) VALUES ($1, $2) ON CONFLICT (chain_id) DO NOTHING`,
-			chainID, int64(seed)); err != nil {
+			`INSERT INTO hot_wallet_nonces (chain_id, hot_address, next_nonce) VALUES ($1, $2, $3) ON CONFLICT (chain_id, hot_address) DO NOTHING`,
+			chainID, hot, int64(seed)); err != nil {
 			return 0, nil, fmt.Errorf("creating nonce row: %w", err)
 		}
 		err = lock()
@@ -218,9 +229,9 @@ type NonceState struct {
 	FrozenFrom *uint64 // non-nil while a Nonce Gap is open
 }
 
-// NonceStates lists every chain's nonce state. Read-only.
-func (s *Store) NonceStates(ctx context.Context) ([]NonceState, error) {
-	rows, err := s.pool.Query(ctx, `SELECT chain_id, next_nonce, frozen_from_nonce FROM hot_wallet_nonces ORDER BY chain_id`)
+// NonceStates lists every chain's nonce state for the given Hot address. Read-only.
+func (s *Store) NonceStates(ctx context.Context, hot string) ([]NonceState, error) {
+	rows, err := s.pool.Query(ctx, `SELECT chain_id, next_nonce, frozen_from_nonce FROM hot_wallet_nonces WHERE hot_address = $1 ORDER BY chain_id`, hot)
 	if err != nil {
 		return nil, fmt.Errorf("reading nonce states: %w", err)
 	}
@@ -241,4 +252,26 @@ func (s *Store) NonceStates(ctx context.Context) ([]NonceState, error) {
 		out = append(out, n)
 	}
 	return out, rows.Err()
+}
+
+// LegacyHotAddress is the hot_address of rows written before invariant 24's migration: unattributed.
+const LegacyHotAddress = ""
+
+// AdoptLegacyHotAddress attributes every unattributed (pre-migration) nonce row and signature to hot.
+// It is called at start-up ONLY by the software backend, whose Hot address is by definition the one
+// those rows were signed with; the pkcs11 backend never calls it, so a new HSM Hot address starts at
+// its own on-chain nonce and cannot inherit the old counter (invariant 24; the drain of the old
+// address is the cutover, M2c). Idempotent.
+func (s *Store) AdoptLegacyHotAddress(ctx context.Context, hot string) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("beginning tx: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	for _, t := range []string{"hot_wallet_nonces", "hot_wallet_signatures"} {
+		if _, err := tx.Exec(ctx, `UPDATE `+t+` SET hot_address = $1 WHERE hot_address = $2`, hot, LegacyHotAddress); err != nil {
+			return fmt.Errorf("adopting legacy rows of %s: %w", t, err)
+		}
+	}
+	return tx.Commit(ctx)
 }

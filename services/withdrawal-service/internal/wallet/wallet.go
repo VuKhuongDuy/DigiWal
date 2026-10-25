@@ -124,6 +124,20 @@ type SignRequest struct {
 // already signed (invariant #16), so a lost response can never strand a nonce.
 var ErrSignRefused = errors.New("wallet-service refused to sign")
 
+// SignPolicyRefusedError is the sign-path 422 {"error":"policy_refused","rule":"<id>"}: hsm-gateway's
+// Signing Policy refused. It is an ErrSignRefused in every way (no nonce allocated, the Lock is
+// Released); use errors.As to get the rule id and tell it from other refusals.
+type SignPolicyRefusedError struct {
+	Rule string
+	Body string
+}
+
+func (e *SignPolicyRefusedError) Error() string {
+	return fmt.Sprintf("%s (422, signing policy rule %q): %s", ErrSignRefused.Error(), e.Rule, e.Body)
+}
+
+func (e *SignPolicyRefusedError) Is(target error) bool { return target == ErrSignRefused }
+
 // ErrKeyConflict: wallet-service answered 409 — the Withdrawal Key already has a signature for a
 // different request. Should be impossible (the key is unique and the request deterministic).
 var ErrKeyConflict = errors.New("wallet-service already signed this key for a different request")
@@ -150,6 +164,11 @@ func (c *Client) SignHotWallet(ctx context.Context, r SignRequest) (rawTx string
 		}
 		return out.SignedRawTx, out.Nonce, nil
 	case http.StatusBadRequest, http.StatusUnprocessableEntity:
+		if code == http.StatusUnprocessableEntity {
+			if rule, ok := policyRule(body); ok {
+				return "", 0, &SignPolicyRefusedError{Rule: rule, Body: strings.TrimSpace(string(body))}
+			}
+		}
 		return "", 0, fmt.Errorf("%w (%d): %s", ErrSignRefused, code, strings.TrimSpace(string(body)))
 	case http.StatusGone:
 		return "", 0, fmt.Errorf("%w: %s", ErrKeyVoided, strings.TrimSpace(string(body)))
@@ -270,14 +289,42 @@ type Replacement struct {
 	Seq   int
 }
 
-// Why a replace was refused. Both mean: alert an operator; neither may be retried blindly.
+// Why a replace was refused. Each means: alert an operator; none may be retried blindly.
 var (
-	// ErrReplaceCeiling: the bump would need a fee above wallet-service's ceiling (422).
+	// ErrReplaceCeiling: the bump would need a fee above wallet-service's ceiling (a 422 that is not a policy
+	// refusal).
 	ErrReplaceCeiling = errors.New("wallet-service refused the Fee Bump: fee ceiling")
+	// ErrReplacePolicyRefused: hsm-gateway's Signing Policy refused the re-signing (422 with body
+	// {"error":"policy_refused","rule":"<id>"}, key-custody-hsm.md section 6). Not a fee problem: raising the
+	// ceiling would not help. Use errors.As with *PolicyRefusedError for the rule id.
+	ErrReplacePolicyRefused = errors.New("wallet-service refused the Fee Bump: signing policy")
 	// ErrReplaceRefused: 404 (never signed) or 409 (a Nonce Filler is the latest version, a
 	// replacement_seq gap, or not our key).
 	ErrReplaceRefused = errors.New("wallet-service refused the Fee Bump")
 )
+
+// PolicyRefusedError carries the id of the Signing Policy rule that refused. It matches
+// ErrReplacePolicyRefused with errors.Is.
+type PolicyRefusedError struct{ Rule string }
+
+func (e *PolicyRefusedError) Error() string {
+	return fmt.Sprintf("%s (rule %q)", ErrReplacePolicyRefused.Error(), e.Rule)
+}
+
+func (e *PolicyRefusedError) Is(target error) bool { return target == ErrReplacePolicyRefused }
+
+// policyRule returns the rule id of a 422 body {"error":"policy_refused","rule":"<id>"}; ok is false for any
+// other body (the fee ceiling's is {"error":"<message>"}, and an unparseable one is not a policy refusal).
+func policyRule(body []byte) (rule string, ok bool) {
+	var b struct {
+		Error string `json:"error"`
+		Rule  string `json:"rule"`
+	}
+	if json.Unmarshal(body, &b) != nil || b.Error != "policy_refused" {
+		return "", false
+	}
+	return b.Rule, true
+}
 
 // ReplaceHotWallet is POST /v1/sign/hot-wallet/{key}/replace {replacement_seq}: the same tx re-signed
 // at the same nonce with higher fees (invariant #21). The same seq replays the stored replacement, so
@@ -301,6 +348,9 @@ func (c *Client) ReplaceHotWallet(ctx context.Context, key string, seq int) (Rep
 		}
 		return Replacement{RawTx: out.SignedRawTx, Hash: strings.ToLower(out.TxHash), Nonce: out.Nonce, Seq: out.ReplacementSeq}, nil
 	case http.StatusUnprocessableEntity:
+		if rule, ok := policyRule(body); ok {
+			return Replacement{}, &PolicyRefusedError{Rule: rule}
+		}
 		return Replacement{}, fmt.Errorf("%w: %s", ErrReplaceCeiling, strings.TrimSpace(string(body)))
 	case http.StatusNotFound, http.StatusConflict:
 		return Replacement{}, fmt.Errorf("%w (%d): %s", ErrReplaceRefused, code, strings.TrimSpace(string(body)))

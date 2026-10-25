@@ -64,7 +64,8 @@ e2e test (3.8) is not built yet.
      (never the client's key). The signed raw tx, its nonce and chain are stored. wallet-service returns
      the stored tx for a key it already signed (invariant #16), so a lost response or a crash never
      allocates a second nonce. A refusal (400/422: no nonce allocated) Releases the Lock and fails the
-     request (`sign_refused`); a 409 (the key already signed for a different
+     request (`sign_refused`; a 422 `policy_refused` from hsm-gateway's Signing Policy fails it as
+     `policy_refused` and also raises ALERT `sign-policy-refused` with the rule id); a 409 (the key already signed for a different
      request, so a nonce exists) is an `ALERT` and never released (withdrawal-flow.md Open Questions #16);
      anything else (503 during a Nonce Gap, 5xx, timeout) is retried.
   2. `signed → broadcast`: sends exactly the stored raw tx. "Already known", or a tx that is already
@@ -262,7 +263,7 @@ with the process. `digiwal_outbox_unpublished` and `digiwal_outbox_oldest_unpubl
 
 **Reaper and ALERTs.** `digiwal_reaper_actions_total{rule}` (stuck requests the Reaper failed: `stale_request`, `stale_reservation`,
 `replaced_or_dropped`), `digiwal_withdrawal_alerts_total{kind}` (ALERTs actually emitted after de-duplication, from the Reaper and the
-pipeline: `signed-stuck`, `broadcast-stuck`, `bump-ceiling`, ...) and `digiwal_reaper_last_pass_timestamp_seconds` (absent until the first
+pipeline: `signed-stuck`, `broadcast-stuck`, `bump-ceiling`, `bump-policy-refused`, `sign-policy-refused`, ...) and `digiwal_reaper_last_pass_timestamp_seconds` (absent until the first
 pass; a `ReaperDead` alert fires when it stops advancing). They come from `pipeline.Observer`, a hook that can only receive facts. In-process, so they
 restart with the service. `digiwal_hot_wallet_floor` / `..._ceiling{asset}` are the Asset Registry's `hot_floor` / `hot_ceiling` (read at startup;
 an edit needs a restart); they are display and alerting only and never affect a withdrawal.

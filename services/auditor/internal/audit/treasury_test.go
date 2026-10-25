@@ -101,7 +101,7 @@ func newTrEnv(t *testing.T) (*trEnv, string, string) {
 	tr.chain.moves[11] = []source.RawMovement{{TxHash: hashG, LogIndex: -1, From: tHot, To: tDep, Amount: big.NewInt(1), Block: 11, Time: t0}}
 
 	tr.job = &TreasuryAudit{
-		Src:   &source.Treasury{Wallet: e.ro["wallet"], Ledger: e.ro["ledger"], Withdrawal: e.ro["withdrawal"], Chain: tr.chain, ChainID: 31337},
+		Src:   &source.Treasury{Wallet: e.ro["wallet"], Ledger: e.ro["ledger"], Withdrawal: e.ro["withdrawal"], Chain: tr.chain, ChainID: 31337, Hot: tHot},
 		Store: e.st, Tiers: treasury.Addresses{Hot: tHot, Warm: tWarm, Cold: tCold}, ChainID: 31337,
 		Every: 5 * time.Minute, Grace: 10 * time.Minute, ScanBlocks: 30, Now: func() time.Time { return e.now },
 	}

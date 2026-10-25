@@ -23,7 +23,7 @@ func build(tag string) func(ReplaceInput) (Built, error) {
 
 func signAs(t *testing.T, s *Store, caller, key string) HotSignature {
 	t.Helper()
-	sig, err := s.SignHotWallet(context.Background(), chain, caller, key, "h", seed(0), raw)
+	sig, err := s.SignHotWallet(context.Background(), chain, hot, caller, key, "h", seed(0), raw)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -34,14 +34,14 @@ func signAs(t *testing.T, s *Store, caller, key string) HotSignature {
 func TestVoidThenSignIsRefusedAndAllocatesNothing(t *testing.T) {
 	s := newStore(t)
 	ctx := context.Background()
-	res, err := s.VoidHotKey(ctx, chain, wd, "withdrawal:a", seed(0))
+	res, err := s.VoidHotKey(ctx, chain, hot, wd, "withdrawal:a", seed(0))
 	if err != nil || !res.Voided {
 		t.Fatalf("void = %+v, %v", res, err)
 	}
-	if again, err := s.VoidHotKey(ctx, chain, wd, "withdrawal:a", seed(0)); err != nil || !again.Voided {
+	if again, err := s.VoidHotKey(ctx, chain, hot, wd, "withdrawal:a", seed(0)); err != nil || !again.Voided {
 		t.Fatalf("a second void = %+v, %v, want voided", again, err)
 	}
-	if _, err := s.SignHotWallet(ctx, chain, wd, "withdrawal:a", "h", seed(0), raw); !errors.Is(err, ErrKeyVoided) {
+	if _, err := s.SignHotWallet(ctx, chain, hot, wd, "withdrawal:a", "h", seed(0), raw); !errors.Is(err, ErrKeyVoided) {
 		t.Fatalf("sign of a voided key = %v, want ErrKeyVoided", err)
 	}
 	if next := signAs(t, s, wd, "withdrawal:b"); next.Nonce != 0 {
@@ -53,7 +53,7 @@ func TestVoidOfASignedKeyReturnsTheSignature(t *testing.T) {
 	s := newStore(t)
 	ctx := context.Background()
 	sig := signAs(t, s, wd, "withdrawal:a")
-	res, err := s.VoidHotKey(ctx, chain, wd, "withdrawal:a", seed(0))
+	res, err := s.VoidHotKey(ctx, chain, hot, wd, "withdrawal:a", seed(0))
 	if err != nil || res.Voided || res.Signed.Nonce != sig.Nonce || string(res.Signed.SignedRawTx) != string(sig.SignedRawTx) {
 		t.Fatalf("void of a signed key = %+v, %v", res, err)
 	}
@@ -73,11 +73,11 @@ func TestVoidRacingSignNeverBothWin(t *testing.T) {
 		var signErr, voidErr error
 		var voided bool
 		wg.Add(2)
-		go func() { defer wg.Done(); _, signErr = s.SignHotWallet(ctx, chain, wd, key, "h", seed(0), raw) }()
+		go func() { defer wg.Done(); _, signErr = s.SignHotWallet(ctx, chain, hot, wd, key, "h", seed(0), raw) }()
 		go func() {
 			defer wg.Done()
 			var r VoidResult
-			r, voidErr = s.VoidHotKey(ctx, chain, wd, key, seed(0))
+			r, voidErr = s.VoidHotKey(ctx, chain, hot, wd, key, seed(0))
 			voided = r.Voided
 		}()
 		wg.Wait()
@@ -90,7 +90,7 @@ func TestVoidRacingSignNeverBothWin(t *testing.T) {
 	}
 	// 20 keys, whatever mix was signed: the next nonce equals the number signed (no gap, no hole).
 	var next, signed int64
-	_ = s.pool.QueryRow(ctx, `SELECT next_nonce FROM hot_wallet_nonces WHERE chain_id = $1`, chain).Scan(&next)
+	_ = s.pool.QueryRow(ctx, `SELECT next_nonce FROM hot_wallet_nonces WHERE chain_id = $1 AND hot_address = $2`, chain, hot).Scan(&next)
 	_ = s.pool.QueryRow(ctx, `SELECT count(*) FROM hot_wallet_signatures`).Scan(&signed)
 	if next != signed {
 		t.Fatalf("next_nonce %d != %d signatures: a nonce was allocated and not used", next, signed)
@@ -110,20 +110,20 @@ func TestKeysAreScopedToTheirCaller(t *testing.T) {
 	if k, err := s.GetHotKey(ctx, wd, "withdrawal:a"); err != nil || k.Nonce != 0 {
 		t.Fatalf("own GET = %+v, %v", k, err)
 	}
-	if _, err := s.VoidHotKey(ctx, chain, sw, "withdrawal:a", seed(0)); !errors.Is(err, ErrNotCallers) {
+	if _, err := s.VoidHotKey(ctx, chain, hot, sw, "withdrawal:a", seed(0)); !errors.Is(err, ErrNotCallers) {
 		t.Fatalf("another caller's void = %v, want ErrNotCallers", err)
 	}
-	if _, err := s.ReplaceHotKey(ctx, chain, sw, "withdrawal:a", 1, KindFeeBump, build("x")); !errors.Is(err, ErrNotCallers) {
+	if _, err := s.ReplaceHotKey(ctx, chain, hot, sw, "withdrawal:a", 1, KindFeeBump, build("x")); !errors.Is(err, ErrNotCallers) {
 		t.Fatalf("another caller's replace = %v, want ErrNotCallers", err)
 	}
-	if _, err := s.SignHotWallet(ctx, chain, sw, "withdrawal:a", "h", seed(0), raw); !errors.Is(err, ErrIdempotencyKeyReused) {
+	if _, err := s.SignHotWallet(ctx, chain, hot, sw, "withdrawal:a", "h", seed(0), raw); !errors.Is(err, ErrIdempotencyKeyReused) {
 		t.Fatalf("another caller replaying the key = %v", err)
 	}
 	// A tombstone is scoped too.
-	if _, err := s.VoidHotKey(ctx, chain, wd, "withdrawal:v", seed(0)); err != nil {
+	if _, err := s.VoidHotKey(ctx, chain, hot, wd, "withdrawal:v", seed(0)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.VoidHotKey(ctx, chain, sw, "withdrawal:v", seed(0)); !errors.Is(err, ErrNotCallers) {
+	if _, err := s.VoidHotKey(ctx, chain, hot, sw, "withdrawal:v", seed(0)); !errors.Is(err, ErrNotCallers) {
 		t.Fatalf("voiding another caller's tombstone = %v", err)
 	}
 }
@@ -140,7 +140,7 @@ func TestLegacyRowsAreNobodysButStillReplay(t *testing.T) {
 	if _, err := s.GetHotKey(ctx, wd, "withdrawal:old"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("GET of a legacy row = %v", err)
 	}
-	if _, err := s.VoidHotKey(ctx, chain, wd, "withdrawal:old", seed(0)); !errors.Is(err, ErrNotCallers) {
+	if _, err := s.VoidHotKey(ctx, chain, hot, wd, "withdrawal:old", seed(0)); !errors.Is(err, ErrNotCallers) {
 		t.Fatalf("void of a legacy row = %v", err)
 	}
 	if sig := signAs(t, s, wd, "withdrawal:old"); sig.Nonce != 0 {
@@ -151,23 +151,23 @@ func TestLegacyRowsAreNobodysButStillReplay(t *testing.T) {
 func TestReplacementSequence(t *testing.T) {
 	s := newStore(t)
 	ctx := context.Background()
-	if _, err := s.ReplaceHotKey(ctx, chain, wd, "nope", 1, KindFeeBump, build("x")); !errors.Is(err, ErrNotFound) {
+	if _, err := s.ReplaceHotKey(ctx, chain, hot, wd, "nope", 1, KindFeeBump, build("x")); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("replace of an unsigned key = %v", err)
 	}
 	signAs(t, s, wd, "withdrawal:a")
-	if _, err := s.ReplaceHotKey(ctx, chain, wd, "withdrawal:a", 2, KindFeeBump, build("x")); !errors.Is(err, ErrReplacementGap) {
+	if _, err := s.ReplaceHotKey(ctx, chain, hot, wd, "withdrawal:a", 2, KindFeeBump, build("x")); !errors.Is(err, ErrReplacementGap) {
 		t.Fatalf("seq 2 before 1 = %v", err)
 	}
-	r1, err := s.ReplaceHotKey(ctx, chain, wd, "withdrawal:a", 1, KindFeeBump, build("a"))
+	r1, err := s.ReplaceHotKey(ctx, chain, hot, wd, "withdrawal:a", 1, KindFeeBump, build("a"))
 	if err != nil || r1.Seq != 1 || r1.Nonce != 0 || string(r1.SignedRawTx) != "a-0-1" {
 		t.Fatalf("%+v %v", r1, err)
 	}
 	// The same seq replays the stored one; the builder is not asked again.
-	again, err := s.ReplaceHotKey(ctx, chain, wd, "withdrawal:a", 1, KindFeeBump, func(ReplaceInput) (Built, error) { return Built{}, errors.New("must not rebuild") })
+	again, err := s.ReplaceHotKey(ctx, chain, hot, wd, "withdrawal:a", 1, KindFeeBump, func(ReplaceInput) (Built, error) { return Built{}, errors.New("must not rebuild") })
 	if err != nil || string(again.SignedRawTx) != "a-0-1" {
 		t.Fatalf("replay = %+v %v", again, err)
 	}
-	r2, err := s.ReplaceHotKey(ctx, chain, wd, "withdrawal:a", 2, KindFeeBump, func(in ReplaceInput) (Built, error) {
+	r2, err := s.ReplaceHotKey(ctx, chain, hot, wd, "withdrawal:a", 2, KindFeeBump, func(in ReplaceInput) (Built, error) {
 		if string(in.LatestRaw) != "a-0-1" || in.LatestKind != KindFeeBump || string(in.OriginalRaw) != "tx-0" {
 			t.Errorf("builder input = %+v", in)
 		}
@@ -190,32 +190,32 @@ func TestReplaceUnderAFreezeAndCancel(t *testing.T) {
 	ctx := context.Background()
 	signAs(t, s, wd, "withdrawal:a")
 	signAs(t, s, wd, "withdrawal:b") // nonce 1
-	if _, err := s.FreezeNonceGap(ctx, chain, 1); err != nil {
+	if _, err := s.FreezeNonceGap(ctx, chain, hot, 1); err != nil {
 		t.Fatal(err)
 	}
 	// nonce 0 is below the freeze: still replaceable. nonce 1 is covered: refused for a caller...
-	if _, err := s.ReplaceHotKey(ctx, chain, wd, "withdrawal:a", 1, KindFeeBump, build("a")); err != nil {
+	if _, err := s.ReplaceHotKey(ctx, chain, hot, wd, "withdrawal:a", 1, KindFeeBump, build("a")); err != nil {
 		t.Fatalf("replace below the freeze: %v", err)
 	}
-	if _, err := s.ReplaceHotKey(ctx, chain, wd, "withdrawal:b", 1, KindFeeBump, build("b")); !errors.Is(err, ErrNonceGapOpen) {
+	if _, err := s.ReplaceHotKey(ctx, chain, hot, wd, "withdrawal:b", 1, KindFeeBump, build("b")); !errors.Is(err, ErrNonceGapOpen) {
 		t.Fatalf("replace under a covering freeze = %v, want ErrNonceGapOpen", err)
 	}
 	// ... but the operator's Nonce Filler is how a gap is repaired.
-	c, err := s.ReplaceHotKey(ctx, chain, "", "withdrawal:b", 0, KindCancel, build("c"))
+	c, err := s.ReplaceHotKey(ctx, chain, hot, "", "withdrawal:b", 0, KindCancel, build("c"))
 	if err != nil || c.Kind != KindCancel || c.Seq != 1 {
 		t.Fatalf("%+v %v", c, err)
 	}
 	// Retrying the command returns the same filler; a Fee Bump cannot undo it.
-	if again, err := s.ReplaceHotKey(ctx, chain, "", "withdrawal:b", 0, KindCancel, build("zzz")); err != nil || string(again.SignedRawTx) != string(c.SignedRawTx) {
+	if again, err := s.ReplaceHotKey(ctx, chain, hot, "", "withdrawal:b", 0, KindCancel, build("zzz")); err != nil || string(again.SignedRawTx) != string(c.SignedRawTx) {
 		t.Fatalf("cancel retry = %+v %v", again, err)
 	}
-	if _, err := s.ReplaceHotKey(ctx, chain, wd, "withdrawal:a", 2, KindFeeBump, build("a")); err != nil {
+	if _, err := s.ReplaceHotKey(ctx, chain, hot, wd, "withdrawal:a", 2, KindFeeBump, build("a")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.ReplaceHotKey(ctx, chain, "", "withdrawal:a", 0, KindCancel, build("c")); err != nil {
+	if _, err := s.ReplaceHotKey(ctx, chain, hot, "", "withdrawal:a", 0, KindCancel, build("c")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.ReplaceHotKey(ctx, chain, wd, "withdrawal:a", 4, KindFeeBump, build("a")); !errors.Is(err, ErrKeyCancelled) {
+	if _, err := s.ReplaceHotKey(ctx, chain, hot, wd, "withdrawal:a", 4, KindFeeBump, build("a")); !errors.Is(err, ErrKeyCancelled) {
 		t.Fatalf("fee bump after a filler = %v, want ErrKeyCancelled", err)
 	}
 }

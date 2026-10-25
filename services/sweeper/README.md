@@ -9,7 +9,7 @@ decides, broadcasts and waits.
 ## How one event is handled
 
 1. Sender on the **Screening List** -> skipped, never swept, never funded (`compliance-screening.md` #2; checked independently of `ledger-service`).
-2. **Native coin:** re-read the balance (skip if zero: already swept) -> `POST /v1/sign/user-address` with `amount: "max"`
+2. **Native coin:** re-read the balance (skip if zero: already swept) -> `POST /v1/sign/user-address` on **sweep-signer** (`SWEEP_SIGNER_URL`, key-custody-hsm.md M3b; the same request and response as when wallet-service answered it) with `amount: "max"`
    (wallet-service reserves the transaction's own fee, invariant #14, option (a)) -> broadcast -> wait until mined.
    A `422` (nothing left after gas) is dust: skipped, not an error.
 3. **ERC-20:** read the token balance (skip if zero) -> if the address's native balance is below the gas reserve,
@@ -49,7 +49,7 @@ event for that address sweeps its whole balance.
 
 | Env | Default | |
 |---|---|---|
-| `KAFKA_BROKERS`, `RPC_URL`, `ASSETS_FILE`, `SCREENING_FILE`, `WALLET_SERVICE_URL`, `LEDGER_SERVICE_URL`, `TLS_CERT_FILE`, `TLS_KEY_FILE`, `TLS_CA_FILE` | required | |
+| `KAFKA_BROKERS`, `RPC_URL`, `ASSETS_FILE`, `SCREENING_FILE`, `WALLET_SERVICE_URL`, `SWEEP_SIGNER_URL`, `LEDGER_SERVICE_URL`, `TLS_CERT_FILE`, `TLS_KEY_FILE`, `TLS_CA_FILE` | required | |
 | `GAS_TOPUP_WEI` | `1000000000000000` | 0.001 ETH (decided, `deposit-flow.md`) |
 | `SWEEP_GAS_RESERVE_WEI` | `650000000000000` | below this an ERC-20 address gets a top-up: 65,000 gas x 10 gwei, the design's own arithmetic |
 | `INCLUSION_TIMEOUT` / `POLL_INTERVAL` | `5m` / `3s` | wait for a broadcast tx to be mined |

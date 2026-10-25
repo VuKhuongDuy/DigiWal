@@ -137,6 +137,9 @@ func TestHotKeyErrorMapping(t *testing.T) {
 		{rp, "POST", body, signing.ErrGasCeilingExceeded, 422},
 		{rp, "POST", body, storage.ErrNonceGapOpen, 503},
 		{rp, "POST", body, signing.ErrInvalidRequest, 400},
+		{rp, "POST", body, signing.ErrSignerUnavailable, 503},
+		{rp, "POST", body, &signing.PolicyRefusedError{Rule: "replacement_not_bump"}, 422},
+		{rp, "POST", body, storage.ErrOtherHotKey, 409},
 		{rp, "POST", body, errors.New("db"), 500},
 	} {
 		if got := keyCall(&fakeKeys{err: c.err}, c.method, c.path, "withdrawal-service", c.body).Code; got != c.want {

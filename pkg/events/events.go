@@ -312,7 +312,7 @@ type WithdrawalFailed struct {
 	Amount         Amount `json:"amount"`
 	ToAddress      string `json:"to_address"`
 	ChainID        int64  `json:"chain_id"`
-	// Reason is why: sign_refused, tx_reverted, stale_request, stale_reservation,
+	// Reason is why: sign_refused, policy_refused (hsm-gateway's Signing Policy), tx_reverted, stale_request, stale_reservation,
 	// replaced_or_dropped, destination_not_whitelisted, destination_on_screening_list, abandoned,
 	// abandoned_refunded.
 	Reason string `json:"reason"`

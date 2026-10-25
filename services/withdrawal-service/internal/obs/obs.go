@@ -65,7 +65,7 @@ func Stages(reg prometheus.Registerer) func(from, to string, took time.Duration)
 
 // knownReasons is the closed set of reject_reason values; the label is bounded by it (design invariant 3).
 var knownReasons = map[string]bool{
-	pipeline.ReasonSignRefused: true, pipeline.ReasonTxReverted: true, pipeline.ReasonStaleRequest: true, pipeline.ReasonStaleReservation: true,
+	pipeline.ReasonSignRefused: true, pipeline.ReasonPolicyRefused: true, pipeline.ReasonTxReverted: true, pipeline.ReasonStaleRequest: true, pipeline.ReasonStaleReservation: true,
 	pipeline.ReasonReplacedOrDropped: true, pipeline.ReasonAbandoned: true, pipeline.ReasonAbandonedRefunded: true,
 	validate.AssetNotRegistered: true, validate.InvalidToAddress: true, validate.AmountTooLarge: true, validate.BelowMinimum: true,
 	validate.NotWhitelisted: true, validate.OnScreeningList: true, validate.DestinationIsDeposit: true, validate.DestinationIsSystem: true,

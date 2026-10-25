@@ -21,6 +21,10 @@ const (
 	CNWithdrawalService = "withdrawal-service"
 	CNSweeper           = "sweeper"
 	CNChainWatcher      = "chain-watcher"
+	// CNSweepSigner is sweep-signer (key-custody-hsm.md M3b). It owns Sweep signing now, so wallet-service has no
+	// /v1/sign/user-address any more. Its one use of wallet-service: in a DEV-profile build (software Hot Wallet, no
+	// HSM) it reads the Hot address here; the production binary takes it from hsm-gateway and never calls this.
+	CNSweepSigner = "sweep-signer"
 	// CNAuditor is the dev-environment auditor (reconciliation-audit.md): read-only, and allowed exactly one
 	// endpoint here, GET /v1/wallet/system-addresses.
 	CNAuditor = "auditor"
@@ -41,13 +45,10 @@ var (
 	// sweeper never releases anything (invariant #22). There is no endpoint that cancels a signed
 	// tx (the Nonce Filler is an operator CLI), so no service certificate can cancel a payout.
 	HotWalletVoiders = []string{CNWithdrawalService}
-	// UserAddressSigners may call POST /v1/sign/user-address — sweeper only
-	// (invariant #4): withdrawal-service's cert can never pick a user key.
-	UserAddressSigners = []string{CNSweeper}
 	// HotAddressReaders may call GET /v1/wallet/hot-address: the services that need the Hot
 	// Wallet's own address (deposit-flow.md, Hot Wallet Address Discovery). chain-watcher reads it
 	// only to skip Hot Wallet Outflow (invariant #17); it still cannot reach either /v1/sign/*.
-	HotAddressReaders = []string{CNWithdrawalService, CNSweeper, CNChainWatcher}
+	HotAddressReaders = []string{CNWithdrawalService, CNSweeper, CNChainWatcher, CNSweepSigner}
 	// SystemAddressReaders may call GET /v1/wallet/system-addresses ({hot, warm, cold?}): withdrawal-service,
 	// to refuse withdrawals and whitelist entries to the Hot/Warm Wallet (withdrawal-flow.md
 	// invariant #18) and, later, as its Treasury Sweep destination (wallet-tiering.md invariant #9); and the
