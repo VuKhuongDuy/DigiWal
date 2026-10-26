@@ -46,12 +46,12 @@ STORES   = postgres mongo
 SERVICES =
 MONITORING = node-exporter cadvisor postgres-exporter
 else
-STORES   = postgres-gateway
+STORES   =
 SERVICES = ledger-service history-service withdrawal-service
 MONITORING = node-exporter cadvisor
 endif
 else ifeq ($(NODE),vm3)
-STORES   = postgres redis kafka anvil
+STORES   = postgres postgres-gateway redis kafka anvil
 SERVICES = wallet-service chain-watcher sweeper sweep-signer api-gateway simulator
 MONITORING = node-exporter cadvisor postgres-exporter kafka-exporter alertmanager prometheus grafana
 else
@@ -133,7 +133,7 @@ firewall:
 # already has data) and the exporter's pg_monitor login; vm2 also the Mongo users.
 roles:
 ifeq ($(NODE),vm4)
-	@echo "nothing to do on vm4: postgres-gateway creates its role and database when its data directory is first initialised"
+	@echo "nothing to do on vm4: it has no database"
 else
 	$(COMPOSE) exec -T postgres sh /docker-entrypoint-initdb.d/10-init-node.sh
 	@. ./.env; { echo "\\set pw '$$EXPORTER_PASSWORD'"; cat ../infra/postgres/exporter.sql; } | $(COMPOSE) exec -T postgres psql -q -U custody -v ON_ERROR_STOP=1 -d postgres
@@ -148,7 +148,7 @@ PSQL = $(COMPOSE) exec -T postgres psql -q -U custody -v ON_ERROR_STOP=1
 # Each database revokes CONNECT from PUBLIC (infra/postgres/init-node.sh), so the login is granted it explicitly.
 audit-roles:
 ifeq ($(NODE),vm4)
-	@echo "nothing to do on vm4: postgres-gateway creates its role and database when its data directory is first initialised"
+	@echo "nothing to do on vm4: it has no database"
 else
 	$(PSQL) -d postgres < $(AUDIT_ROLES)/00_role.sql
 ifeq ($(NODE),vm2)

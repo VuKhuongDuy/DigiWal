@@ -45,7 +45,7 @@ services:
       - ../infra/postgres/pg_hba.conf:/etc/postgresql/pg_hba.conf:ro
     ports: !override ["10.10.0.1:5432:5432", "127.0.0.1:5432:5432"]
     mem_limit: 2500m
-    cpus: 0.5 # the lab's deliberate cap, so that this Postgres is the first bottleneck (remove it to lift the cap)
+    cpus: 2 # the lab's deliberate cap, so that this Postgres is the first bottleneck (remove it to lift the cap)
 
   mongo:
     environment:

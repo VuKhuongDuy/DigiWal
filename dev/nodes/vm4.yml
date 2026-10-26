@@ -2,7 +2,7 @@
 # docs/design/multi-node-deployment.md, "Addendum: three-node layout".
 #   here:      api-gateway, ledger-service, history-service, withdrawal-service, and postgres-gateway (the api_gateway DB)
 #   on vm2:    postgres (ledger), mongo                     (ledger-service and history-service reach them at 10.10.0.1)
-#   on vm3:    postgres (custody, withdrawal, chain_watcher), wallet-service, chain-watcher, sweeper, simulator, kafka, redis, anvil, monitoring
+#   on vm3:    postgres (custody, withdrawal, chain_watcher), postgres-gateway, api-gateway, wallet-service, chain-watcher, sweeper, simulator, kafka, redis, anvil, monitoring
 networks:
   default:
     driver_opts:
@@ -11,31 +11,7 @@ networks:
 services:
   postgres: {profiles: [elsewhere]} # the shared one of the single-host stack; here the api_gateway DB has its own server
 
-  # Scaling step 2 (docs/design/database-scaling-steps.md): the API-key lookups that every request makes no longer share a
-  # Postgres with the ledger. cpus is the lab's deliberate cap, so that Postgres is the first thing to saturate.
-  postgres-gateway:
-    image: postgres:16-alpine
-    command: [postgres, -c, hba_file=/etc/postgresql/pg_hba.conf, -c, shared_preload_libraries=pg_stat_statements,
-      -c, track_io_timing=on, -c, track_wal_io_timing=on, -c, log_lock_waits=on]
-    environment:
-      POSTGRES_USER: custody
-      POSTGRES_PASSWORD: ${PG_ADMIN_PASSWORD:?run make env}
-      POSTGRES_DB: postgres
-      PG_DB_ROLES: "api_gateway=svc_gateway"
-      PW_svc_gateway: ${SVC_GATEWAY_PASSWORD:?run make env}
-    volumes:
-      - pg_gateway_data:/var/lib/postgresql/data
-      - ../infra/postgres/init-node.sh:/docker-entrypoint-initdb.d/10-init-node.sh:ro
-      - ../infra/postgres/pg_hba.conf:/etc/postgresql/pg_hba.conf:ro
-    ports: ["10.10.0.3:5432:5432", "127.0.0.1:5432:5432"]
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U custody"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
-    restart: unless-stopped
-    cpus: 0.5
-    mem_limit: 1g
+  postgres-gateway: {profiles: [elsewhere]} # on vm3 since 2026-10-26, next to api-gateway: a key lookup per request no longer crosses WireGuard
   mongo: {profiles: [elsewhere]}
   redis: {profiles: [elsewhere]}
   kafka: {profiles: [elsewhere]}
@@ -90,5 +66,3 @@ services:
     ports: ["10.10.0.3:8081:8080"]
     mem_limit: 200m
 
-volumes:
-  pg_gateway_data:

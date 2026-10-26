@@ -3,8 +3,8 @@
 #              chain-watcher, sweeper, sweep-signer, simulator, auditor, and the Measurement Plane: Prometheus,
 #              Alertmanager (to Telegram), Grafana, kafka-exporter, and node/cAdvisor/postgres exporters
 #   on vm2:    mongo, the Postgres of the request path (ledger), and hsm-gateway (the HSM token)
-#   on vm4:    ledger-service, history-service, withdrawal-service, postgres-gateway (api_gateway)
-#   api-gateway is here too (moved from vm4 on 2026-10-26)
+#   on vm4:    ledger-service, history-service, withdrawal-service
+#   api-gateway and postgres-gateway (the api_gateway database) are here too (moved from vm4 on 2026-10-26)
 networks:
   default:
     driver_opts:
@@ -113,8 +113,34 @@ services:
       HSM_GATEWAY_URL: https://hsm-gateway:8445
     extra_hosts: ["hsm-gateway:10.10.0.1"]
 
+  # The api_gateway database (users and API-key hashes), next to the only service that uses it. Scaling step 2 split it from the ledger's
+  # Postgres; it moved from vm4 to vm3 on 2026-10-26 because a key lookup per request across WireGuard held a pool connection for ~30 ms.
+  postgres-gateway:
+    image: postgres:16-alpine
+    command: [postgres, -c, hba_file=/etc/postgresql/pg_hba.conf, -c, shared_preload_libraries=pg_stat_statements,
+      -c, track_io_timing=on, -c, track_wal_io_timing=on, -c, log_lock_waits=on]
+    environment:
+      POSTGRES_USER: custody
+      POSTGRES_PASSWORD: ${PG_ADMIN_PASSWORD:?run make env}
+      POSTGRES_DB: postgres
+      PG_DB_ROLES: "api_gateway=svc_gateway"
+      PW_svc_gateway: ${SVC_GATEWAY_PASSWORD:?run make env}
+    volumes:
+      - pg_gateway_data:/var/lib/postgresql/data
+      - ../infra/postgres/init-node.sh:/docker-entrypoint-initdb.d/10-init-node.sh:ro
+      - ../infra/postgres/pg_hba.conf:/etc/postgresql/pg_hba.conf:ro
+    ports: ["10.10.0.2:5433:5432", "127.0.0.1:5433:5432"] # 5432 is the core Postgres; the gateway reaches this one on the compose network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U custody"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+    cpus: 2 # the lab's cap on the database the gateway reads on every request
+    mem_limit: 1g
+
   # api-gateway sits next to Redis (its rate-limit counters) and wallet-service (deposit addresses), apart from the ledger it calls
-  # and from the load generator (vm2). Its database is postgres-gateway on vm4; ledger-service and withdrawal-service are reached
+  # and from the load generator (vm2). Its database, postgres-gateway, is on this node too; ledger-service and withdrawal-service are reached
   # over mTLS on the ports vm4 publishes (8444, 8446).
   api-gateway:
     environment:
@@ -124,9 +150,10 @@ services:
       WITHDRAWAL_SERVICE_URL: https://withdrawal-service:8446
       REDIS_ADDR: redis:6379
       REDIS_PASSWORD: ${REDIS_PASSWORD:?run make env}
-    extra_hosts: ["postgres-gateway:10.10.0.3", "ledger-service:10.10.0.3", "withdrawal-service:10.10.0.3"]
+    extra_hosts: ["ledger-service:10.10.0.3", "withdrawal-service:10.10.0.3"]
     depends_on: !override
       redis: {condition: service_healthy}
+      postgres-gateway: {condition: service_healthy}
     ports: !override ["10.10.0.2:8084:8080", "127.0.0.1:8084:8080", "10.10.0.2:9101:9100"] # never on the public interface (invariant 8); /metrics
     mem_limit: 500m
 
@@ -202,3 +229,4 @@ volumes:
   pg_core_data:
   prometheus_data:
   grafana_data:
+  pg_gateway_data:
