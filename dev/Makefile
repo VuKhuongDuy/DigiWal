@@ -46,7 +46,7 @@ STORES   = postgres mongo
 SERVICES =
 MONITORING = node-exporter cadvisor postgres-exporter
 else
-STORES   =
+STORES   = redis
 SERVICES = ledger-service api-gateway history-service withdrawal-service
 MONITORING = node-exporter cadvisor
 endif

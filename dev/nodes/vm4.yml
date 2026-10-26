@@ -13,7 +13,17 @@ services:
 
   postgres-gateway: {profiles: [elsewhere]} # on vm3 since 2026-10-26, next to api-gateway: a key lookup per request no longer crosses WireGuard
   mongo: {profiles: [elsewhere]}
-  redis: {profiles: [elsewhere]}
+  # A Redis of its own for the read caches of this node's api-gateway and ledger-service (docs/design/read-cache.md): a cache that is across the
+  # WireGuard link times out under load and makes things worse than no cache (measured 2026-10-26). It is NOT the Redis on vm3: no replication, so the
+  # two nodes' caches differ by at most the TTLs (5 s balances, 5 min API keys); wallet-service and chain-watcher keep using vm3's.
+  redis:
+    command: [sh, -c, 'exec redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru --requirepass "$$REDIS_PASSWORD"']
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?run make env}
+      REDISCLI_AUTH: ${REDIS_PASSWORD}
+    ports: !override []
+    restart: unless-stopped
+    mem_limit: 300m
   kafka: {profiles: [elsewhere]}
   anvil: {profiles: [elsewhere]}
   prometheus: {profiles: [elsewhere]}
@@ -35,11 +45,12 @@ services:
   ledger-service:
     environment:
       POSTGRES_DSN: postgres://svc_ledger:${SVC_LEDGER_PASSWORD}@postgres:5432/ledger?sslmode=disable
-      REDIS_ADDR: 10.10.0.2:6379 # redis on vm3, over WireGuard: only used when BALANCE_CACHE_ENABLED=1
+      REDIS_ADDR: redis:6379 # this node's Redis: only used when BALANCE_CACHE_ENABLED=1
       REDIS_PASSWORD: ${REDIS_PASSWORD:?run make env}
       POSTGRES_MAX_CONNS: "64" # pgx's default is 4; 16 was enough while the database was on this node. With Postgres on vm2 each query holds a connection across WireGuard: at 16 the pool was the limit (avg wait 1.1 s, 99% of acquires waited at 800 req/s)
     extra_hosts: ["postgres:10.10.0.1", "kafka:10.10.0.2"]
-    depends_on: !override []
+    depends_on: !override
+      redis: {condition: service_healthy}
     # The balance read cache (docs/design/read-cache.md) uses the Redis on vm3. It is off unless BALANCE_CACHE_ENABLED=1 (dev/loadtest/03-cache.sh).
     # Redis timeouts are 100 ms and any Redis error falls through to Postgres.
     ports: !override ["10.10.0.3:8444:8443", "10.10.0.3:9102:9100"] # withdrawal-service and sweeper (vm3); /metrics (vm3)
@@ -51,10 +62,11 @@ services:
     environment:
       POSTGRES_DSN: postgres://svc_gateway:${SVC_GATEWAY_PASSWORD}@postgres-gateway:5433/api_gateway?sslmode=disable
       POSTGRES_MAX_CONNS: "48"
-      REDIS_ADDR: 10.10.0.2:6379
+      REDIS_ADDR: redis:6379
       REDIS_PASSWORD: ${REDIS_PASSWORD:?run make env}
     extra_hosts: ["postgres-gateway:10.10.0.2", "wallet-service:10.10.0.2"]
-    depends_on: !override []
+    depends_on: !override
+      redis: {condition: service_healthy}
     ports: !override ["10.10.0.3:8084:8080", "127.0.0.1:8084:8080", "10.10.0.3:9101:9100"]
     mem_limit: 2g
 
