@@ -53,7 +53,10 @@ func main() {
 	var rdb *redis.Client
 	if addr := os.Getenv("REDIS_ADDR"); addr != "" {
 		rdb = redis.NewClient(&redis.Options{Addr: addr, Password: os.Getenv("REDIS_PASSWORD"), MaxRetries: -1,
-			DialTimeout: 100 * time.Millisecond, ReadTimeout: 100 * time.Millisecond, WriteTimeout: 100 * time.Millisecond})
+			DialTimeout: 100 * time.Millisecond, ReadTimeout: 100 * time.Millisecond, WriteTimeout: 100 * time.Millisecond,
+			// go-redis defaults to 10 connections per CPU and waits ReadTimeout+1s for a free one: at ~2,000 req/s with 100+ ms round trips
+			// that is hundreds of calls in flight, and the cache (and the rate limiter) errored out. A big pool, and a short wait for it.
+			PoolSize: envInt("REDIS_POOL_SIZE", 200), PoolTimeout: 100 * time.Millisecond})
 		defer rdb.Close()
 	}
 	newLimiter := func(prefix string, perMin int) api.RateLimiter {

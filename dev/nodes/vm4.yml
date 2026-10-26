@@ -44,7 +44,7 @@ services:
     # The balance read cache (docs/design/read-cache.md) uses the Redis on vm3. It is off unless BALANCE_CACHE_ENABLED=1 (dev/loadtest/03-cache.sh).
     # Redis timeouts are 100 ms and any Redis error falls through to Postgres.
     ports: !override ["10.10.0.3:8444:8443", "10.10.0.3:9102:9100"] # withdrawal-service and sweeper (vm3); /metrics (vm3)
-    mem_limit: 300m
+    mem_limit: 1g # was 300m: it reached 190 MB at 1,500 req/s and api-gateway had been OOM-killed at 500 MB under more load
 
   withdrawal-service:
     environment:
