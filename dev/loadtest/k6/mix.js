@@ -62,6 +62,11 @@ export function setup() {
 export default function (users) {
   const u = users[Math.floor(Math.random() * users.length)];
   const h = { Authorization: 'Bearer ' + u.k, 'Content-Type': 'application/json' };
+  // Ablations, to find which tier limits the request path (dev/loadtest/README.md):
+  //   health: GET /healthz         the gateway's HTTP stack only (no auth, no database, no ledger)
+  //   ping:   GET /v1/<no such route> with a valid key   authentication (API-key cache) and routing, no ledger
+  if (MIX === 'health') { tally(http.get(base + '/healthz', { tags: { kind: 'read' } })); return; }
+  if (MIX === 'ping') { tally(http.get(base + '/v1/no-such-route', { headers: h, tags: { kind: 'read' }, responseCallback: http.expectedStatuses(404) })); return; }
   if (MIX === 'balances') { tally(http.get(base + '/v1/balances', { headers: h, tags: { kind: 'read' } })); return; }
   const x = Math.random();
   if (x < WRITE) {
