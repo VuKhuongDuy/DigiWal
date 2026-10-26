@@ -16,7 +16,9 @@ const tally = (res) => {
 };
 
 const keys = JSON.parse(open('/keys.json'));
-const base = __ENV.BASE || 'http://127.0.0.1:8084';
+const bases = (__ENV.BASES || __ENV.BASE || 'http://127.0.0.1:8084').split(',');
+const base = bases[0]; // setup and single-address uses
+const pick = () => bases[Math.floor(Math.random() * bases.length)]; // one request, one gateway: no load balancer in the way
 const STEPS = (__ENV.STEPS || '100,200,300,400,500').split(',').map(Number);
 const STEP_S = parseInt(__ENV.STEP_S || '60');
 const GAP_S = parseInt(__ENV.GAP_S || '15');
@@ -65,18 +67,18 @@ export default function (users) {
   // Ablations, to find which tier limits the request path (dev/loadtest/README.md):
   //   health: GET /healthz         the gateway's HTTP stack only (no auth, no database, no ledger)
   //   ping:   GET /v1/<no such route> with a valid key   authentication (API-key cache) and routing, no ledger
-  if (MIX === 'health') { tally(http.get(base + '/healthz', { tags: { kind: 'read' } })); return; }
-  if (MIX === 'ping') { tally(http.get(base + '/v1/no-such-route', { headers: h, tags: { kind: 'read' }, responseCallback: http.expectedStatuses(404) })); return; }
-  if (MIX === 'balances') { tally(http.get(base + '/v1/balances', { headers: h, tags: { kind: 'read' } })); return; }
+  if (MIX === 'health') { tally(http.get(pick() + '/healthz', { tags: { kind: 'read' } })); return; }
+  if (MIX === 'ping') { tally(http.get(pick() + '/v1/no-such-route', { headers: h, tags: { kind: 'read' }, responseCallback: http.expectedStatuses(404) })); return; }
+  if (MIX === 'balances') { tally(http.get(pick() + '/v1/balances', { headers: h, tags: { kind: 'read' } })); return; }
   const x = Math.random();
   if (x < WRITE) {
-    tally(http.post(base + '/v1/withdrawals', JSON.stringify({
+    tally(http.post(pick() + '/v1/withdrawals', JSON.stringify({
       idempotency_key: 'k6-' + __VU + '-' + __ITER + '-' + Date.now(), asset_id: ETH, amount: MIN_ETH, to_address: u.addr,
     }), { headers: h, tags: { kind: 'wd' }, responseCallback: http.expectedStatuses(200, 202, 422) }));
     return;
   }
   const r = (x - WRITE) / (1 - WRITE); // 0..1 over the read share
-  if (r < 0.55 / 0.80) tally(http.get(base + '/v1/balances', { headers: h, tags: { kind: 'read' } }));
-  else if (r < 0.70 / 0.80) tally(http.get(base + '/v1/deposit-address', { headers: h, tags: { kind: 'read' } }));
-  else tally(http.get(base + '/v1/whitelist', { headers: h, tags: { kind: 'read' } }));
+  if (r < 0.55 / 0.80) tally(http.get(pick() + '/v1/balances', { headers: h, tags: { kind: 'read' } }));
+  else if (r < 0.70 / 0.80) tally(http.get(pick() + '/v1/deposit-address', { headers: h, tags: { kind: 'read' } }));
+  else tally(http.get(pick() + '/v1/whitelist', { headers: h, tags: { kind: 'read' } }));
 }

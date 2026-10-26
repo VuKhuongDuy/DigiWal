@@ -36,9 +36,17 @@ def parse(path):
 
 print("== time per request at each hop (averages over the run; the gap between hops is network, TLS and queueing)")
 for svc in ("api-gateway", "ledger-service"):
-    try:
-        sa, ca, pa = parse(f"{mb}/{svc}.txt"); sb, cb, pb = parse(f"{ma}/{svc}.txt")
-    except OSError:
+    import glob
+    def merged(d):
+        S, C, P = {}, {}, {}
+        for f in sorted(glob.glob(f"{d}/{svc}.*.txt")):
+            s_, c_, p_ = parse(f)
+            for k, v in s_.items(): S[k] = S.get(k, 0) + v
+            for k, v in c_.items(): C[k] = C.get(k, 0) + v
+            for k, v in p_.items(): P[k] = P.get(k, 0) + v
+        return S, C, P
+    sa, ca, pa = merged(mb); sb, cb, pb = merged(ma)
+    if not cb:
         continue
     rows = []
     for k in cb:

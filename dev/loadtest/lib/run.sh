@@ -21,7 +21,7 @@ run_load() {
 	sleep 2
 
 	log "k6: mix=$mix steps=$steps step=${step_s}s gap=${gap_s}s writes=${write}% -> $out"
-	on_k6 "docker run --rm --user root --memory 5g --memory-swap 5g --network host -e BASE=$GATEWAY_URL -e STEPS=$steps -e STEP_S=$step_s -e GAP_S=$gap_s -e WRITE_PCT=$write -e MIX=$mix \
+	on_k6 "docker run --rm --user root --memory 5g --memory-swap 5g --network host -e BASE=$GATEWAY_URL -e BASES=$GATEWAY_URLS -e STEPS=$steps -e STEP_S=$step_s -e GAP_S=$gap_s -e WRITE_PCT=$write -e MIX=$mix \
 		-v $REMOTE_DIR/keys.json:/keys.json:ro -v $REMOTE_DIR/mix.js:/s.js:ro -v $REMOTE_DIR/out:/out \
 		grafana/k6 run --summary-export=/out/summary.json /s.js" > "$out/k6.log" 2>&1 || log "k6 exited non-zero (see $out/k6.log); thresholds are informational"
 	get_k6 "$REMOTE_DIR/out/summary.json" "$out/summary.json" || die "k6 produced no summary"

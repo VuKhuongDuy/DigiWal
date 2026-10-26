@@ -17,17 +17,21 @@ check() { # node container...
 	done
 }
 check vm2 postgres mongo
-check vm3 postgres kafka redis anvil wallet-service chain-watcher sweeper api-gateway
-check vm4 ledger-service withdrawal-service history-service postgres-gateway
+check vm3 postgres postgres-gateway kafka redis anvil wallet-service chain-watcher sweeper api-gateway ledger-service
+check vm4 ledger-service api-gateway withdrawal-service history-service
 [ $fail = 0 ] && ok "all functional services up"
 sim=$(ssh vm3 "docker inspect -f '{{.State.Status}}' digiwal-dev-simulator-1 2>/dev/null" || echo missing)
 [ "$sim" = running ] && bad "the simulator is running and would add background load (docker stop digiwal-dev-simulator-1 on vm3)" || ok "simulator is stopped"
 
 echo "1b. api-gateway rate limits (a load test from one IP is rejected with 429 beyond the IP limit)"
-ip=$(ssh "$GATEWAY_NODE" "docker exec digiwal-dev-api-gateway-1 printenv RATE_LIMIT_IP_PER_MIN" 2>/dev/null || true)
-us=$(ssh "$GATEWAY_NODE" "docker exec digiwal-dev-api-gateway-1 printenv RATE_LIMIT_USER_PER_MIN" 2>/dev/null || true)
-if [ "${ip:-1200}" = 0 ] && [ "${us:-600}" = 0 ]; then ok "rate limits disabled (RATE_LIMIT_IP_PER_MIN=0, RATE_LIMIT_USER_PER_MIN=0)"
-else bad "rate limits are on (ip=${ip:-1200}/min default, user=${us:-600}/min default): most k6 requests would get 429. Set both to 0 on api-gateway for a capacity test"; fi
+on=""
+for n in $GATEWAY_NODES; do
+	ip=$(ssh "$n" "docker exec digiwal-dev-api-gateway-1 printenv RATE_LIMIT_IP_PER_MIN" 2>/dev/null || true)
+	us=$(ssh "$n" "docker exec digiwal-dev-api-gateway-1 printenv RATE_LIMIT_USER_PER_MIN" 2>/dev/null || true)
+	{ [ "${ip:-1200}" = 0 ] && [ "${us:-600}" = 0 ]; } || on="$on $n(ip=${ip:-1200}/min user=${us:-600}/min)"
+done
+if [ -z "$on" ]; then ok "rate limits disabled on every gateway ($GATEWAY_NODES)"
+else bad "rate limits are on:$on: most k6 requests would get 429. ./02-rate-limits.sh off"; fi
 
 echo "2. Kafka consumers have caught up (deposits.confirmed lag; the ledger credits from it)"
 end=$(( $(date +%s) + WAIT_MIN * 60 ))

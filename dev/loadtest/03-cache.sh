@@ -6,26 +6,28 @@
 #   ./03-cache.sh status      what each service has now, and the cache counters
 source "$(cd "$(dirname "$0")" && pwd)/common.sh"
 mode=${1:-status}
-recreate() { # node service yaml
-	ssh "$1" "NODE=$1 SVC=$2 YAML='$3' MODE=$mode bash -s" <<'R'
+# One override file per node holding the flags of BOTH services (both run on every node): two files of the same name would overwrite each other.
+YAML='services:\n  api-gateway:\n    environment:\n      AUTH_CACHE_ENABLED: "1"\n  ledger-service:\n    environment:\n      BALANCE_CACHE_ENABLED: "1"\n'
+recreate() { # node
+	ssh "$1" "NODE=$1 YAML='$YAML' MODE=$mode bash -s" <<'R'
 set -e
 cd /root/DigiWal/dev; export MASTER_KEY_HEX=not-on-this-node
 if [ "$MODE" = on ]; then printf '%b' "$YAML" > nodes/loadtest-cache.yml; else rm -f nodes/loadtest-cache.yml; fi
 files="-f ../infra/docker-compose.yml -f ../e2e/docker-compose.yml -f docker-compose.yml -f nodes/$NODE.yml"
 for f in nodes/loadtest-*.yml; do [ -e "$f" ] && files="$files -f $f"; done
-docker compose -p digiwal-dev --project-directory ../e2e --env-file .env $files up -d --no-build --no-deps --force-recreate "$SVC" 2>&1 | tail -1
+docker compose -p digiwal-dev --project-directory ../e2e --env-file .env $files up -d --no-build --no-deps --force-recreate ledger-service api-gateway 2>&1 | tail -2
 R
 }
 case $mode in
 	on|off)
-		recreate "$GATEWAY_NODE" api-gateway 'services:\n  api-gateway:\n    environment:\n      AUTH_CACHE_ENABLED: "1"\n'
-		recreate vm4 ledger-service 'services:\n  ledger-service:\n    environment:\n      BALANCE_CACHE_ENABLED: "1"\n'
+		for n in $(echo $GATEWAY_NODES $LEDGER_NODES | tr ' ' '
+' | sort -u); do recreate "$n"; done
 		sleep 5 ;;
 	status) ;;
 	*) die "usage: $0 on|off|status" ;;
 esac
-echo "api-gateway    AUTH_CACHE_ENABLED=$(ssh "$GATEWAY_NODE" 'docker exec digiwal-dev-api-gateway-1 printenv AUTH_CACHE_ENABLED' 2>/dev/null || echo unset)"
-echo "ledger-service BALANCE_CACHE_ENABLED=$(ssh vm4 'docker exec digiwal-dev-ledger-service-1 printenv BALANCE_CACHE_ENABLED' 2>/dev/null || echo unset)"
+for n in $GATEWAY_NODES; do echo "$n api-gateway    AUTH_CACHE_ENABLED=$(ssh "$n" 'docker exec digiwal-dev-api-gateway-1 printenv AUTH_CACHE_ENABLED' 2>/dev/null || echo unset)"; done
+for n in $LEDGER_NODES; do echo "$n ledger-service BALANCE_CACHE_ENABLED=$(ssh "$n" 'docker exec digiwal-dev-ledger-service-1 printenv BALANCE_CACHE_ENABLED' 2>/dev/null || echo unset)"; done
 echo "--- cache counters (since the services started)"
-ssh "$GATEWAY_NODE" "docker exec digiwal-dev-api-gateway-1 wget -qO- http://127.0.0.1:9100/metrics" 2>/dev/null | grep -E '^digiwal_cache_(requests|invalidations)_total' | sed 's/^/  /'
-ssh vm4 "docker exec digiwal-dev-ledger-service-1 wget -qO- http://127.0.0.1:9100/metrics" 2>/dev/null | grep -E '^digiwal_cache_(requests|invalidations)_total' | sed 's/^/  /'
+for n in $GATEWAY_NODES; do ssh "$n" "docker exec digiwal-dev-api-gateway-1 wget -qO- http://127.0.0.1:9100/metrics" 2>/dev/null | grep -E '^digiwal_cache_(requests|invalidations)_total' | sed "s/^/  $n /"; done
+for n in $LEDGER_NODES; do ssh "$n" "docker exec digiwal-dev-ledger-service-1 wget -qO- http://127.0.0.1:9100/metrics" 2>/dev/null | grep -E '^digiwal_cache_(requests|invalidations)_total' | sed "s/^/  $n /"; done

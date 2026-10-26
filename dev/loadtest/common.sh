@@ -5,8 +5,13 @@ set -euo pipefail
 
 RESULTS_ROOT=${RESULTS_ROOT:-$HOME/loadtest-results}
 K6_HOST=${K6_HOST:-vm2}                                  # where k6 runs: vm2, apart from the gateway (vm3) and the ledger service (vm4)
-GATEWAY_URL=${GATEWAY_URL:-http://10.10.0.2:8084}        # api-gateway (vm3) as seen from the k6 host
-GATEWAY_NODE=${GATEWAY_NODE:-vm3}
+GATEWAY_NODES=${GATEWAY_NODES:-vm3 vm4}                   # one api-gateway per node, each beside a ledger-service
+LEDGER_NODES=${LEDGER_NODES:-vm3 vm4}
+# k6 spreads its requests over these (no load balancer). Only vm3 by default: the second gateway (vm4) reaches Redis and the API-key database on vm3 across the
+# network and, measured, fails under load (see the 2026-10-26 horizontal-scale note in the performance findings). Add http://10.10.0.3:8084 to try it.
+GATEWAY_URLS=${GATEWAY_URLS:-http://10.10.0.2:8084}
+GATEWAY_URL=${GATEWAY_URL:-${GATEWAY_URLS%%,*}}           # the first one: setup and the pre-flight use it
+GATEWAY_NODE=${GATEWAY_NODE:-${GATEWAY_NODES%% *}}
 REMOTE_DIR=/tmp/loadtest                                 # on the k6 host: keys.json and the k6 scripts
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
