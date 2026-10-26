@@ -47,12 +47,12 @@ SERVICES =
 MONITORING = node-exporter cadvisor postgres-exporter
 else
 STORES   =
-SERVICES = ledger-service history-service withdrawal-service
+SERVICES = ledger-service api-gateway history-service withdrawal-service
 MONITORING = node-exporter cadvisor
 endif
 else ifeq ($(NODE),vm3)
 STORES   = postgres postgres-gateway redis kafka anvil
-SERVICES = wallet-service chain-watcher sweeper sweep-signer api-gateway simulator
+SERVICES = wallet-service chain-watcher sweeper sweep-signer ledger-service api-gateway simulator
 MONITORING = node-exporter cadvisor postgres-exporter kafka-exporter alertmanager prometheus grafana
 else
 STORES   = postgres redis kafka mongo anvil
@@ -80,7 +80,10 @@ env:
 	vm3) for v in PG_ADMIN_PASSWORD SVC_WALLET_PASSWORD SVC_WITHDRAWAL_PASSWORD SVC_CHAINWATCHER_PASSWORD SVC_AUDITOR_PASSWORD EXPORTER_PASSWORD SVC_SWEEPSIGNER_PASSWORD SVC_KEYADMIN_PASSWORD REDIS_PASSWORD; do gen $$v; done; \
 		grep -q '^SVC_GATEWAY_PASSWORD=' .env || { pw=$$(ssh vm4 "sed -n 's/^SVC_GATEWAY_PASSWORD=//p' /root/DigiWal/dev/.env" 2>/dev/null); \
 		echo "$$pw" | grep -Eq '^[0-9a-f]{64}$$' || { echo "SVC_GATEWAY_PASSWORD: vm4 has none (it is the password of the api_gateway role in postgres-gateway; api-gateway on vm3 copies it from there)"; exit 1; }; \
-		echo "SVC_GATEWAY_PASSWORD=$$pw" >> .env; echo "copied SVC_GATEWAY_PASSWORD from vm4"; } ;; \
+		echo "SVC_GATEWAY_PASSWORD=$$pw" >> .env; echo "copied SVC_GATEWAY_PASSWORD from vm4"; }; \
+		grep -q '^SVC_LEDGER_PASSWORD=' .env || { pw=$$(ssh vm4 "sed -n 's/^SVC_LEDGER_PASSWORD=//p' /root/DigiWal/dev/.env" 2>/dev/null); \
+		echo "$$pw" | grep -Eq '^[0-9a-f]{64}$$' || { echo "SVC_LEDGER_PASSWORD: vm4 has none (the second ledger-service on vm3 copies it from there)"; exit 1; }; \
+		echo "SVC_LEDGER_PASSWORD=$$pw" >> .env; echo "copied SVC_LEDGER_PASSWORD from vm4"; } ;; \
 	*) gen SVC_SWEEPSIGNER_PASSWORD; gen SVC_KEYADMIN_PASSWORD ;; \
 	esac
 
@@ -90,8 +93,8 @@ env:
 # local, as in ../e2e. The node a service runs on, and the callers whose PUBLIC certificate hsm-gateway pins (vm2 gets their fingerprints, not keys):
 export CA_DIR ?= $(HOME)/.digiwal-ca
 LEAVES_vm2 = hsm-gateway
-LEAVES_vm3 = wallet-service chain-watcher sweeper sweep-signer api-gateway hot-cutover key-admin auditor
-LEAVES_vm4 = ledger-service withdrawal-service
+LEAVES_vm3 = wallet-service chain-watcher sweeper sweep-signer api-gateway ledger-service hot-cutover key-admin auditor
+LEAVES_vm4 = ledger-service api-gateway withdrawal-service
 PINNED_ON_VM2 = wallet-service sweep-signer key-admin
 REMOTE_DIR ?= /root/DigiWal
 VM2 ?= vm2

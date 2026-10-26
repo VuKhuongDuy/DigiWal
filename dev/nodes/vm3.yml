@@ -3,7 +3,7 @@
 #              chain-watcher, sweeper, sweep-signer, simulator, auditor, and the Measurement Plane: Prometheus,
 #              Alertmanager (to Telegram), Grafana, kafka-exporter, and node/cAdvisor/postgres exporters
 #   on vm2:    mongo, the Postgres of the request path (ledger), and hsm-gateway (the HSM token)
-#   on vm4:    ledger-service, history-service, withdrawal-service
+#   on vm4:    ledger-service (the one with the Kafka consumer), history-service, withdrawal-service, a second api-gateway
 #   api-gateway and postgres-gateway (the api_gateway database) are here too (moved from vm4 on 2026-10-26)
 networks:
   default:
@@ -12,7 +12,6 @@ networks:
 
 services:
   mongo: {profiles: [elsewhere]}
-  ledger-service: {profiles: [elsewhere]}
   withdrawal-service: {profiles: [elsewhere]}
   history-service: {profiles: [elsewhere]}
   hsm-gateway: {profiles: [elsewhere]}
@@ -75,7 +74,6 @@ services:
     environment:
       POSTGRES_DSN: postgres://svc_wallet:${SVC_WALLET_PASSWORD}@postgres:5432/custody?sslmode=disable
       HSM_GATEWAY_URL: https://hsm-gateway:8445
-      LEDGER_SERVICE_URL: https://ledger-service:8444
     extra_hosts: ["hsm-gateway:10.10.0.1", "ledger-service:10.10.0.3"]
 
   # key-admin (docs/runbooks/dev-hsm-bringup.md): custody's database and the gateway over WireGuard, as its own pinned leaf (CN key-admin).
@@ -150,12 +148,28 @@ services:
       WITHDRAWAL_SERVICE_URL: https://withdrawal-service:8446
       REDIS_ADDR: redis:6379
       REDIS_PASSWORD: ${REDIS_PASSWORD:?run make env}
-    extra_hosts: ["ledger-service:10.10.0.3", "withdrawal-service:10.10.0.3"]
+    extra_hosts: ["withdrawal-service:10.10.0.3"] # ledger-service is on this node (below)
     depends_on: !override
       redis: {condition: service_healthy}
       postgres-gateway: {condition: service_healthy}
     ports: !override ["10.10.0.2:8084:8080", "127.0.0.1:8084:8080", "10.10.0.2:9101:9100"] # never on the public interface (invariant 8); /metrics
     mem_limit: 2g # was 500m: at ~2,000 req/s with thousands of open connections the gateway reached ~490 MB and was OOM-killed (twice in a minute)
+
+  # Horizontal scale of the stateless request path (2026-10-26): a second ledger-service, next to api-gateway, so every gateway has a ledger-service on
+  # its own node. It serves reads (GET balances) and would serve any call, but it has no Kafka consumer: the deposit consumer stays on the
+  # instance on vm4 (a second consumer in the group would only split its partition). Cache invalidation goes through the shared Redis.
+  ledger-service:
+    environment:
+      POSTGRES_DSN: postgres://svc_ledger:${SVC_LEDGER_PASSWORD:?run make env}@ledger-db:5432/ledger?sslmode=disable
+      POSTGRES_MAX_CONNS: "64"
+      KAFKA_BROKERS: "" # no deposit consumer here
+      REDIS_ADDR: redis:6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?run make env}
+    extra_hosts: ["ledger-db:10.10.0.1"] # the ledger's Postgres on vm2
+    depends_on: !override
+      redis: {condition: service_healthy}
+    ports: !override ["10.10.0.2:8447:8443", "10.10.0.2:9104:9100"] # 8447: callers on other nodes, if any; /metrics
+    mem_limit: 1g
 
   simulator:
     environment:

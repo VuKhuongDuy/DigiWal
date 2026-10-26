@@ -30,7 +30,6 @@ services:
   hot-cutover: {profiles: [elsewhere]}
   key-admin: {profiles: [elsewhere]}
   hsm-gateway: {profiles: [elsewhere]} # the HSM token is on vm2 only
-  api-gateway: {profiles: [elsewhere]} # on vm3 since 2026-10-26: the load generator and the gateway no longer share a node with the ledger
   hsm-perms: {profiles: [elsewhere]}
 
   ledger-service:
@@ -45,6 +44,19 @@ services:
     # Redis timeouts are 100 ms and any Redis error falls through to Postgres.
     ports: !override ["10.10.0.3:8444:8443", "10.10.0.3:9102:9100"] # withdrawal-service and sweeper (vm3); /metrics (vm3)
     mem_limit: 1g # was 300m: it reached 190 MB at 1,500 req/s and api-gateway had been OOM-killed at 500 MB under more load
+
+  # The second api-gateway (the first is on vm3), next to the ledger-service it calls. The test client spreads its requests over the two;
+  # there is no load balancer in front (dev/loadtest). Its database (postgres-gateway) and Redis are on vm3, wallet-service too.
+  api-gateway:
+    environment:
+      POSTGRES_DSN: postgres://svc_gateway:${SVC_GATEWAY_PASSWORD}@postgres-gateway:5433/api_gateway?sslmode=disable
+      POSTGRES_MAX_CONNS: "48"
+      REDIS_ADDR: 10.10.0.2:6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?run make env}
+    extra_hosts: ["postgres-gateway:10.10.0.2", "wallet-service:10.10.0.2"]
+    depends_on: !override []
+    ports: !override ["10.10.0.3:8084:8080", "127.0.0.1:8084:8080", "10.10.0.3:9101:9100"]
+    mem_limit: 2g
 
   withdrawal-service:
     environment:
