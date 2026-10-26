@@ -18,6 +18,7 @@ if [ "$MODE" = off ]; then
 else
 	rm -f $f
 fi
+for g in nodes/loadtest-*.yml; do [ -e "$g" ] && [ "$g" != "$f" ] && files="$files -f $g"; done
 docker compose -p digiwal-dev --project-directory ../e2e --env-file .env $files up -d --no-build --no-deps --force-recreate api-gateway 2>&1 | tail -1
 sleep 5
 echo "api-gateway now: ip=$(docker exec digiwal-dev-api-gateway-1 printenv RATE_LIMIT_IP_PER_MIN || echo default) user=$(docker exec digiwal-dev-api-gateway-1 printenv RATE_LIMIT_USER_PER_MIN || echo default)"
