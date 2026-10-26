@@ -54,6 +54,7 @@ services:
   hot-cutover: {profiles: [elsewhere]}
   key-admin: {profiles: [elsewhere]}
   hsm-gateway: {profiles: [elsewhere]} # the HSM token is on vm2 only
+  api-gateway: {profiles: [elsewhere]} # on vm3 since 2026-10-26: the load generator and the gateway no longer share a node with the ledger
   hsm-perms: {profiles: [elsewhere]}
 
   ledger-service:
@@ -65,25 +66,13 @@ services:
     ports: !override ["10.10.0.3:8444:8443", "10.10.0.3:9102:9100"] # withdrawal-service and sweeper (vm3); /metrics (vm3)
     mem_limit: 300m
 
-  api-gateway:
-    environment:
-      POSTGRES_DSN: postgres://svc_gateway:${SVC_GATEWAY_PASSWORD}@postgres-gateway:5432/api_gateway?sslmode=disable
-      POSTGRES_MAX_CONNS: "16"
-      REDIS_ADDR: 10.10.0.2:6379 # redis on vm3, over WireGuard; if it is unreachable the gateway falls back to in-memory limits
-      REDIS_PASSWORD: ${REDIS_PASSWORD:?run make env}
-    extra_hosts: ["wallet-service:10.10.0.2"]
-    depends_on: !override
-      postgres-gateway: {condition: service_healthy}
-    ports: !override ["10.10.0.3:8084:8080", "127.0.0.1:8084:8080", "10.10.0.3:9101:9100"] # never on the public interface (invariant 8); /metrics
-    mem_limit: 500m
-
   withdrawal-service:
     environment:
       POSTGRES_DSN: postgres://svc_withdrawal:${SVC_WITHDRAWAL_PASSWORD}@postgres:5432/withdrawal?sslmode=disable
       POSTGRES_MAX_CONNS: "16" # pgx's default is 4 on a 4-vCPU host: it queued every request on it at 400 rps
     extra_hosts: ["postgres:10.10.0.2", "kafka:10.10.0.2", "anvil:10.10.0.2", "wallet-service:10.10.0.2"]
     depends_on: !override []
-    ports: !override ["10.10.0.3:9103:9100"] # /metrics (vm3); the gateway reaches it on this node's network
+    ports: !override ["10.10.0.3:8446:8443", "10.10.0.3:9103:9100"] # api-gateway (vm3) over mTLS; /metrics (vm3)
     mem_limit: 300m
 
   history-service:

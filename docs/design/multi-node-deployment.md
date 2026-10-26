@@ -687,3 +687,10 @@ same service on both nodes at once (invariant 7).
 2. **Is the `cpus` cap acceptable if vm2 is not the first to saturate?** Recommendation: try without; use it only if the data shows vm4 or k6 limiting first, and label the report.
 3. **k6 on vm3** shares a node with Kafka and Anvil and its network path to vm4 is over WireGuard. If k6 shows CPU use above about 70% or timing noise, move it to vm4's idle capacity or run it with fewer VUs. I did not move it, as it was placed on vm3 by decision.
 4. **Monitoring on vm3 still dies with vm3** (as before); vm4 down is visible there, vm3 down is not.
+
+## Change (2026-10-26, Tech Lead decision recorded by Dev): api-gateway moves to vm3
+
+The load generator (k6) runs on vm2 and api-gateway moves from vm4 to vm3, so the request path is spread over the three nodes: vm2 load and
+the ledger database, vm3 the gateway (next to Redis and wallet-service), vm4 ledger-service, withdrawal-service, history-service and the
+api_gateway database. Measured why: with k6 and the gateway on vm4 that node was 74-83% busy (k6 alone 1.3 cores) while vm3 was idle. The
+gateway reaches ledger-service on vm4:8444 and withdrawal-service on vm4:8446 over mTLS and its database at vm4:5432; nothing else changes.

@@ -3,7 +3,8 @@
 #              chain-watcher, sweeper, sweep-signer, simulator, auditor, and the Measurement Plane: Prometheus,
 #              Alertmanager (to Telegram), Grafana, kafka-exporter, and node/cAdvisor/postgres exporters
 #   on vm2:    mongo, the Postgres of the request path (ledger), and hsm-gateway (the HSM token)
-#   on vm4:    ledger-service, api-gateway, history-service, withdrawal-service
+#   on vm4:    ledger-service, history-service, withdrawal-service, postgres-gateway (api_gateway)
+#   api-gateway is here too (moved from vm4 on 2026-10-26)
 networks:
   default:
     driver_opts:
@@ -13,7 +14,6 @@ services:
   mongo: {profiles: [elsewhere]}
   ledger-service: {profiles: [elsewhere]}
   withdrawal-service: {profiles: [elsewhere]}
-  api-gateway: {profiles: [elsewhere]}
   history-service: {profiles: [elsewhere]}
   hsm-gateway: {profiles: [elsewhere]}
   hsm-perms: {profiles: [elsewhere]}
@@ -44,7 +44,7 @@ services:
     environment:
       REDIS_PASSWORD: ${REDIS_PASSWORD:?run make env}
       REDISCLI_AUTH: ${REDIS_PASSWORD}
-    ports: !override ["10.10.0.2:6379:6379"] # api-gateway (vm2) shares its rate-limit counters here; WireGuard-only, password required
+    ports: !override ["10.10.0.2:6379:6379"] # api-gateway shares its rate-limit counters here; WireGuard-only, password required
     mem_limit: 300m
 
   kafka:
@@ -113,9 +113,26 @@ services:
       HSM_GATEWAY_URL: https://hsm-gateway:8445
     extra_hosts: ["hsm-gateway:10.10.0.1"]
 
+  # api-gateway sits next to Redis (its rate-limit counters) and wallet-service (deposit addresses), apart from the ledger it calls
+  # and from the load generator (vm2). Its database is postgres-gateway on vm4; ledger-service and withdrawal-service are reached
+  # over mTLS on the ports vm4 publishes (8444, 8446).
+  api-gateway:
+    environment:
+      POSTGRES_DSN: postgres://svc_gateway:${SVC_GATEWAY_PASSWORD}@postgres-gateway:5432/api_gateway?sslmode=disable
+      POSTGRES_MAX_CONNS: "16"
+      LEDGER_SERVICE_URL: https://ledger-service:8444
+      WITHDRAWAL_SERVICE_URL: https://withdrawal-service:8446
+      REDIS_ADDR: redis:6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?run make env}
+    extra_hosts: ["postgres-gateway:10.10.0.3", "ledger-service:10.10.0.3", "withdrawal-service:10.10.0.3"]
+    depends_on: !override
+      redis: {condition: service_healthy}
+    ports: !override ["10.10.0.2:8084:8080", "127.0.0.1:8084:8080", "10.10.0.2:9101:9100"] # never on the public interface (invariant 8); /metrics
+    mem_limit: 500m
+
   simulator:
     environment:
-      SIM_GATEWAY_URL: http://10.10.0.3:8084 # api-gateway on vm4, over the private network
+      SIM_GATEWAY_URL: http://api-gateway:8080 # api-gateway is on this node
     depends_on: !override
       anvil: {condition: service_healthy}
       wallet-service: {condition: service_started}
