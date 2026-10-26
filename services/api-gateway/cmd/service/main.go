@@ -52,7 +52,8 @@ func main() {
 	// (fail-open) whenever Redis errors.
 	var rdb *redis.Client
 	if addr := os.Getenv("REDIS_ADDR"); addr != "" {
-		rdb = redis.NewClient(&redis.Options{Addr: addr, Password: os.Getenv("REDIS_PASSWORD"), MaxRetries: -1, DialTimeout: 100 * time.Millisecond})
+		rdb = redis.NewClient(&redis.Options{Addr: addr, Password: os.Getenv("REDIS_PASSWORD"), MaxRetries: -1,
+			DialTimeout: 100 * time.Millisecond, ReadTimeout: 100 * time.Millisecond, WriteTimeout: 100 * time.Millisecond})
 		defer rdb.Close()
 	}
 	newLimiter := func(prefix string, perMin int) api.RateLimiter {
@@ -65,10 +66,17 @@ func main() {
 		}
 		return &api.RedisLimiter{Client: rdb, Prefix: "ratelimit:" + prefix + ":", Limit: perMin, Window: time.Minute, Fallback: local}
 	}
+	// Read cache for the API-key lookup (docs/design/read-cache.md), off unless AUTH_CACHE_ENABLED=1 and Redis is configured.
+	authStats := metrics.NewCache("api-gateway", "apikey")
+	if rdb != nil && os.Getenv("AUTH_CACHE_ENABLED") == "1" {
+		s.Auth = &api.AuthCache{Next: st, Revoker: st, KV: api.RedisKV{C: rdb}, TTL: time.Duration(envInt("AUTH_CACHE_TTL_SECONDS", 300)) * time.Second, Stats: authStats}
+		log.Printf("api-key cache on (ttl %ds)", envInt("AUTH_CACHE_TTL_SECONDS", 300))
+	}
 	s.IPLimit = newLimiter("ip", envInt("RATE_LIMIT_IP_PER_MIN", 1200))
 	s.UserLimit = newLimiter("user", envInt("RATE_LIMIT_USER_PER_MIN", 600))
 	// Metrics: their own internal port, never the public listener (monitoring-dashboard.md invariant 6).
 	reg := metrics.NewRegistry()
+	reg.MustRegister(metrics.CacheCollector(authStats))
 	reg.MustRegister(obs.Collector(st), metrics.PoolCollector("api-gateway", func() metrics.PoolStat { return metrics.PoolFromPgx(st.Pool().Stat()) }))
 	httpm := metrics.NewHTTP(reg, "api-gateway")
 	go func() {

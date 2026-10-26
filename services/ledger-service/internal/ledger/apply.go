@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log"
 	"math/big"
 	"sort"
 	"strings"
@@ -244,6 +245,7 @@ func (s *Store) Apply(ctx context.Context, t Transaction) (Status, error) {
 	}
 
 	var posts []posting
+	var users []string // users whose balances this transaction changes, for the read cache
 	if t.Source == SourceCorrection {
 		if posts, err = deriveCorrection(ctx, tx, t); err != nil {
 			return "", err
@@ -255,6 +257,9 @@ func (s *Store) Apply(ctx context.Context, t Transaction) (Status, error) {
 				return "", err
 			}
 			posts = append(posts, posting{accountID: id, order: orderKey(e.AssetID, string(e.Ref), e.UserID), amount: e.Amount})
+			if e.Ref == RefUser {
+				users = append(users, e.UserID)
+			}
 		}
 	}
 
@@ -306,7 +311,34 @@ func (s *Store) Apply(ctx context.Context, t Transaction) (Status, error) {
 	if err := tx.Commit(ctx); err != nil {
 		return "", fmt.Errorf("committing tx: %w", err)
 	}
+	if t.Source == SourceCorrection && s.afterChange != nil { // a correction names entries, not users: look them up (after the commit, never inside the money transaction)
+		users = s.userIDsOf(ctx, posts)
+	}
+	s.changed(ctx, users...)
 	return Applied, nil
+}
+
+// userIDsOf is the users owning the posted accounts (chain and gas-expense accounts have none). A failure only means the cache entries
+// expire on their TTL instead of being deleted.
+func (s *Store) userIDsOf(ctx context.Context, posts []posting) []string {
+	ids := make([]string, 0, len(posts))
+	for _, p := range posts {
+		ids = append(ids, p.accountID)
+	}
+	rows, err := s.pool.Query(ctx, `SELECT DISTINCT user_id::text FROM accounts WHERE id = ANY($1::uuid[]) AND kind = 'user'`, ids)
+	if err != nil {
+		log.Printf("balance cache: finding the users of a correction: %v", err)
+		return nil
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var u string
+		if rows.Scan(&u) == nil {
+			out = append(out, u)
+		}
+	}
+	return out
 }
 
 // posting is one derived entry, ready to insert.

@@ -27,9 +27,15 @@ type Ledger interface {
 	PostGasFee(ctx context.Context, g ledger.GasFee) (ledger.GasFeeResult, error)
 }
 
-type Server struct{ ledger Ledger }
+type Server struct {
+	ledger Ledger
+	cache  *BalanceCache // nil: every balance read goes to the database
+}
 
 func NewServer(l Ledger) *Server { return &Server{ledger: l} }
+
+// WithBalanceCache turns on the balance read cache (docs/design/read-cache.md).
+func (s *Server) WithBalanceCache(c *BalanceCache) *Server { s.cache = c; return s }
 
 // Routes is the plain listener: /healthz only, exempt from client certs
 // (service-auth-mtls.md invariant #8).
@@ -228,22 +234,43 @@ func (s *Server) handleBalances(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "asset_id must be a uuid"})
 		return
 	}
+	if s.cache != nil {
+		out, ok := s.cache.get(r.Context(), userID)
+		if !ok {
+			sheet, err := s.ledger.BalanceSheet(r.Context(), userID, "") // the whole sheet, so one entry serves every asset filter
+			if err != nil {
+				log.Printf("reading balances: %v", err)
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
+				return
+			}
+			out = sheetRows(sheet)
+			s.cache.set(r.Context(), userID, out)
+		}
+		if assetID != "" {
+			kept := make([]balanceRow, 0, len(out))
+			for _, b := range out {
+				if strings.EqualFold(b.AssetID, assetID) {
+					kept = append(kept, b)
+				}
+			}
+			out = kept
+		}
+		writeJSON(w, http.StatusOK, out)
+		return
+	}
 	sheet, err := s.ledger.BalanceSheet(r.Context(), userID, assetID)
 	if err != nil {
 		log.Printf("reading balances: %v", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
 		return
 	}
-	type row struct {
-		AssetID          string `json:"asset_id"`
-		Symbol           string `json:"symbol"`
-		TotalBalance     string `json:"total_balance"`
-		LockedBalance    string `json:"locked_balance"`
-		AvailableBalance string `json:"available_balance"`
-	}
-	out := make([]row, len(sheet))
+	writeJSON(w, http.StatusOK, sheetRows(sheet))
+}
+
+func sheetRows(sheet []ledger.AssetBalance) []balanceRow {
+	out := make([]balanceRow, len(sheet))
 	for i, b := range sheet {
-		out[i] = row{b.AssetID, b.Symbol, b.Total.String(), b.Locked.String(), b.Available.String()}
+		out[i] = balanceRow{b.AssetID, b.Symbol, b.Total.String(), b.Locked.String(), b.Available.String()}
 	}
-	writeJSON(w, http.StatusOK, out)
+	return out
 }

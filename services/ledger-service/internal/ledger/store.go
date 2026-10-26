@@ -19,6 +19,18 @@ import (
 
 type Store struct {
 	pool *pgxpool.Pool
+	// afterChange, when set, is told which users' balances a committed transaction changed (the read cache deletes their entries,
+	// docs/design/read-cache.md). Called only after Commit succeeded; every writer to accounts.total_balance or locked_balance must call changed.
+	afterChange func(ctx context.Context, userIDs []string)
+}
+
+// OnBalanceChange registers the hook above. Not safe to call while requests are being served.
+func (s *Store) OnBalanceChange(f func(ctx context.Context, userIDs []string)) { s.afterChange = f }
+
+func (s *Store) changed(ctx context.Context, userIDs ...string) {
+	if s.afterChange != nil && len(userIDs) > 0 {
+		s.afterChange(ctx, userIDs)
+	}
 }
 
 // Connect opens the pool and applies any pending migrations.

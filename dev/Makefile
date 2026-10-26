@@ -73,7 +73,10 @@ env:
 	@gen() { grep -q "^$$1=" .env || { echo "$$1=$$(openssl rand -hex 32)" >> .env; echo "generated $$1"; }; }; \
 	case "$(NODE)" in \
 	vm2) for v in PG_ADMIN_PASSWORD SVC_LEDGER_PASSWORD SVC_GATEWAY_PASSWORD SVC_HISTORY_PASSWORD MONGO_ADMIN_PASSWORD EXPORTER_PASSWORD; do gen $$v; done ;; \
-	vm4) gen PG_ADMIN_PASSWORD; for v in SVC_LEDGER_PASSWORD SVC_GATEWAY_PASSWORD SVC_HISTORY_PASSWORD SVC_WITHDRAWAL_PASSWORD; do grep -q "^$$v=" .env || { echo "$$v missing: copy it from vm2's .env (the databases' passwords are set there)"; exit 1; }; done ;; \
+	vm4) gen PG_ADMIN_PASSWORD; for v in SVC_LEDGER_PASSWORD SVC_GATEWAY_PASSWORD SVC_HISTORY_PASSWORD SVC_WITHDRAWAL_PASSWORD; do grep -q "^$$v=" .env || { echo "$$v missing: copy it from vm2's .env (the databases' passwords are set there)"; exit 1; }; done; \
+		grep -q '^REDIS_PASSWORD=' .env || { pw=$$(ssh vm3 "sed -n 's/^REDIS_PASSWORD=//p' /root/DigiWal/dev/.env" 2>/dev/null); \
+		echo "$$pw" | grep -Eq '^[0-9a-f]{64}$$' || { echo "REDIS_PASSWORD: vm3 has none yet; run 'make env' on vm3 first (vm4 copies it from there)"; exit 1; }; \
+		echo "REDIS_PASSWORD=$$pw" >> .env; echo "copied REDIS_PASSWORD from vm3"; } ;; \
 	vm3) for v in PG_ADMIN_PASSWORD SVC_WALLET_PASSWORD SVC_WITHDRAWAL_PASSWORD SVC_CHAINWATCHER_PASSWORD SVC_AUDITOR_PASSWORD EXPORTER_PASSWORD SVC_SWEEPSIGNER_PASSWORD SVC_KEYADMIN_PASSWORD REDIS_PASSWORD; do gen $$v; done; \
 		grep -q '^SVC_GATEWAY_PASSWORD=' .env || { pw=$$(ssh vm4 "sed -n 's/^SVC_GATEWAY_PASSWORD=//p' /root/DigiWal/dev/.env" 2>/dev/null); \
 		echo "$$pw" | grep -Eq '^[0-9a-f]{64}$$' || { echo "SVC_GATEWAY_PASSWORD: vm4 has none (it is the password of the api_gateway role in postgres-gateway; api-gateway on vm3 copies it from there)"; exit 1; }; \

@@ -16,6 +16,9 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
+
+	"github.com/redis/go-redis/v9"
 
 	"digiwal/pkg/events"
 	"digiwal/pkg/metrics"
@@ -42,6 +45,19 @@ func main() {
 	reg.MustRegister(obs.Collector(store), metrics.PoolCollector("ledger-service", func() metrics.PoolStat { return metrics.PoolFromPgx(store.PoolStat()) }))
 	httpm := metrics.NewHTTP(reg, "ledger-service")
 
+	// Balance read cache (docs/design/read-cache.md): off unless BALANCE_CACHE_ENABLED=1 and REDIS_ADDR is set. Redis trouble never fails a request.
+	var balCache *api.BalanceCache
+	if addr := os.Getenv("REDIS_ADDR"); addr != "" && os.Getenv("BALANCE_CACHE_ENABLED") == "1" {
+		rdb := redis.NewClient(&redis.Options{Addr: addr, Password: os.Getenv("REDIS_PASSWORD"), MaxRetries: -1,
+			DialTimeout: 100 * time.Millisecond, ReadTimeout: 100 * time.Millisecond, WriteTimeout: 100 * time.Millisecond})
+		defer rdb.Close()
+		stats := metrics.NewCache("ledger-service", "balances")
+		reg.MustRegister(metrics.CacheCollector(stats))
+		balCache = &api.BalanceCache{KV: api.RedisKV{C: rdb}, TTL: time.Duration(envInt("BALANCE_CACHE_TTL_SECONDS", 5)) * time.Second, Stats: stats}
+		store.OnBalanceChange(balCache.Invalidate)
+		log.Printf("balance cache on (ttl %ds)", envInt("BALANCE_CACHE_TTL_SECONDS", 5))
+	}
+
 	// Fail startup on any registry problem rather than boot half-usable.
 	assets, err := ledger.LoadRegistry(requireEnv("ASSETS_FILE"))
 	if err != nil {
@@ -59,6 +75,9 @@ func main() {
 	log.Printf("screening list loaded: %d addresses", screen.Len())
 
 	server := api.NewServer(store)
+	if balCache != nil {
+		server.WithBalanceCache(balCache)
+	}
 
 	if certFile := os.Getenv("TLS_CERT_FILE"); certFile != "" {
 		tlsCfg, err := authz.ServerTLSConfig(certFile, requireEnv("TLS_KEY_FILE"), requireEnv("TLS_CA_FILE"))

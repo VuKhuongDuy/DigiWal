@@ -119,6 +119,7 @@ func (s *Store) Lock(ctx context.Context, r LockRequest) (Lock, error) {
 	if err := tx.Commit(ctx); err != nil {
 		return Lock{}, fmt.Errorf("committing tx: %w", err)
 	}
+	s.changed(ctx, r.UserID) // locked_balance rose: drop the user's cached balances
 	return Lock{IdempotencyKey: r.IdempotencyKey, Status: LockActive, Amount: r.Amount}, nil
 }
 
@@ -168,8 +169,8 @@ func (s *Store) Settle(ctx context.Context, key string) (SettleResult, error) {
 		return SettleResult{}, fmt.Errorf("resolving lock: %w", err)
 	}
 
-	var assetID string
-	if err := tx.QueryRow(ctx, `SELECT asset_id FROM accounts WHERE id = $1`, accountID).Scan(&assetID); err != nil {
+	var assetID, userID string
+	if err := tx.QueryRow(ctx, `SELECT asset_id, COALESCE(user_id::text, '') FROM accounts WHERE id = $1`, accountID).Scan(&assetID, &userID); err != nil {
 		return SettleResult{}, fmt.Errorf("reading account: %w", err)
 	}
 	var chainID string
@@ -205,6 +206,7 @@ func (s *Store) Settle(ctx context.Context, key string) (SettleResult, error) {
 	if err := tx.Commit(ctx); err != nil {
 		return SettleResult{}, fmt.Errorf("committing tx: %w", err)
 	}
+	s.changed(ctx, userID) // total and locked both fell
 	ids, err := s.settleEntries(ctx, txID)
 	if err != nil {
 		return SettleResult{}, err
@@ -236,10 +238,15 @@ func (s *Store) Release(ctx context.Context, key string) error {
 	if err != nil {
 		return fmt.Errorf("resolving lock: %w", err)
 	}
-	if _, err := tx.Exec(ctx, `UPDATE accounts SET locked_balance = locked_balance - $2::numeric WHERE id = $1`, accountID, amountText); err != nil {
+	var userID string
+	if err := tx.QueryRow(ctx, `UPDATE accounts SET locked_balance = locked_balance - $2::numeric WHERE id = $1 RETURNING COALESCE(user_id::text, '')`, accountID, amountText).Scan(&userID); err != nil {
 		return fmt.Errorf("releasing balance: %w", err)
 	}
-	return tx.Commit(ctx)
+	if err := tx.Commit(ctx); err != nil {
+		return err
+	}
+	s.changed(ctx, userID) // locked_balance fell
+	return nil
 }
 
 // resolvedLock handles a Settle/Release that found no active lock: it was already
