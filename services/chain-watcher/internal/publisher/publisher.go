@@ -4,6 +4,7 @@ package publisher
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/segmentio/kafka-go"
 )
@@ -22,6 +23,10 @@ func NewKafka(brokers []string) *Kafka {
 		Addr:         kafka.TCP(brokers...),
 		Balancer:     &kafka.Hash{},
 		RequiredAcks: kafka.RequireAll, // an acknowledged deposit event must not vanish with a broker
+		// kafka-go holds a batch for BatchTimeout (default 1 s) hoping for more messages. Publish sends one message and waits
+		// for its acknowledgement, so with the default every event cost a full second: a pipeline that publishes N events
+		// per pass spent N seconds in it (measured: exactly one outbox event per second, about 50 withdrawals per 90 s).
+		BatchTimeout: 5 * time.Millisecond,
 		// deposits.* topics are created on first publish on a fresh dev broker.
 		AllowAutoTopicCreation: true,
 	}}
