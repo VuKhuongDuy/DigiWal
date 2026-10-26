@@ -9,7 +9,7 @@ RATE=${RATE:-500}; MINUTES=${MINUTES:-60}; CHUNK_MIN=${CHUNK_MIN:-5}; WRITE_PCT=
 OUT=$RESULTS_ROOT/$(date +%Y%m%d-%H%M%S)-sustained-${RATE}rps
 mkdir -p "$OUT"; environment_snapshot | tee "$OUT/environment.txt"
 chunks=$(( MINUTES / CHUNK_MIN )); : > "$OUT/summary.txt"
-echo "step | target | achieved | dropped | failed% | write p50/p95/p99 ms | read p50/p95/p99 ms | PG ledger (vm2) cores/thr%/act | PG gateway (vm4) | PG core (vm3) | backlog" > "$OUT/summary.txt"
+echo "step | target | achieved | dropped | failed% | write p50/p95/p99 ms | read p50/p95/p99 ms | PG ledger (vm2) cores/thr%/act | PG gateway (vm3) | PG core (vm3) | backlog" > "$OUT/summary.txt"
 for i in $(seq 1 "$chunks"); do
 	d=$(printf '%s/chunk-%02d' "$OUT" "$i")
 	run_load "$d" "$RATE" $(( CHUNK_MIN * 60 )) 0 "$WRITE_PCT" "$MIX"

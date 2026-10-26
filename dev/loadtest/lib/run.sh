@@ -14,7 +14,7 @@ run_load() {
 
 	"$HERE/lib/sampler.sh" "$total" digiwal-dev-postgres-1 > "$out/sample.ledger.txt" 2>/dev/null &
 	local p1=$!
-	ssh vm4 "bash -s $total digiwal-dev-postgres-gateway-1" < "$HERE/lib/sampler.sh" > "$out/sample.gateway.txt" 2>/dev/null &
+	ssh "$GATEWAY_NODE" "bash -s $total digiwal-dev-postgres-gateway-1" < "$HERE/lib/sampler.sh" > "$out/sample.gateway.txt" 2>/dev/null &
 	local p2=$!
 	ssh vm3 "bash -s $total digiwal-dev-postgres-1 withdrawal" < "$HERE/lib/sampler.sh" > "$out/sample.core.txt" 2>/dev/null &
 	local p3=$!
@@ -39,8 +39,8 @@ environment_snapshot() {
 	echo "date: $(date -u +%FT%TZ)"
 	echo "code: $(git -C "$HERE/../.." log -1 --format='%h %s' 2>/dev/null || echo unknown)"
 	echo "nodes: 3 VMs (vm2 vm3 vm4), each $(nproc) vCPU / $(free -g | awk '/Mem:/{print $2}') GB; chain: mockchain (no EVM); users are simulated"
-	for node in vm2 vm3 vm4; do
-		c=digiwal-dev-postgres-1; [ $node = vm4 ] && c=digiwal-dev-postgres-gateway-1
+	for node in vm2 vm3; do
+		c=digiwal-dev-postgres-1
 		if [ $node = vm2 ]; then docker inspect -f "$node $c cpus={{.HostConfig.NanoCpus}} (0 = no cap) mem={{.HostConfig.Memory}}" $c
 		else ssh $node "docker inspect -f '$node $c cpus={{.HostConfig.NanoCpus}} (0 = no cap) mem={{.HostConfig.Memory}}' $c"; fi
 	done
