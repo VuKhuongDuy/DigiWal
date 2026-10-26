@@ -31,7 +31,11 @@ STEPS.forEach((rate, i) => {
   const step = 'r' + rate;
   scenarios[step] = {
     executor: 'constant-arrival-rate', rate, timeUnit: '1s', duration: STEP_S + 's', startTime: i * (STEP_S + GAP_S) + 's',
-    preAllocatedVUs: Math.max(100, Math.ceil(rate / 2)), maxVUs: Math.max(600, rate * 2), tags: { step },
+    // k6 initialises every scenario's preAllocatedVUs when the test starts (not when its step starts) and each VU costs ~0.4 MB: with
+    // 100+rate/2 pre-allocated and 2*rate allowed per step, five steps up to 4,000 req/s reached 15,000 VUs and 6.4 GB and k6 was OOM-killed.
+    // Pre-allocate what a healthy system needs (rate x 0.25 s, capped), allow one VU per request/s (a 1 s latency allowance); k6 starts more when it
+    // needs them, but starting thousands at once at the top of a step is slow and shows up as dropped iterations, so do not pre-allocate too few.
+    preAllocatedVUs: Math.min(1500, Math.max(100, Math.ceil(rate / 4))), maxVUs: Math.max(200, rate), tags: { step },
   };
   // always-true thresholds exist only to make k6 export these per-step sub-metrics in the summary
   for (const kind of ['wd', 'read']) thresholds[`http_req_duration{step:${step},kind:${kind}}`] = ['p(95)<1e9'];
@@ -42,11 +46,12 @@ STEPS.forEach((rate, i) => {
   thresholds[`server_errors{step:${step}}`] = ['count>=0'];
 });
 
-export const options = { scenarios, thresholds, summaryTrendStats: ['avg', 'p(50)', 'p(95)', 'p(99)', 'max'] };
+export const options = { scenarios, thresholds, discardResponseBodies: true, // only the status is used; the bodies were most of each VU's memory
+  summaryTrendStats: ['avg', 'p(50)', 'p(95)', 'p(99)', 'max'] };
 
 export function setup() {
   const users = keys.map((k) => {
-    const r = http.get(base + '/v1/whitelist', { headers: { Authorization: 'Bearer ' + k } });
+    const r = http.get(base + '/v1/whitelist', { headers: { Authorization: 'Bearer ' + k }, responseType: 'text' }); // the only body we read
     const a = r.status === 200 ? r.json().find((w) => w.status === 'active') : null;
     return { k, addr: a ? a.address : null };
   }).filter((u) => u.addr);
