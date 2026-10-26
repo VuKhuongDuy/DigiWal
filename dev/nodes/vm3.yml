@@ -155,7 +155,7 @@ services:
       redis: {condition: service_healthy}
       postgres-gateway: {condition: service_healthy}
     ports: !override ["10.10.0.2:8084:8080", "127.0.0.1:8084:8080", "10.10.0.2:9101:9100"] # never on the public interface (invariant 8); /metrics
-    mem_limit: 500m
+    mem_limit: 2g # was 500m: at ~2,000 req/s with thousands of open connections the gateway reached ~490 MB and was OOM-killed (twice in a minute)
 
   simulator:
     environment:
