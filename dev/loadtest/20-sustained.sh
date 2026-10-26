@@ -15,5 +15,5 @@ for i in $(seq 1 "$chunks"); do
 	analyse "$d" "$RATE" $(( CHUNK_MIN * 60 )) 0 > /dev/null
 	line=$(sed -n '3p' "$d/table.txt" | sed "s/^r$RATE/chunk $i/"); echo "$line" | tee -a "$OUT/summary.txt"
 done
-echo; cat "$OUT/summary.txt"; echo; wait_idle 900 | tee -a "$OUT/summary.txt"
+echo; cat "$OUT/summary.txt"; echo; [ "${WAIT_IDLE:-1}" = 1 ] && wait_idle 900 | tee -a "$OUT/summary.txt"
 echo "results: $OUT"
