@@ -3,6 +3,17 @@
 // STEPS: comma list of arrival rates (req/s); each step lasts STEP_S seconds, steps are GAP_S seconds apart.
 //   k6 run -e STEPS=100,200,300 -e STEP_S=60 -e WRITE_PCT=20 mix.js
 import http from 'k6/http';
+import exec from 'k6/execution';
+import { Counter } from 'k6/metrics';
+
+// Where the failures come from: 429 is the gateway's own rate limiter (RATE_LIMIT_*_PER_MIN), not a capacity limit.
+const limited = new Counter('rate_limited');
+const serverErr = new Counter('server_errors');
+const tally = (res) => {
+  const t = { step: exec.scenario.name };
+  if (res.status === 429) limited.add(1, t);
+  else if (res.status === 0 || res.status >= 500) serverErr.add(1, t);
+};
 
 const keys = JSON.parse(open('/keys.json'));
 const base = __ENV.BASE || 'http://127.0.0.1:8084';
@@ -26,6 +37,8 @@ STEPS.forEach((rate, i) => {
   thresholds[`http_reqs{step:${step}}`] = ['count>=0'];
   thresholds[`http_req_failed{step:${step}}`] = ['rate<=1'];
   thresholds[`dropped_iterations{scenario:${step}}`] = ['count>=0'];
+  thresholds[`rate_limited{step:${step}}`] = ['count>=0'];
+  thresholds[`server_errors{step:${step}}`] = ['count>=0'];
 });
 
 export const options = { scenarios, thresholds, summaryTrendStats: ['avg', 'p(50)', 'p(95)', 'p(99)', 'max'] };
@@ -45,13 +58,13 @@ export default function (users) {
   const h = { Authorization: 'Bearer ' + u.k, 'Content-Type': 'application/json' };
   const x = Math.random();
   if (x < WRITE) {
-    http.post(base + '/v1/withdrawals', JSON.stringify({
+    tally(http.post(base + '/v1/withdrawals', JSON.stringify({
       idempotency_key: 'k6-' + __VU + '-' + __ITER + '-' + Date.now(), asset_id: ETH, amount: MIN_ETH, to_address: u.addr,
-    }), { headers: h, tags: { kind: 'wd' }, responseCallback: http.expectedStatuses(200, 202, 422) });
+    }), { headers: h, tags: { kind: 'wd' }, responseCallback: http.expectedStatuses(200, 202, 422) }));
     return;
   }
   const r = (x - WRITE) / (1 - WRITE); // 0..1 over the read share
-  if (r < 0.55 / 0.80) http.get(base + '/v1/balances', { headers: h, tags: { kind: 'read' } });
-  else if (r < 0.70 / 0.80) http.get(base + '/v1/deposit-address', { headers: h, tags: { kind: 'read' } });
-  else http.get(base + '/v1/whitelist', { headers: h, tags: { kind: 'read' } });
+  if (r < 0.55 / 0.80) tally(http.get(base + '/v1/balances', { headers: h, tags: { kind: 'read' } }));
+  else if (r < 0.70 / 0.80) tally(http.get(base + '/v1/deposit-address', { headers: h, tags: { kind: 'read' } }));
+  else tally(http.get(base + '/v1/whitelist', { headers: h, tags: { kind: 'read' } }));
 }

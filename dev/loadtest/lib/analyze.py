@@ -44,13 +44,15 @@ def ms(metric, key):
 
 
 lines = [f"users with an active whitelist: {users} of {m.group(3)}",
-         "step | target | achieved | dropped | failed% | write p50/p95/p99 ms | read p50/p95/p99 ms | PG ledger (vm2) cores/thr%/act | PG gateway (vm4) | PG core (vm3) | backlog"]
+         "step | target | achieved | dropped | failed% | 429% | 5xx% | write p50/p95/p99 ms | read p50/p95/p99 ms | PG ledger (vm2) cores/thr%/act | PG gateway (vm4) | PG core (vm3) | backlog"]
 for i, rate in enumerate(steps):
     s = f"r{rate}"
     a = t0 + i * (step_s + gap_s)
     cnt = summary.get(f"http_reqs{{step:{s}}}", {}).get("count", 0)
     dropped = summary.get(f"dropped_iterations{{scenario:{s}}}", {}).get("count", 0)
     failed = 100 * summary.get(f"http_req_failed{{step:{s}}}", {}).get("value", 0)
+    n429 = 100 * summary.get(f"rate_limited{{step:{s}}}", {}).get("count", 0) / max(cnt, 1)
+    n5xx = 100 * summary.get(f"server_errors{{step:{s}}}", {}).get("count", 0) / max(cnt, 1)
     wd = "/".join(ms(f"http_req_duration{{step:{s},kind:wd}}", k) for k in ("p(50)", "p(95)", "p(99)"))
     rd = "/".join(ms(f"http_req_duration{{step:{s},kind:read}}", k) for k in ("p(50)", "p(95)", "p(99)"))
     cols, backlog = [], "-"
@@ -59,5 +61,5 @@ for i, rate in enumerate(steps):
         cols.append(f"{w[0]:.2f}/{w[1]:.0f}%/{w[2]:.1f}" if w else "n/a")
         if k == "core" and w:
             backlog = str(w[3])
-    lines.append(f"{s} | {rate} | {cnt / step_s:.0f} | {int(dropped)} | {failed:.2f} | {wd} | {rd} | {cols[0]} | {cols[1]} | {cols[2]} | {backlog}")
+    lines.append(f"{s} | {rate} | {cnt / step_s:.0f} | {int(dropped)} | {failed:.2f} | {n429:.1f} | {n5xx:.1f} | {wd} | {rd} | {cols[0]} | {cols[1]} | {cols[2]} | {backlog}")
 print("\n".join(lines))
