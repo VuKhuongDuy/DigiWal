@@ -15,7 +15,7 @@ const tally = (res) => {
   else if (res.status === 0 || res.status >= 500) serverErr.add(1, t);
 };
 
-const keys = JSON.parse(open('/keys.json'));
+const keys = JSON.parse(open(__ENV.KEYS || '/keys.json')); // KEYS: a path, when k6 runs outside the container (e.g. on a laptop)
 const bases = (__ENV.BASES || __ENV.BASE || 'http://127.0.0.1:8084').split(',');
 const base = bases[0]; // setup and single-address uses
 const pick = () => bases[Math.floor(Math.random() * bases.length)]; // one request, one gateway: no load balancer in the way

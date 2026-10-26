@@ -30,3 +30,31 @@ Things to know before quoting a number
 - Stop the simulator and the monitoring plane first (the exporters and the auditor's queries compete for the capped Postgres CPU).
   Bring monitoring back with `make monitoring` on vm2 and vm3 (and `make up` on vm4) from `dev/`.
 - A run leaves its withdrawals in the databases; reset the environment (or accept the data) before a clean second series.
+
+## Running k6 from a laptop (macOS)
+
+The gateways listen only on `127.0.0.1:8084` of vm3 and vm4 (and on the WireGuard address), never on a public address, so a laptop reaches them
+through SSH tunnels. Nothing needs to be set up on the servers (sshd allows TCP forwarding).
+
+1. Raise the file-descriptor limit in the shell that starts the tunnels AND k6 (macOS defaults to 256): `ulimit -n 65536`.
+2. Several tunnels per gateway, not one: every connection of a tunnel shares one TCP connection, so one lost packet stalls all of them.
+   ```bash
+   for p in 18084 18085 18086 18087; do ssh -f -N -o ServerAliveInterval=30 -o ExitOnForwardFailure=yes -L $p:127.0.0.1:8084 alex_vm_3; done
+   for p in 18094 18095 18096 18097; do ssh -f -N -o ServerAliveInterval=30 -o ExitOnForwardFailure=yes -L $p:127.0.0.1:8084 alex_vm_4; done
+   ```
+3. Copy the script and the API keys (the keys of the simulated users; they are written by `00-prepare.sh` on vm2):
+   ```bash
+   mkdir -p ~/k6 && scp alex_vm_2:/root/wt-loadtest/dev/loadtest/k6/mix.js ~/k6/ && scp alex_vm_2:/tmp/loadtest/keys.json ~/k6/
+   ```
+4. Run (`brew install k6` once). BASES lists the local tunnel ports, so every request picks one at random:
+   ```bash
+   B=http://127.0.0.1; k6 run -e KEYS=$HOME/k6/keys.json -e MIX=balances -e STEPS=2000,2500,3000 -e STEP_S=60 -e GAP_S=15 \
+     -e BASES=$B:18084,$B:18085,$B:18086,$B:18087,$B:18094,$B:18095,$B:18096,$B:18097 \
+     --summary-export=$HOME/k6/summary.json ~/k6/mix.js 2>&1 | tee $HOME/k6/k6.log
+   ```
+5. While it runs, on vm2: `./40-watch.sh 1200` records the servers' side (CPU of the three nodes, pool waits, cache hit ratios, gateway request rate).
+6. To get the per-step table from the laptop's run, copy `summary.json` and `k6.log` into a directory on vm2 and run
+   `python3 lib/analyze.py <dir> 2000,2500,3000 60 15` (the Postgres columns say n/a: they come from the samplers `10-step-test.sh` starts).
+
+What the laptop run measures: the system plus an internet path and an SSH tunnel. Latencies include the round trip from the laptop to the VMs, and sshd on vm3/vm4 spends some CPU
+on the tunnel, so compare numbers only with other laptop runs. Run `./00-prepare.sh` on vm2 first so the keys are fresh and the system is idle.

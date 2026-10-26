@@ -51,29 +51,32 @@ def delta(a, b, svc, metric, label_re=None):
             tot += v - a["m"].get((s, m, lab), 0.0)
     return tot
 
+def delta_all(prev, cur, nodes, svc, metric, label_re=None):
+    """The same counter summed over the nodes that run the service (a node that restarted contributes nothing for that interval)."""
+    return sum(max(delta(prev[n], cur[n], svc, metric, label_re), 0.0) for n in nodes)
+
 nodes = ("vm2", "vm3", "vm4")
 prev = {n: snap(n) for n in nodes}
-print("time     k6 | busy% (sys%) vm2 vm3 vm4 | cores: gw  ledger redis pg-gw pg-ledger | pool wait ms: gw ledger | cache hit%: apikey bal (err) | gateway: req/s avg ms")
+print("time     k6 | busy% (sys%) vm2 vm3 vm4 | cores (both nodes summed): gw  ledger redis pg-gw pg-ledger | pool wait ms: gw ledger | cache hit%: apikey bal (err) | gateway: req/s avg ms")
 end = time.time() + TOTAL
 while time.time() < end:
     time.sleep(INTERVAL)
     cur = {n: snap(n) for n in nodes}
     b = {n: busy(prev[n], cur[n]) for n in nodes}
     fmt = lambda x: "  - " if x is None else f"{x[0]:3.0f}({x[1]:2.0f})"
-    gw, led = ("vm3", "api-gateway-1"), ("vm4", "ledger-service-1")
     c = lambda node, name: cores(prev[node], cur[node], name)
-    def wait(svc, node):
-        n = delta(prev[node], cur[node], svc, "digiwal_db_pool_acquires_total")
-        return 1000 * delta(prev[node], cur[node], svc, "digiwal_db_pool_acquire_seconds_total") / n if n > 0 else 0.0
-    def hit(svc, node, comp):
-        h = delta(prev[node], cur[node], svc, "digiwal_cache_requests_total", f'component="{comp}".*result="hit"|result="hit".*component="{comp}"')
-        m = delta(prev[node], cur[node], svc, "digiwal_cache_requests_total", f'component="{comp}".*result="miss"|result="miss".*component="{comp}"')
-        e = delta(prev[node], cur[node], svc, "digiwal_cache_requests_total", f'component="{comp}".*result="error"|result="error".*component="{comp}"')
+    gws = ("vm3", "vm4")                      # one api-gateway and one ledger-service on each
+    def wait(svc):
+        n = delta_all(prev, cur, gws, svc, "digiwal_db_pool_acquires_total")
+        return 1000 * delta_all(prev, cur, gws, svc, "digiwal_db_pool_acquire_seconds_total") / n if n > 0 else 0.0
+    def hit(svc, comp):
+        f = lambda r: delta_all(prev, cur, gws, svc, "digiwal_cache_requests_total", f'component="{comp}".*result="{r}"|result="{r}".*component="{comp}"')
+        h, m, e = f("hit"), f("miss"), f("error")
         return (100 * h / (h + m + e) if h + m + e > 0 else 0.0), e
-    reqs = delta(prev["vm3"], cur["vm3"], "api-gateway", "digiwal_http_request_duration_seconds_count", 'route="GET /v1/balances"')
-    secs = delta(prev["vm3"], cur["vm3"], "api-gateway", "digiwal_http_request_duration_seconds_sum", 'route="GET /v1/balances"')
+    reqs = delta_all(prev, cur, gws, "api-gateway", "digiwal_http_request_duration_seconds_count", 'route="GET /v1/balances"')
+    secs = delta_all(prev, cur, gws, "api-gateway", "digiwal_http_request_duration_seconds_sum", 'route="GET /v1/balances"')
     dt = max(cur["vm3"]["t"] - prev["vm3"]["t"], 1)
-    ah, _ = hit("api-gateway", "vm3", "apikey"); bh, be = hit("ledger-service", "vm4", "balances")
+    ah, _ = hit("api-gateway", "apikey"); bh, be = hit("ledger-service", "balances")
     k6 = "RUN" if cur["vm2"]["k6"] else "idle"
-    print(f"{time.strftime('%H:%M:%S')} {k6:4} | {fmt(b['vm2'])} {fmt(b['vm3'])} {fmt(b['vm4'])} | {c('vm3','api-gateway-1'):4.2f} {c('vm4','ledger-service-1'):5.2f} {c('vm3','redis-1'):5.2f} {c('vm3','postgres-gateway-1'):5.2f} {c('vm2','postgres-1'):7.2f} | {wait('api-gateway','vm3'):6.1f} {wait('ledger-service','vm4'):6.1f} | {ah:5.1f} {bh:5.1f} ({be:.0f}) | {reqs/dt:6.0f} {1000*secs/reqs if reqs>0 else 0:6.0f}", flush=True)
+    print(f"{time.strftime('%H:%M:%S')} {k6:4} | {fmt(b['vm2'])} {fmt(b['vm3'])} {fmt(b['vm4'])} | {c('vm3','api-gateway-1')+c('vm4','api-gateway-1'):4.2f} {c('vm3','ledger-service-1')+c('vm4','ledger-service-1'):5.2f} {c('vm3','redis-1')+c('vm4','redis-1'):5.2f} {c('vm3','postgres-gateway-1'):5.2f} {c('vm2','postgres-1'):7.2f} | {wait('api-gateway'):6.1f} {wait('ledger-service'):6.1f} | {ah:5.1f} {bh:5.1f} ({be:.0f}) | {reqs/dt:6.0f} {1000*secs/reqs if reqs>0 else 0:6.0f}", flush=True)
     prev = cur
