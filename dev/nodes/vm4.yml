@@ -60,7 +60,7 @@ services:
   ledger-service:
     environment:
       POSTGRES_DSN: postgres://svc_ledger:${SVC_LEDGER_PASSWORD}@postgres:5432/ledger?sslmode=disable
-      POSTGRES_MAX_CONNS: "16" # pgx's default is 4 on a 4-vCPU host; 16 raised the read ceiling from ~1.9k to ~2.4k req/s
+      POSTGRES_MAX_CONNS: "64" # pgx's default is 4; 16 was enough while the database was on this node. With Postgres on vm2 each query holds a connection across WireGuard: at 16 the pool was the limit (avg wait 1.1 s, 99% of acquires waited at 800 req/s)
     extra_hosts: ["postgres:10.10.0.1", "kafka:10.10.0.2"]
     depends_on: !override []
     ports: !override ["10.10.0.3:8444:8443", "10.10.0.3:9102:9100"] # withdrawal-service and sweeper (vm3); /metrics (vm3)

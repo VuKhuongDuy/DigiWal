@@ -119,7 +119,7 @@ services:
   api-gateway:
     environment:
       POSTGRES_DSN: postgres://svc_gateway:${SVC_GATEWAY_PASSWORD}@postgres-gateway:5432/api_gateway?sslmode=disable
-      POSTGRES_MAX_CONNS: "16"
+      POSTGRES_MAX_CONNS: "48" # its database is on vm4: at 16 the pool was the limit (avg wait 213 ms, 90% of acquires waited at 800 req/s)
       LEDGER_SERVICE_URL: https://ledger-service:8444
       WITHDRAWAL_SERVICE_URL: https://withdrawal-service:8446
       REDIS_ADDR: redis:6379
