@@ -7,7 +7,10 @@ source "$HERE/lib/run.sh"
 preflight_clean
 RATE=${RATE:-800}; SECONDS_RUN=${SECONDS_RUN:-40}; MIX=${MIX:-balances}; WRITE_PCT=${WRITE_PCT:-20}
 OUT=$RESULTS_ROOT/$(date +%Y%m%d-%H%M%S)-diagnose-${RATE}rps; mkdir -p "$OUT/m1" "$OUT/m2"
-metrics() { for s in api-gateway ledger-service; do ssh vm4 "docker exec digiwal-dev-$s-1 wget -qO- http://127.0.0.1:9100/metrics" > "$1/$s.txt" 2>/dev/null || true; done; }
+metrics() {
+	ssh "$GATEWAY_NODE" "docker exec digiwal-dev-api-gateway-1 wget -qO- http://127.0.0.1:9100/metrics" > "$1/api-gateway.txt" 2>/dev/null || true
+	ssh vm4 "docker exec digiwal-dev-ledger-service-1 wget -qO- http://127.0.0.1:9100/metrics" > "$1/ledger-service.txt" 2>/dev/null || true
+}
 metrics "$OUT/m1"
 total=$(( SECONDS_RUN + 30 ))
 bash "$HERE/lib/nodecpu.sh" "$total" > "$OUT/nodecpu.vm2.txt" 2>/dev/null &

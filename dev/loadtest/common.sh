@@ -4,8 +4,9 @@
 set -euo pipefail
 
 RESULTS_ROOT=${RESULTS_ROOT:-$HOME/loadtest-results}
-K6_HOST=${K6_HOST:-vm4}                                  # where k6 runs
-GATEWAY_URL=${GATEWAY_URL:-http://127.0.0.1:8084}        # api-gateway as seen from the k6 host
+K6_HOST=${K6_HOST:-vm2}                                  # where k6 runs: vm2, apart from the gateway (vm3) and the ledger service (vm4)
+GATEWAY_URL=${GATEWAY_URL:-http://10.10.0.2:8084}        # api-gateway (vm3) as seen from the k6 host
+GATEWAY_NODE=${GATEWAY_NODE:-vm3}
 REMOTE_DIR=/tmp/loadtest                                 # on the k6 host: keys.json and the k6 scripts
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
@@ -14,6 +15,11 @@ die() { echo "ERROR: $*" >&2; exit 1; }
 
 # run_on <node> <command...>: vm2 is this machine (no ssh to itself), the others go through ssh.
 run_on() { local node=$1; shift; if [ "$node" = vm2 ]; then bash -c "$*"; else ssh "$node" "$*"; fi; }
+
+# On the k6 host (vm2 is this machine, anything else goes through ssh).
+on_k6() { run_on "$K6_HOST" "$*"; }
+put_k6() { if [ "$K6_HOST" = vm2 ]; then cp "$1" "$2"; else scp -q "$1" "$K6_HOST:$2"; fi; }
+get_k6() { if [ "$K6_HOST" = vm2 ]; then cp "$1" "$2"; else scp -q "$K6_HOST:$1" "$2"; fi; }
 
 # psql inside the Postgres container of a node. vm2: ledger. vm3: custody, withdrawal, chain_watcher, auditor.
 # vm4 has postgres-gateway (api_gateway) instead. Usage: sql vm3 withdrawal "select 1"

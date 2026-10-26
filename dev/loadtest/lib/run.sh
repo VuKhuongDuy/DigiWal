@@ -8,9 +8,9 @@ run_load() {
 	n=$(echo "$steps" | tr ',' '\n' | wc -l)
 	total=$(( n * (step_s + gap_s) + 90 ))
 	mkdir -p "$out"
-	ssh "$K6_HOST" "mkdir -p $REMOTE_DIR/out && rm -f $REMOTE_DIR/out/summary.json" || die "cannot ssh to $K6_HOST"
-	scp -q "$HERE/k6/mix.js" "$K6_HOST:$REMOTE_DIR/mix.js"
-	ssh "$K6_HOST" "test -s $REMOTE_DIR/keys.json" || die "no $REMOTE_DIR/keys.json on $K6_HOST: run 00-prepare.sh first"
+	on_k6 "mkdir -p $REMOTE_DIR/out && rm -f $REMOTE_DIR/out/summary.json" || die "cannot reach $K6_HOST"
+	put_k6 "$HERE/k6/mix.js" "$REMOTE_DIR/mix.js"
+	on_k6 "test -s $REMOTE_DIR/keys.json" || die "no $REMOTE_DIR/keys.json on $K6_HOST: run 00-prepare.sh first"
 
 	"$HERE/lib/sampler.sh" "$total" digiwal-dev-postgres-1 > "$out/sample.ledger.txt" 2>/dev/null &
 	local p1=$!
@@ -21,10 +21,10 @@ run_load() {
 	sleep 2
 
 	log "k6: mix=$mix steps=$steps step=${step_s}s gap=${gap_s}s writes=${write}% -> $out"
-	ssh "$K6_HOST" "docker run --rm --user root --network host -e BASE=$GATEWAY_URL -e STEPS=$steps -e STEP_S=$step_s -e GAP_S=$gap_s -e WRITE_PCT=$write -e MIX=$mix \
+	on_k6 "docker run --rm --user root --network host -e BASE=$GATEWAY_URL -e STEPS=$steps -e STEP_S=$step_s -e GAP_S=$gap_s -e WRITE_PCT=$write -e MIX=$mix \
 		-v $REMOTE_DIR/keys.json:/keys.json:ro -v $REMOTE_DIR/mix.js:/s.js:ro -v $REMOTE_DIR/out:/out \
 		grafana/k6 run --summary-export=/out/summary.json /s.js" > "$out/k6.log" 2>&1 || log "k6 exited non-zero (see $out/k6.log); thresholds are informational"
-	scp -q "$K6_HOST:$REMOTE_DIR/out/summary.json" "$out/summary.json" || die "k6 produced no summary"
+	get_k6 "$REMOTE_DIR/out/summary.json" "$out/summary.json" || die "k6 produced no summary"
 	kill "$p1" "$p2" "$p3" 2>/dev/null || true
 	wait "$p1" "$p2" "$p3" 2>/dev/null || true
 }
@@ -44,7 +44,7 @@ environment_snapshot() {
 		if [ $node = vm2 ]; then docker inspect -f "$node $c cpus={{.HostConfig.NanoCpus}} (0 = no cap) mem={{.HostConfig.Memory}}" $c
 		else ssh $node "docker inspect -f '$node $c cpus={{.HostConfig.NanoCpus}} (0 = no cap) mem={{.HostConfig.Memory}}' $c"; fi
 	done
-	echo "pool: POSTGRES_MAX_CONNS=$(ssh vm4 'docker exec digiwal-dev-api-gateway-1 printenv POSTGRES_MAX_CONNS' 2>/dev/null)"
+	echo "gateway on $GATEWAY_NODE, k6 on $K6_HOST; gateway POSTGRES_MAX_CONNS=$(ssh $GATEWAY_NODE 'docker exec digiwal-dev-api-gateway-1 printenv POSTGRES_MAX_CONNS' 2>/dev/null) ledger-service=$(ssh vm4 'docker exec digiwal-dev-ledger-service-1 printenv POSTGRES_MAX_CONNS' 2>/dev/null)"
 	echo "running monitoring containers: $( (docker ps --format '{{.Names}}'; ssh vm3 "docker ps --format '{{.Names}}'"; ssh vm4 "docker ps --format '{{.Names}}'") | grep -cE 'prometheus|grafana|auditor|exporter|cadvisor' )"
 }
 

@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
-# Turns api-gateway's rate limits off for a capacity test, or back on afterwards. The override lives only on vm4
+# Turns api-gateway's rate limits off for a capacity test, or back on afterwards. The override lives only on the gateway's node
 # (dev/nodes/loadtest-off.yml, not in the repo), so nothing committed changes and the default limits return with "on".
 #   ./02-rate-limits.sh off        RATE_LIMIT_IP_PER_MIN=0 RATE_LIMIT_USER_PER_MIN=0
 #   ./02-rate-limits.sh on         remove the override (defaults: 1200 per IP and 600 per key per minute)
 source "$(cd "$(dirname "$0")" && pwd)/common.sh"
 mode=${1:-}
 [ "$mode" = off ] || [ "$mode" = on ] || die "usage: $0 off|on"
-ssh vm4 "MODE=$mode bash -s" <<'R'
+ssh "$GATEWAY_NODE" "MODE=$mode NODE=$GATEWAY_NODE bash -s" <<'R'
 set -e
 cd /root/DigiWal/dev
 export MASTER_KEY_HEX=not-on-this-node
 f=nodes/loadtest-off.yml
-files="-f ../infra/docker-compose.yml -f ../e2e/docker-compose.yml -f docker-compose.yml -f nodes/vm4.yml"
+files="-f ../infra/docker-compose.yml -f ../e2e/docker-compose.yml -f docker-compose.yml -f nodes/$NODE.yml"
 if [ "$MODE" = off ]; then
 	printf 'services:\n  api-gateway:\n    environment:\n      RATE_LIMIT_IP_PER_MIN: "0"\n      RATE_LIMIT_USER_PER_MIN: "0"\n' > $f
 	files="$files -f $f"

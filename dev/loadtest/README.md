@@ -1,6 +1,6 @@
 # Load tests (k6 through api-gateway)
 
-Run everything from **vm2** (ssh to vm3 and vm4 must work). k6 runs on vm4, next to the gateway. There is no Prometheus in the
+Run everything from **vm2** (ssh to vm3 and vm4 must work). k6 runs on vm2; api-gateway is on vm3 and ledger-service on vm4, so the load generator, the gateway and the ledger are on three different nodes. There is no Prometheus in the
 loop: the Postgres containers are sampled from their cgroups, so the monitoring plane can stay stopped during a test.
 
 | Script | What it does |
@@ -12,7 +12,7 @@ loop: the Postgres containers are sampled from their cgroups, so the monitoring 
 | `30-diagnose.sh` | A short load (default 800 req/s, 40 s, balances) plus a bottleneck report: CPU of every container on every node, host user/system time, time per request at the gateway and the ledger, DB pool waits. No Prometheus needed. Run it when a result looks wrong. |
 | `20-sustained.sh` | `RATE` req/s for `MINUTES` (default 500 for 60), one row per 5-minute chunk, so drift over time is visible. |
 
-Every run refuses to start while the previous one is still being worked off (`FORCE=1` overrides). To keep k6 off the busiest node: `K6_HOST=vm3 GATEWAY_URL=http://10.10.0.3:8084 ./00-prepare.sh` (and the same variables for the run).
+Every run refuses to start while the previous one is still being worked off (`FORCE=1` overrides). `K6_HOST`, `GATEWAY_URL` and `GATEWAY_NODE` (defaults vm2, http://10.10.0.2:8084, vm3) say where k6 runs and where the gateway is.
 
 Typical order: `./00-prepare.sh`, (`./01-fund-users.sh`, `./00-prepare.sh`), `./10-step-test.sh`, `./20-sustained.sh`.
 Each run writes `~/loadtest-results/<timestamp>-.../` with `environment.txt`, `table.txt`, `summary.json`, `k6.log` and the samples.

@@ -17,15 +17,15 @@ check() { # node container...
 	done
 }
 check vm2 postgres mongo
-check vm3 postgres kafka redis anvil wallet-service chain-watcher sweeper
-check vm4 api-gateway ledger-service withdrawal-service history-service postgres-gateway
+check vm3 postgres kafka redis anvil wallet-service chain-watcher sweeper api-gateway
+check vm4 ledger-service withdrawal-service history-service postgres-gateway
 [ $fail = 0 ] && ok "all functional services up"
 sim=$(ssh vm3 "docker inspect -f '{{.State.Status}}' digiwal-dev-simulator-1 2>/dev/null" || echo missing)
 [ "$sim" = running ] && bad "the simulator is running and would add background load (docker stop digiwal-dev-simulator-1 on vm3)" || ok "simulator is stopped"
 
 echo "1b. api-gateway rate limits (a load test from one IP is rejected with 429 beyond the IP limit)"
-ip=$(ssh vm4 "docker exec digiwal-dev-api-gateway-1 printenv RATE_LIMIT_IP_PER_MIN" 2>/dev/null || true)
-us=$(ssh vm4 "docker exec digiwal-dev-api-gateway-1 printenv RATE_LIMIT_USER_PER_MIN" 2>/dev/null || true)
+ip=$(ssh "$GATEWAY_NODE" "docker exec digiwal-dev-api-gateway-1 printenv RATE_LIMIT_IP_PER_MIN" 2>/dev/null || true)
+us=$(ssh "$GATEWAY_NODE" "docker exec digiwal-dev-api-gateway-1 printenv RATE_LIMIT_USER_PER_MIN" 2>/dev/null || true)
 if [ "${ip:-1200}" = 0 ] && [ "${us:-600}" = 0 ]; then ok "rate limits disabled (RATE_LIMIT_IP_PER_MIN=0, RATE_LIMIT_USER_PER_MIN=0)"
 else bad "rate limits are on (ip=${ip:-1200}/min default, user=${us:-600}/min default): most k6 requests would get 429. Set both to 0 on api-gateway for a capacity test"; fi
 
@@ -50,8 +50,8 @@ done
 echo "4. API keys and whitelists for the simulated users"
 state=$(ssh vm3 "cat /var/lib/docker/volumes/digiwal-dev_sim_data/_data/state.json")
 echo "$state" | python3 -c "import json,sys; k=[u['api_key'] for u in json.load(sys.stdin)['users'] if u.get('api_key')]; print(json.dumps(k))" \
-	| ssh "$K6_HOST" "mkdir -p $REMOTE_DIR && umask 077 && cat > $REMOTE_DIR/keys.json"
-if ssh "$K6_HOST" "BASE=$GATEWAY_URL python3 -" <<'PY'
+	| on_k6 "mkdir -p $REMOTE_DIR && umask 077 && cat > $REMOTE_DIR/keys.json"
+if on_k6 "BASE=$GATEWAY_URL python3 -" <<'PY'
 
 import json, os, random, time, urllib.request
 base = os.environ["BASE"]; keys = json.load(open("/tmp/loadtest/keys.json"))
