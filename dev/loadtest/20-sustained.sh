@@ -4,6 +4,7 @@
 #   RATE=500 MINUTES=60 WRITE_PCT=20 ./20-sustained.sh
 source "$(cd "$(dirname "$0")" && pwd)/common.sh"
 source "$HERE/lib/run.sh"
+preflight_clean
 RATE=${RATE:-500}; MINUTES=${MINUTES:-60}; CHUNK_MIN=${CHUNK_MIN:-5}; WRITE_PCT=${WRITE_PCT:-20}; MIX=${MIX:-mixed}
 OUT=$RESULTS_ROOT/$(date +%Y%m%d-%H%M%S)-sustained-${RATE}rps
 mkdir -p "$OUT"; environment_snapshot | tee "$OUT/environment.txt"

@@ -9,7 +9,10 @@ loop: the Postgres containers are sampled from their cgroups, so the monitoring 
 | `01-fund-users.sh` | Only if the users have too little ETH: sends `ETH_PER_USER` (default 5) to every deposit address on the mock chain. The ledger credits it after a few minutes (watch `00-prepare.sh`). |
 | `10-step-test.sh` | Rising arrival rates (default 100..500 req/s, 60 s each, 20% withdrawals) -> one table row per step. Finds the knee. |
 | `02-rate-limits.sh off\|on` | Switches api-gateway's rate limits (default 1200/min per IP, 600/min per key) off for a capacity test, and back on. |
+| `30-diagnose.sh` | A short load (default 800 req/s, 40 s, balances) plus a bottleneck report: CPU of every container on every node, host user/system time, time per request at the gateway and the ledger, DB pool waits. No Prometheus needed. Run it when a result looks wrong. |
 | `20-sustained.sh` | `RATE` req/s for `MINUTES` (default 500 for 60), one row per 5-minute chunk, so drift over time is visible. |
+
+Every run refuses to start while the previous one is still being worked off (`FORCE=1` overrides). To keep k6 off the busiest node: `K6_HOST=vm3 GATEWAY_URL=http://10.10.0.3:8084 ./00-prepare.sh` (and the same variables for the run).
 
 Typical order: `./00-prepare.sh`, (`./01-fund-users.sh`, `./00-prepare.sh`), `./10-step-test.sh`, `./20-sustained.sh`.
 Each run writes `~/loadtest-results/<timestamp>-.../` with `environment.txt`, `table.txt`, `summary.json`, `k6.log` and the samples.

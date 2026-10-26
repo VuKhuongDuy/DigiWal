@@ -32,3 +32,14 @@ kafka_lag() {
 # Withdrawals accepted but not yet picked up by the signing pipeline (reserved) or not yet locked (validated). While the chain is
 # down they stay here until the Reaper fails them after 5 minutes; with the chain up this is the pipeline's backlog.
 open_withdrawals() { sql vm3 withdrawal "select count(*) from withdrawal_requests where status in ('reserved','validated')"; }
+
+# preflight_clean: a run that starts while the previous one is still being worked off measures the leftovers too
+# (the Reaper releasing thousands of locks through the same ledger-service). Refuses unless FORCE=1.
+preflight_clean() {
+	[ "${FORCE:-0}" = 1 ] && return 0
+	local n a b
+	n=$(open_withdrawals); a=$(kafka_lag ledger-service); b=$(kafka_lag history-service)
+	if [ "${n:-9999}" -gt 50 ] || [ "$a" != 0 ] || [ "$b" != 0 ]; then
+		die "the previous run is still being worked off (withdrawals reserved/validated: $n, Kafka lag ledger-service: $a, history-service: $b). Wait, run ./00-prepare.sh, or FORCE=1 to run anyway."
+	fi
+}

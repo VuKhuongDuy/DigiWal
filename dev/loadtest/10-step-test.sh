@@ -5,6 +5,7 @@
 #   STEPS=100,200,300,400,500 STEP_S=60 WRITE_PCT=20 ./10-step-test.sh
 source "$(cd "$(dirname "$0")" && pwd)/common.sh"
 source "$HERE/lib/run.sh"
+preflight_clean
 STEPS=${STEPS:-100,200,300,400,500}; STEP_S=${STEP_S:-60}; GAP_S=${GAP_S:-15}; WRITE_PCT=${WRITE_PCT:-20}; MIX=${MIX:-mixed}
 OUT=$RESULTS_ROOT/$(date +%Y%m%d-%H%M%S)-steps
 mkdir -p "$OUT"; environment_snapshot | tee "$OUT/environment.txt"
