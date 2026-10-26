@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# run_load <outdir> <steps> <step_s> <gap_s> <write_pct>: one k6 run on $K6_HOST with the Postgres samplers running beside it.
+# run_load <outdir> <steps> <step_s> <gap_s> <write_pct> [mix]:   mix = mixed (default) or balances (only GET /v1/balances)
+# one k6 run on $K6_HOST with the Postgres samplers running beside it.
 # Leaves in <outdir>: k6.log, summary.json, sample.ledger.txt (vm2), sample.gateway.txt (vm4), sample.core.txt (vm3).
 run_load() {
-	local out=$1 steps=$2 step_s=$3 gap_s=$4 write=$5
+	local out=$1 steps=$2 step_s=$3 gap_s=$4 write=$5 mix=${6:-mixed}
 	local n total
 	n=$(echo "$steps" | tr ',' '\n' | wc -l)
 	total=$(( n * (step_s + gap_s) + 90 ))
@@ -19,8 +20,8 @@ run_load() {
 	local p3=$!
 	sleep 2
 
-	log "k6: steps=$steps step=${step_s}s gap=${gap_s}s writes=${write}% -> $out"
-	ssh "$K6_HOST" "docker run --rm --user root --network host -e BASE=$GATEWAY_URL -e STEPS=$steps -e STEP_S=$step_s -e GAP_S=$gap_s -e WRITE_PCT=$write \
+	log "k6: mix=$mix steps=$steps step=${step_s}s gap=${gap_s}s writes=${write}% -> $out"
+	ssh "$K6_HOST" "docker run --rm --user root --network host -e BASE=$GATEWAY_URL -e STEPS=$steps -e STEP_S=$step_s -e GAP_S=$gap_s -e WRITE_PCT=$write -e MIX=$mix \
 		-v $REMOTE_DIR/keys.json:/keys.json:ro -v $REMOTE_DIR/mix.js:/s.js:ro -v $REMOTE_DIR/out:/out \
 		grafana/k6 run --summary-export=/out/summary.json /s.js" > "$out/k6.log" 2>&1 || log "k6 exited non-zero (see $out/k6.log); thresholds are informational"
 	scp -q "$K6_HOST:$REMOTE_DIR/out/summary.json" "$out/summary.json" || die "k6 produced no summary"

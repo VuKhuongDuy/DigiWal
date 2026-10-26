@@ -21,6 +21,7 @@ const STEPS = (__ENV.STEPS || '100,200,300,400,500').split(',').map(Number);
 const STEP_S = parseInt(__ENV.STEP_S || '60');
 const GAP_S = parseInt(__ENV.GAP_S || '15');
 const WRITE = parseFloat(__ENV.WRITE_PCT || '20') / 100;
+const MIX = __ENV.MIX || 'mixed'; // 'balances' sends only GET /v1/balances (api-gateway -> ledger-service -> Postgres ledger)
 const ETH = '11111111-1111-1111-1111-111111111111';
 const MIN_ETH = '600000000000000'; // 0.0006 ETH, the asset registry's minimum withdrawal
 
@@ -56,6 +57,7 @@ export function setup() {
 export default function (users) {
   const u = users[Math.floor(Math.random() * users.length)];
   const h = { Authorization: 'Bearer ' + u.k, 'Content-Type': 'application/json' };
+  if (MIX === 'balances') { tally(http.get(base + '/v1/balances', { headers: h, tags: { kind: 'read' } })); return; }
   const x = Math.random();
   if (x < WRITE) {
     tally(http.post(base + '/v1/withdrawals', JSON.stringify({

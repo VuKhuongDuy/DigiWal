@@ -8,6 +8,7 @@ loop: the Postgres containers are sampled from their cgroups, so the monitoring 
 | `00-prepare.sh` | Pre-flight. Checks the services, waits until the Kafka consumers have caught up and the withdrawal pipeline is idle, writes `keys.json` on vm4 from the simulator's state, gives each user an active whitelisted address, and prints how many withdrawals the users can still afford. Prints `READY` or `NOT READY`. |
 | `01-fund-users.sh` | Only if the users have too little ETH: sends `ETH_PER_USER` (default 5) to every deposit address on the mock chain. The ledger credits it after a few minutes (watch `00-prepare.sh`). |
 | `10-step-test.sh` | Rising arrival rates (default 100..500 req/s, 60 s each, 20% withdrawals) -> one table row per step. Finds the knee. |
+| `02-rate-limits.sh off\|on` | Switches api-gateway's rate limits (default 1200/min per IP, 600/min per key) off for a capacity test, and back on. |
 | `20-sustained.sh` | `RATE` req/s for `MINUTES` (default 500 for 60), one row per 5-minute chunk, so drift over time is visible. |
 
 Typical order: `./00-prepare.sh`, (`./01-fund-users.sh`, `./00-prepare.sh`), `./10-step-test.sh`, `./20-sustained.sh`.
