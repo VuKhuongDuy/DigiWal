@@ -98,6 +98,7 @@ services:
       dockerfile: services/auditor/Dockerfile
     restart: unless-stopped
     logging: *rotate
+    user: "10015:10015" # fixed uid = the owner of its leaf key (infra/pki/leaf-uid.sh)
     environment:
       PORT: "8080"
       AUDITOR_ENV: dev
