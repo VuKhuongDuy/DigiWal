@@ -144,32 +144,32 @@ services:
   api-gateway:
     environment:
       POSTGRES_DSN: postgres://svc_gateway:${SVC_GATEWAY_PASSWORD}@postgres-gateway:5432/api_gateway?sslmode=disable
-      POSTGRES_MAX_CONNS: "48" # its database is on vm4: at 16 the pool was the limit (avg wait 213 ms, 90% of acquires waited at 800 req/s)
+      POSTGRES_MAX_CONNS: "48" # its database was on vm4: at 16 the pool was the limit (avg wait 213 ms, 90% of acquires waited at 800 req/s)
       WITHDRAWAL_SERVICE_URL: https://withdrawal-service:8446
       REDIS_ADDR: redis:6379
       REDIS_PASSWORD: ${REDIS_PASSWORD:?run make env}
-    extra_hosts: ["withdrawal-service:10.10.0.3"] # ledger-service is on this node (below)
+    extra_hosts: ["withdrawal-service:10.10.0.3"] # ledger-service is the balancer below
     depends_on: !override
       redis: {condition: service_healthy}
       postgres-gateway: {condition: service_healthy}
-    ports: !override ["10.10.0.2:8084:8080", "127.0.0.1:8084:8080", "10.10.0.2:9101:9100"] # never on the public interface (invariant 8); /metrics
+      ledger-lb: {condition: service_started}
+    deploy: {replicas: 2} # two gateways on 8084 and 8085 (each replica takes the next port of every range); no balancer in front, the test client spreads the requests
+    ports: !override ["10.10.0.2:8084-8085:8080", "127.0.0.1:8084-8085:8080", "10.10.0.2:9101-9102:9100"] # never on the public interface (invariant 8); /metrics
     mem_limit: 2g # was 500m: at ~2,000 req/s with thousands of open connections the gateway reached ~490 MB and was OOM-killed (twice in a minute)
 
-  # Horizontal scale of the stateless request path (2026-10-26): a second ledger-service, next to api-gateway, so every gateway has a ledger-service on
-  # its own node. It serves reads (GET balances) and would serve any call, but it has no Kafka consumer: the deposit consumer stays on the
-  # instance on vm4 (a second consumer in the group would only split its partition). Cache invalidation goes through the shared Redis.
-  ledger-service:
-    environment:
-      POSTGRES_DSN: postgres://svc_ledger:${SVC_LEDGER_PASSWORD:?run make env}@ledger-db:5432/ledger?sslmode=disable
-      POSTGRES_MAX_CONNS: "64"
-      KAFKA_BROKERS: "" # no deposit consumer here
-      REDIS_ADDR: redis:6379
-      REDIS_PASSWORD: ${REDIS_PASSWORD:?run make env}
-    extra_hosts: ["ledger-db:10.10.0.3"] # the ledger's Postgres on vm4
-    depends_on: !override
-      redis: {condition: service_healthy}
-    ports: !override ["10.10.0.2:8447:8443", "10.10.0.2:9104:9100"] # 8447: callers on other nodes, if any; /metrics
-    mem_limit: 1g
+  # The ledger-services are on vm4 with their database (2026-10-27). The gateways reach them through this layer-4 balancer, which hands the TLS
+  # handshake through untouched (the ledger authorises callers by the CN of the client certificate). It answers to the name ledger-service on this
+  # node's network, so LEDGER_SERVICE_URL (https://ledger-service:8443) stays as it is. /metrics and /stats on 10.10.0.2:8404.
+  ledger-service: {profiles: [elsewhere]}
+  ledger-lb:
+    image: haproxy:2.9-alpine
+    volumes: ["../infra/haproxy/ledger.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro"]
+    networks:
+      default:
+        aliases: [ledger-service]
+    ports: ["10.10.0.2:8404:8404"]
+    restart: unless-stopped
+    mem_limit: 128m
 
   simulator:
     environment:
