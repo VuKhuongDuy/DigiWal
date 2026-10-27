@@ -49,7 +49,7 @@ def counters(path):
     d = collections.defaultdict(float)
     if not os.path.exists(path): return d
     for l in open(path):
-        m = re.match(r'(digiwal_\w+)(\{[^}]*\})? ([0-9.e+-]+)$', l)
+        m = re.match(r'(digiwal_\w+)(\{.*\})? ([0-9.e+-]+)$', l)   # a label value may contain braces: route="GET /v1/ledger/balances/{user_id}"
         if not m: continue
         name, lab = m.group(1), m.group(2) or ""
         if name.startswith("digiwal_http_request_duration_seconds_") and re.search(r'route="GET /v1/(ledger/)?balances', lab):   # the gateway's route and the ledger-service's
