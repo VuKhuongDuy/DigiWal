@@ -1,43 +1,45 @@
 # Node overlay for vm4 (10.10.0.3): the stateless tier. See vm2.yml for how the overlays fit together.
 # docs/design/multi-node-deployment.md, "Addendum: three-node layout".
-#   here:      api-gateway, ledger-service, history-service, withdrawal-service, and postgres-gateway (the api_gateway DB)
-#   on vm2:    postgres (ledger), mongo                     (ledger-service and history-service reach them at 10.10.0.1)
-#   on vm3:    postgres (custody, withdrawal, chain_watcher), wallet-service, chain-watcher, sweeper, simulator, kafka, redis, anvil, monitoring
+#   here:      api-gateway, ledger-service, history-service, withdrawal-service, and postgres (the ledger DB, since 2026-10-27, next to ledger-service)
+#   on vm2:    mongo, hsm-gateway                           (history-service reaches mongo at 10.10.0.1)
+#   on vm3:    postgres (custody, withdrawal, chain_watcher), postgres-gateway, api-gateway, wallet-service, chain-watcher, sweeper, simulator, kafka, redis, anvil, monitoring
 networks:
   default:
     driver_opts:
       com.docker.network.driver.mtu: "1400"
 
 services:
-  postgres: {profiles: [elsewhere]} # the shared one of the single-host stack; here the api_gateway DB has its own server
-
-  # Scaling step 2 (docs/design/database-scaling-steps.md): the API-key lookups that every request makes no longer share a
-  # Postgres with the ledger. cpus is the lab's deliberate cap, so that Postgres is the first thing to saturate.
-  postgres-gateway:
-    image: postgres:16-alpine
+  # The ledger's Postgres (same definition as it had on vm2). The ledger-service here reaches it on the Docker network, the one on vm3 and the
+  # auditor (vm3) over WireGuard at 10.10.0.3:5432. The data directory moved from vm2 by pg_dump/pg_restore (docs/design/multi-node-deployment.md).
+  postgres:
     command: [postgres, -c, hba_file=/etc/postgresql/pg_hba.conf, -c, shared_preload_libraries=pg_stat_statements,
       -c, track_io_timing=on, -c, track_wal_io_timing=on, -c, log_lock_waits=on]
     environment:
-      POSTGRES_USER: custody
       POSTGRES_PASSWORD: ${PG_ADMIN_PASSWORD:?run make env}
       POSTGRES_DB: postgres
-      PG_DB_ROLES: "api_gateway=svc_gateway"
-      PW_svc_gateway: ${SVC_GATEWAY_PASSWORD:?run make env}
-    volumes:
-      - pg_gateway_data:/var/lib/postgresql/data
+      PG_DB_ROLES: "ledger=svc_ledger"
+      PW_svc_ledger: ${SVC_LEDGER_PASSWORD:?run make env}
+    volumes: !override
+      - pg_ledger_data:/var/lib/postgresql/data
       - ../infra/postgres/init-node.sh:/docker-entrypoint-initdb.d/10-init-node.sh:ro
       - ../infra/postgres/pg_hba.conf:/etc/postgresql/pg_hba.conf:ro
-    ports: ["10.10.0.3:5432:5432", "127.0.0.1:5432:5432"]
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U custody"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
-    restart: unless-stopped
-    cpus: 0.5
-    mem_limit: 1g
+    ports: !override ["10.10.0.3:5432:5432", "127.0.0.1:5432:5432"]
+    mem_limit: 2500m
+    cpus: 2 # the lab's deliberate cap, so that this Postgres is the first bottleneck (remove it to lift the cap)
+
+  postgres-gateway: {profiles: [elsewhere]} # on vm3 since 2026-10-26, next to api-gateway: a key lookup per request no longer crosses WireGuard
   mongo: {profiles: [elsewhere]}
-  redis: {profiles: [elsewhere]}
+  # A Redis of its own for the read caches of this node's api-gateway and ledger-service (docs/design/read-cache.md): a cache that is across the
+  # WireGuard link times out under load and makes things worse than no cache (measured 2026-10-26). It is NOT the Redis on vm3: no replication, so the
+  # two nodes' caches differ by at most the TTLs (5 s balances, 5 min API keys); wallet-service and chain-watcher keep using vm3's.
+  redis:
+    command: [sh, -c, 'exec redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru --requirepass "$$REDIS_PASSWORD"']
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?run make env}
+      REDISCLI_AUTH: ${REDIS_PASSWORD}
+    ports: !override []
+    restart: unless-stopped
+    mem_limit: 300m
   kafka: {profiles: [elsewhere]}
   anvil: {profiles: [elsewhere]}
   prometheus: {profiles: [elsewhere]}
@@ -58,24 +60,45 @@ services:
 
   ledger-service:
     environment:
-      POSTGRES_DSN: postgres://svc_ledger:${SVC_LEDGER_PASSWORD}@postgres:5432/ledger?sslmode=disable
-      POSTGRES_MAX_CONNS: "16" # pgx's default is 4 on a 4-vCPU host; 16 raised the read ceiling from ~1.9k to ~2.4k req/s
-    extra_hosts: ["postgres:10.10.0.1", "kafka:10.10.0.2"]
-    depends_on: !override []
-    ports: !override ["10.10.0.3:8444:8443", "10.10.0.3:9102:9100"] # withdrawal-service and sweeper (vm3); /metrics (vm3)
-    mem_limit: 300m
-
-  api-gateway:
-    environment:
-      POSTGRES_DSN: postgres://svc_gateway:${SVC_GATEWAY_PASSWORD}@postgres-gateway:5432/api_gateway?sslmode=disable
-      POSTGRES_MAX_CONNS: "16"
-      REDIS_ADDR: 10.10.0.2:6379 # redis on vm3, over WireGuard; if it is unreachable the gateway falls back to in-memory limits
+      POSTGRES_DSN: postgres://svc_ledger:${SVC_LEDGER_PASSWORD}@postgres:5432/ledger?sslmode=disable # the Postgres on this node
+      REDIS_ADDR: redis:6379 # this node's Redis: only used when BALANCE_CACHE_ENABLED=1
       REDIS_PASSWORD: ${REDIS_PASSWORD:?run make env}
-    extra_hosts: ["wallet-service:10.10.0.2"]
+      REDIS_TIMEOUT_MS: "300" # see vm3.yml, api-gateway
+      REDIS_MIN_IDLE_CONNS: "50"
+      POSTGRES_MAX_CONNS: "64" # pgx's default is 4; 16 was enough while the database was on this node. With Postgres on vm2 each query holds a connection across WireGuard: at 16 the pool was the limit (avg wait 1.1 s, 99% of acquires waited at 800 req/s)
+    extra_hosts: ["kafka:10.10.0.2"]
     depends_on: !override
-      postgres-gateway: {condition: service_healthy}
-    ports: !override ["10.10.0.3:8084:8080", "127.0.0.1:8084:8080", "10.10.0.3:9101:9100"] # never on the public interface (invariant 8); /metrics
-    mem_limit: 500m
+      redis: {condition: service_healthy}
+      postgres: {condition: service_healthy}
+    # The balance read cache (docs/design/read-cache.md) uses the Redis on vm3. It is off unless BALANCE_CACHE_ENABLED=1 (dev/loadtest/03-cache.sh).
+    # Redis timeouts are 100 ms and any Redis error falls through to Postgres.
+    ports: !override ["10.10.0.3:8444:8443", "10.10.0.3:9102:9100"] # withdrawal-service and sweeper (vm3); /metrics (vm3)
+    mem_limit: 1g # was 300m: it reached 190 MB at 1,500 req/s and api-gateway had been OOM-killed at 500 MB under more load
+
+  # The gateways are on vm3 with their database (2026-10-27); this node holds the ledger tier: two ledger-services and their Postgres.
+  api-gateway: {profiles: [elsewhere]}
+
+  # The second ledger-service, same image and certificate as the first (the callers authorise it by CN). Calls only: no Kafka consumer (the deposit
+  # consumer stays on the first, a second one in the group would only split its partition). Cache invalidation goes through this node's Redis.
+  ledger-service-2:
+    extends:
+      file: ../e2e/docker-compose.yml
+      service: ledger-service
+    image: digiwal-dev-ledger-service:latest
+    restart: unless-stopped
+    environment:
+      POSTGRES_DSN: postgres://svc_ledger:${SVC_LEDGER_PASSWORD}@postgres:5432/ledger?sslmode=disable
+      POSTGRES_MAX_CONNS: "64"
+      KAFKA_BROKERS: ""
+      REDIS_ADDR: redis:6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?run make env}
+      REDIS_TIMEOUT_MS: "300"
+      REDIS_MIN_IDLE_CONNS: "50"
+    depends_on: !override
+      redis: {condition: service_healthy}
+      postgres: {condition: service_healthy}
+    ports: !override ["10.10.0.3:8448:8443", "10.10.0.3:9105:9100"] # the balancer on vm3; /metrics
+    mem_limit: 1g
 
   withdrawal-service:
     environment:
@@ -83,7 +106,7 @@ services:
       POSTGRES_MAX_CONNS: "16" # pgx's default is 4 on a 4-vCPU host: it queued every request on it at 400 rps
     extra_hosts: ["postgres:10.10.0.2", "kafka:10.10.0.2", "anvil:10.10.0.2", "wallet-service:10.10.0.2"]
     depends_on: !override []
-    ports: !override ["10.10.0.3:9103:9100"] # /metrics (vm3); the gateway reaches it on this node's network
+    ports: !override ["10.10.0.3:8446:8443", "10.10.0.3:9103:9100"] # api-gateway (vm3) over mTLS; /metrics (vm3)
     mem_limit: 300m
 
   history-service:
@@ -102,4 +125,4 @@ services:
     mem_limit: 200m
 
 volumes:
-  pg_gateway_data:
+  pg_ledger_data:

@@ -14,11 +14,24 @@ import (
 	"github.com/golang-migrate/migrate/v4/source/iofs"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"digiwal/pkg/metrics"
 	"digiwal/services/ledger-service/migrations"
 )
 
 type Store struct {
 	pool *pgxpool.Pool
+	// afterChange, when set, is told which users' balances a committed transaction changed (the read cache deletes their entries,
+	// docs/design/read-cache.md). Called only after Commit succeeded; every writer to accounts.total_balance or locked_balance must call changed.
+	afterChange func(ctx context.Context, userIDs []string)
+}
+
+// OnBalanceChange registers the hook above. Not safe to call while requests are being served.
+func (s *Store) OnBalanceChange(f func(ctx context.Context, userIDs []string)) { s.afterChange = f }
+
+func (s *Store) changed(ctx context.Context, userIDs ...string) {
+	if s.afterChange != nil && len(userIDs) > 0 {
+		s.afterChange(ctx, userIDs)
+	}
 }
 
 // Connect opens the pool and applies any pending migrations.
@@ -29,6 +42,11 @@ func Connect(ctx context.Context, dsn string) (*Store, error) { return ConnectWi
 // would send that parameter to the server as a runtime setting and be refused ("unrecognized configuration
 // parameter"), so the service could not start.
 func ConnectWithPool(ctx context.Context, dsn string, maxConns int32) (*Store, error) {
+	return ConnectWithPoolMetrics(ctx, dsn, maxConns, nil)
+}
+
+// ConnectWithPoolMetrics is ConnectWithPool that also feeds m (nil: not measured) with the time to get a connection, to hold one and to run a statement.
+func ConnectWithPoolMetrics(ctx context.Context, dsn string, maxConns int32, m *metrics.DB) (*Store, error) {
 	cfg, err := pgxpool.ParseConfig(dsn)
 	if err != nil {
 		return nil, fmt.Errorf("parsing postgres dsn: %w", err)
@@ -36,6 +54,7 @@ func ConnectWithPool(ctx context.Context, dsn string, maxConns int32) (*Store, e
 	if maxConns > 0 {
 		cfg.MaxConns = maxConns
 	}
+	attach(cfg, m)
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("connecting to postgres: %w", err)

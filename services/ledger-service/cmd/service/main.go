@@ -16,6 +16,9 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
+
+	"github.com/redis/go-redis/v9"
 
 	"digiwal/pkg/events"
 	"digiwal/pkg/metrics"
@@ -31,16 +34,32 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	store, err := ledger.ConnectWithPool(ctx, requireEnv("POSTGRES_DSN"), int32(envInt("POSTGRES_MAX_CONNS", 0)))
+	// Metrics (monitoring-dashboard.md decision (d)): one registry; both API listeners are measured, and neither serves it.
+	reg := metrics.NewRegistry()
+	store, err := ledger.ConnectWithPoolMetrics(ctx, requireEnv("POSTGRES_DSN"), int32(envInt("POSTGRES_MAX_CONNS", 0)), metrics.NewDB(reg, "ledger-service"))
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer store.Close()
-
-	// Metrics (monitoring-dashboard.md decision (d)): one registry; both API listeners are measured, and neither serves it.
-	reg := metrics.NewRegistry()
 	reg.MustRegister(obs.Collector(store), metrics.PoolCollector("ledger-service", func() metrics.PoolStat { return metrics.PoolFromPgx(store.PoolStat()) }))
 	httpm := metrics.NewHTTP(reg, "ledger-service")
+
+	// Balance read cache (docs/design/read-cache.md): off unless BALANCE_CACHE_ENABLED=1 and REDIS_ADDR is set. Redis trouble never fails a request.
+	var balCache *api.BalanceCache
+	if addr := os.Getenv("REDIS_ADDR"); addr != "" && os.Getenv("BALANCE_CACHE_ENABLED") == "1" {
+		// REDIS_TIMEOUT_MS and REDIS_MIN_IDLE_CONNS: see api-gateway.
+		redisTimeout := time.Duration(envInt("REDIS_TIMEOUT_MS", 100)) * time.Millisecond
+		rdb := redis.NewClient(&redis.Options{Addr: addr, Password: os.Getenv("REDIS_PASSWORD"), MaxRetries: -1,
+			DialTimeout: redisTimeout, ReadTimeout: redisTimeout, WriteTimeout: redisTimeout, MinIdleConns: envInt("REDIS_MIN_IDLE_CONNS", 0),
+			// see api-gateway: the default pool (10 per CPU) ran dry at ~2,000 req/s and every miss showed up as a cache error
+			PoolSize: envInt("REDIS_POOL_SIZE", 200), PoolTimeout: redisTimeout})
+		defer rdb.Close()
+		stats := metrics.NewCache("ledger-service", "balances")
+		reg.MustRegister(metrics.CacheCollector(stats))
+		balCache = &api.BalanceCache{KV: api.RedisKV{C: rdb}, TTL: time.Duration(envInt("BALANCE_CACHE_TTL_SECONDS", 5)) * time.Second, Stats: stats}
+		store.OnBalanceChange(balCache.Invalidate)
+		log.Printf("balance cache on (ttl %ds)", envInt("BALANCE_CACHE_TTL_SECONDS", 5))
+	}
 
 	// Fail startup on any registry problem rather than boot half-usable.
 	assets, err := ledger.LoadRegistry(requireEnv("ASSETS_FILE"))
@@ -59,6 +78,9 @@ func main() {
 	log.Printf("screening list loaded: %d addresses", screen.Len())
 
 	server := api.NewServer(store)
+	if balCache != nil {
+		server.WithBalanceCache(balCache)
+	}
 
 	if certFile := os.Getenv("TLS_CERT_FILE"); certFile != "" {
 		tlsCfg, err := authz.ServerTLSConfig(certFile, requireEnv("TLS_KEY_FILE"), requireEnv("TLS_CA_FILE"))

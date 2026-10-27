@@ -3,7 +3,8 @@
 #              chain-watcher, sweeper, sweep-signer, simulator, auditor, and the Measurement Plane: Prometheus,
 #              Alertmanager (to Telegram), Grafana, kafka-exporter, and node/cAdvisor/postgres exporters
 #   on vm2:    mongo, the Postgres of the request path (ledger), and hsm-gateway (the HSM token)
-#   on vm4:    ledger-service, api-gateway, history-service, withdrawal-service
+#   on vm4:    ledger-service (the one with the Kafka consumer), history-service, withdrawal-service, a second api-gateway
+#   api-gateway and postgres-gateway (the api_gateway database) are here too (moved from vm4 on 2026-10-26)
 networks:
   default:
     driver_opts:
@@ -11,9 +12,7 @@ networks:
 
 services:
   mongo: {profiles: [elsewhere]}
-  ledger-service: {profiles: [elsewhere]}
   withdrawal-service: {profiles: [elsewhere]}
-  api-gateway: {profiles: [elsewhere]}
   history-service: {profiles: [elsewhere]}
   hsm-gateway: {profiles: [elsewhere]}
   hsm-perms: {profiles: [elsewhere]}
@@ -44,7 +43,7 @@ services:
     environment:
       REDIS_PASSWORD: ${REDIS_PASSWORD:?run make env}
       REDISCLI_AUTH: ${REDIS_PASSWORD}
-    ports: !override ["10.10.0.2:6379:6379"] # api-gateway (vm2) shares its rate-limit counters here; WireGuard-only, password required
+    ports: !override ["10.10.0.2:6379:6379"] # api-gateway shares its rate-limit counters here; WireGuard-only, password required
     mem_limit: 300m
 
   kafka:
@@ -113,9 +112,70 @@ services:
       HSM_GATEWAY_URL: https://hsm-gateway:8445
     extra_hosts: ["hsm-gateway:10.10.0.1"]
 
+  # The api_gateway database (users and API-key hashes), next to the only service that uses it. Scaling step 2 split it from the ledger's
+  # Postgres; it moved from vm4 to vm3 on 2026-10-26 because a key lookup per request across WireGuard held a pool connection for ~30 ms.
+  postgres-gateway:
+    image: postgres:16-alpine
+    command: [postgres, -c, hba_file=/etc/postgresql/pg_hba.conf, -c, shared_preload_libraries=pg_stat_statements,
+      -c, track_io_timing=on, -c, track_wal_io_timing=on, -c, log_lock_waits=on]
+    environment:
+      POSTGRES_USER: custody
+      POSTGRES_PASSWORD: ${PG_ADMIN_PASSWORD:?run make env}
+      POSTGRES_DB: postgres
+      PG_DB_ROLES: "api_gateway=svc_gateway"
+      PW_svc_gateway: ${SVC_GATEWAY_PASSWORD:?run make env}
+    volumes:
+      - pg_gateway_data:/var/lib/postgresql/data
+      - ../infra/postgres/init-node.sh:/docker-entrypoint-initdb.d/10-init-node.sh:ro
+      - ../infra/postgres/pg_hba.conf:/etc/postgresql/pg_hba.conf:ro
+    ports: ["10.10.0.2:5433:5432", "127.0.0.1:5433:5432"] # 5432 is the core Postgres; the gateway reaches this one on the compose network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U custody"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+    cpus: 2 # the lab's cap on the database the gateway reads on every request
+    mem_limit: 1g
+
+  # api-gateway sits next to Redis (its rate-limit counters) and wallet-service (deposit addresses), apart from the ledger it calls
+  # and from the load generator (vm2). Its database, postgres-gateway, is on this node too; ledger-service and withdrawal-service are reached
+  # over mTLS on the ports vm4 publishes (8444, 8446).
+  api-gateway:
+    environment:
+      POSTGRES_DSN: postgres://svc_gateway:${SVC_GATEWAY_PASSWORD}@postgres-gateway:5432/api_gateway?sslmode=disable
+      POSTGRES_MAX_CONNS: "48" # its database was on vm4: at 16 the pool was the limit (avg wait 213 ms, 90% of acquires waited at 800 req/s)
+      WITHDRAWAL_SERVICE_URL: https://withdrawal-service:8446
+      REDIS_ADDR: redis:6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?run make env}
+      REDIS_TIMEOUT_MS: "300" # 100 ms (the default) was exceeded on this CPU-bound node: dial/lookup timeouts at 3,500+ req/s (2026-10-27)
+      REDIS_MIN_IDLE_CONNS: "50"
+    extra_hosts: ["withdrawal-service:10.10.0.3"] # ledger-service is the balancer below
+    depends_on: !override
+      redis: {condition: service_healthy}
+      postgres-gateway: {condition: service_healthy}
+      ledger-lb: {condition: service_started}
+    deploy: {replicas: 2} # two gateways on 8084 and 8085 (each replica takes the next port of every range); no balancer in front, the test client spreads the requests
+    ports: !override ["10.10.0.2:8084-8085:8080", "127.0.0.1:8084-8085:8080", "10.10.0.2:9101-9102:9100"] # never on the public interface (invariant 8); /metrics
+    mem_limit: 2g # was 500m: at ~2,000 req/s with thousands of open connections the gateway reached ~490 MB and was OOM-killed (twice in a minute)
+
+  # The ledger-services are on vm4 with their database (2026-10-27). The gateways reach them through this layer-4 balancer, which hands the TLS
+  # handshake through untouched (the ledger authorises callers by the CN of the client certificate). It answers to the name ledger-service on this
+  # node's network, so LEDGER_SERVICE_URL (https://ledger-service:8443) stays as it is. /metrics and /stats on 10.10.0.2:8404.
+  ledger-service: {profiles: [elsewhere]}
+  ledger-lb:
+    image: haproxy:2.9-alpine
+    volumes: ["../infra/haproxy/ledger.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro"]
+    networks:
+      default:
+        aliases: [ledger-service]
+    ports: ["10.10.0.2:8404:8404"]
+    restart: unless-stopped
+    mem_limit: 128m
+
   simulator:
     environment:
-      SIM_GATEWAY_URL: http://10.10.0.3:8084 # api-gateway on vm4, over the private network
+      SIM_GATEWAY_URL: http://api-gateway:8080 # api-gateway is on this node
     depends_on: !override
       anvil: {condition: service_healthy}
       wallet-service: {condition: service_started}
@@ -127,7 +187,7 @@ services:
   auditor:
     environment:
       POSTGRES_DSN: postgres://svc_auditor:${SVC_AUDITOR_PASSWORD}@postgres:5432/auditor?sslmode=disable
-      LEDGER_RO_DSN: postgres://auditor_ro:auditor_ro@10.10.0.1:5432/ledger?sslmode=disable # pg-ledger on vm2
+      LEDGER_RO_DSN: postgres://auditor_ro:auditor_ro@10.10.0.3:5432/ledger?sslmode=disable # pg-ledger on vm4
       WALLET_RO_DSN: postgres://auditor_ro:auditor_ro@postgres:5432/custody?sslmode=disable
       WITHDRAWAL_RO_DSN: postgres://auditor_ro:auditor_ro@postgres:5432/withdrawal?sslmode=disable
       WATCHER_RO_DSN: postgres://auditor_ro:auditor_ro@postgres:5432/chain_watcher?sslmode=disable
@@ -185,3 +245,4 @@ volumes:
   pg_core_data:
   prometheus_data:
   grafana_data:
+  pg_gateway_data:

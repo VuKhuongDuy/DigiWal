@@ -37,22 +37,32 @@ func main() {
 	if err != nil {
 		log.Fatalf("configuring mTLS client: %v", err)
 	}
+	reg := metrics.NewRegistry()
+	upstream := metrics.NewUpstream(reg, "api-gateway") // client-side time of each call to another service
 	s := &api.Server{
 		Auth: st, Users: st,
 		Wallet: &api.WalletClient{BaseURL: requireEnv("WALLET_SERVICE_URL"),
-			HTTP: &http.Client{Timeout: 10 * time.Second, Transport: pooledTransport(nil)}},
+			HTTP: &http.Client{Timeout: 10 * time.Second, Transport: upstream.Transport("wallet", pooledTransport(nil))}},
 		Ledger: &api.LedgerClient{BaseURL: requireEnv("LEDGER_SERVICE_URL"),
-			HTTP: &http.Client{Timeout: 10 * time.Second, Transport: pooledTransport(tlsCfg)}},
+			HTTP: &http.Client{Timeout: 10 * time.Second, Transport: upstream.Transport("ledger", pooledTransport(tlsCfg))}},
 		// withdrawal-service, same mTLS client (CN=api-gateway).
 		Withdrawals: &api.WithdrawalClient{BaseURL: requireEnv("WITHDRAWAL_SERVICE_URL"),
-			HTTP: &http.Client{Timeout: 15 * time.Second, Transport: pooledTransport(tlsCfg)}},
+			HTTP: &http.Client{Timeout: 15 * time.Second, Transport: upstream.Transport("withdrawal", pooledTransport(tlsCfg))}},
 	}
 	// Rate limits, requests per minute; 0 disables. In-memory and per instance by default; with
 	// REDIS_ADDR the budget is shared across instances, falling back to the in-memory limiter
 	// (fail-open) whenever Redis errors.
 	var rdb *redis.Client
 	if addr := os.Getenv("REDIS_ADDR"); addr != "" {
-		rdb = redis.NewClient(&redis.Options{Addr: addr, Password: os.Getenv("REDIS_PASSWORD"), MaxRetries: -1, DialTimeout: 100 * time.Millisecond})
+		// One time budget for dial, read, write and the wait for a pooled connection (REDIS_TIMEOUT_MS, default 100): at ~3,000 req/s on a CPU-bound
+		// node 100 ms was exceeded by scheduling alone, and every timeout closed a connection that the next call had to dial (and resolve) again.
+		// REDIS_MIN_IDLE_CONNS keeps that many connections open in the pool so that a burst does not have to dial them.
+		redisTimeout := time.Duration(envInt("REDIS_TIMEOUT_MS", 100)) * time.Millisecond
+		rdb = redis.NewClient(&redis.Options{Addr: addr, Password: os.Getenv("REDIS_PASSWORD"), MaxRetries: -1,
+			DialTimeout: redisTimeout, ReadTimeout: redisTimeout, WriteTimeout: redisTimeout, MinIdleConns: envInt("REDIS_MIN_IDLE_CONNS", 0),
+			// go-redis defaults to 10 connections per CPU and waits ReadTimeout+1s for a free one: at ~2,000 req/s with 100+ ms round trips
+			// that is hundreds of calls in flight, and the cache (and the rate limiter) errored out. A big pool, and a short wait for it.
+			PoolSize: envInt("REDIS_POOL_SIZE", 200), PoolTimeout: redisTimeout})
 		defer rdb.Close()
 	}
 	newLimiter := func(prefix string, perMin int) api.RateLimiter {
@@ -65,10 +75,16 @@ func main() {
 		}
 		return &api.RedisLimiter{Client: rdb, Prefix: "ratelimit:" + prefix + ":", Limit: perMin, Window: time.Minute, Fallback: local}
 	}
+	// Read cache for the API-key lookup (docs/design/read-cache.md), off unless AUTH_CACHE_ENABLED=1 and Redis is configured.
+	authStats := metrics.NewCache("api-gateway", "apikey")
+	if rdb != nil && os.Getenv("AUTH_CACHE_ENABLED") == "1" {
+		s.Auth = &api.AuthCache{Next: st, Revoker: st, KV: api.RedisKV{C: rdb}, TTL: time.Duration(envInt("AUTH_CACHE_TTL_SECONDS", 300)) * time.Second, Stats: authStats}
+		log.Printf("api-key cache on (ttl %ds)", envInt("AUTH_CACHE_TTL_SECONDS", 300))
+	}
 	s.IPLimit = newLimiter("ip", envInt("RATE_LIMIT_IP_PER_MIN", 1200))
 	s.UserLimit = newLimiter("user", envInt("RATE_LIMIT_USER_PER_MIN", 600))
 	// Metrics: their own internal port, never the public listener (monitoring-dashboard.md invariant 6).
-	reg := metrics.NewRegistry()
+	reg.MustRegister(metrics.CacheCollector(authStats))
 	reg.MustRegister(obs.Collector(st), metrics.PoolCollector("api-gateway", func() metrics.PoolStat { return metrics.PoolFromPgx(st.Pool().Stat()) }))
 	httpm := metrics.NewHTTP(reg, "api-gateway")
 	go func() {

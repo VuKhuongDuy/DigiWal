@@ -12,6 +12,7 @@ networks:
 
 services:
   redis: {profiles: [elsewhere]}
+  postgres-exporter: {profiles: [elsewhere]} # the ledger's Postgres moved to vm4 on 2026-10-27; its old data volume pg_ledger_data stays here, unused
   kafka: {profiles: [elsewhere]}
   anvil: {profiles: [elsewhere]}
   prometheus: {profiles: [elsewhere]}
@@ -31,21 +32,7 @@ services:
   hot-cutover: {profiles: [elsewhere]} # the Hot cutover job runs on vm3, next to custody's database
   key-admin: {profiles: [elsewhere]} # the xpub migration job runs on vm3 too
 
-  postgres:
-    command: [postgres, -c, hba_file=/etc/postgresql/pg_hba.conf, -c, shared_preload_libraries=pg_stat_statements,
-      -c, track_io_timing=on, -c, track_wal_io_timing=on, -c, log_lock_waits=on]
-    environment:
-      POSTGRES_PASSWORD: ${PG_ADMIN_PASSWORD:?run make env}
-      POSTGRES_DB: postgres
-      PG_DB_ROLES: "ledger=svc_ledger"
-      PW_svc_ledger: ${SVC_LEDGER_PASSWORD:?run make env}
-    volumes: !override
-      - pg_ledger_data:/var/lib/postgresql/data
-      - ../infra/postgres/init-node.sh:/docker-entrypoint-initdb.d/10-init-node.sh:ro
-      - ../infra/postgres/pg_hba.conf:/etc/postgresql/pg_hba.conf:ro
-    ports: !override ["10.10.0.1:5432:5432", "127.0.0.1:5432:5432"]
-    mem_limit: 2500m
-    cpus: 0.5 # the lab's deliberate cap, so that this Postgres is the first bottleneck (remove it to lift the cap)
+  postgres: {profiles: [elsewhere]} # the ledger's Postgres moved to vm4 on 2026-10-27; its old data volume pg_ledger_data stays here, unused
 
   mongo:
     environment:
@@ -70,9 +57,6 @@ services:
   cadvisor:
     ports: ["10.10.0.1:8081:8080"]
     mem_limit: 200m
-  postgres-exporter:
-    ports: ["10.10.0.1:9187:9187"]
-    mem_limit: 100m
 
 volumes:
   pg_ledger_data:

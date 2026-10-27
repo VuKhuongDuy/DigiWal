@@ -687,3 +687,22 @@ same service on both nodes at once (invariant 7).
 2. **Is the `cpus` cap acceptable if vm2 is not the first to saturate?** Recommendation: try without; use it only if the data shows vm4 or k6 limiting first, and label the report.
 3. **k6 on vm3** shares a node with Kafka and Anvil and its network path to vm4 is over WireGuard. If k6 shows CPU use above about 70% or timing noise, move it to vm4's idle capacity or run it with fewer VUs. I did not move it, as it was placed on vm3 by decision.
 4. **Monitoring on vm3 still dies with vm3** (as before); vm4 down is visible there, vm3 down is not.
+
+## Change (2026-10-26, Tech Lead decision recorded by Dev): api-gateway moves to vm3
+
+The load generator (k6) runs on vm2 and api-gateway moves from vm4 to vm3, so the request path is spread over the three nodes: vm2 load and
+the ledger database, vm3 the gateway (next to Redis and wallet-service), vm4 ledger-service, withdrawal-service, history-service and the
+api_gateway database. Measured why: with k6 and the gateway on vm4 that node was 74-83% busy (k6 alone 1.3 cores) while vm3 was idle. The
+gateway reaches ledger-service on vm4:8444 and withdrawal-service on vm4:8446 over mTLS and its database at vm4:5432; nothing else changes.
+
+## Addendum: the ledger's Postgres on vm4 (2026-10-27)
+
+The ledger-service on vm4 now reaches its Postgres on the Docker network; the one on vm3 and the auditor reach it over WireGuard at 10.10.0.3:5432. vm2 keeps mongo and the HSM and is free for the load generator, which no longer competes with the database for CPU. Same definition as before (2 CPU, 2500 MB, `pg_ledger_data`).
+Moved with `pg_dump -Fc` / `pg_restore` after stopping both ledger-services; row counts of `accounts`, `entries`, `ledger_transactions` and `locks` are identical before and after (the dump and counts are in /root/backups/ledger-move-20261027 on vm2). The old volume on vm2 is kept, unused, until the new placement is confirmed.
+Consequence: one of the two ledger-services is next to its database, the other is not (the same asymmetry as before, mirrored). The postgres-exporter is off (monitoring is stopped for the load tests); on vm4 `EXPORTER_PASSWORD` is empty in .env, so set it before enabling it there.
+
+## Addendum: tiers per node, a layer-4 balancer in between (2026-10-27)
+
+vm3 holds the gateway tier: two api-gateway replicas (8084, 8085), postgres-gateway and a Redis; vm4 holds the ledger tier: two ledger-services (8444, 8448 for the callers on other nodes), the ledger Postgres and a Redis. vm2 is left for the load generator (plus Mongo and the HSM). The only hop that crosses WireGuard on the request path is gateway to ledger-service.
+The gateways reach the ledger-services through `ledger-lb` (HAProxy 2.9, `infra/haproxy/ledger.cfg`) on vm3, in `mode tcp` with `balance leastconn` and active health checks. It cannot terminate TLS: the ledger-service authorises callers by the CN of the client certificate, so the mTLS handshake is handed through untouched; the gateways still call `https://ledger-service:8443`, which is the balancer's network alias on vm3. Metrics and stats on 10.10.0.2:8404.
+The second ledger-service has no Kafka consumer (the deposit consumer stays on the first). Both use the Redis on vm4 for the balance cache, so invalidation reaches both. Long-lived pooled connections are balanced only when they are opened, so the split between the two ledger-services depends on how the gateways' pools are filled (first smoke test: 63 and 71 sessions).
