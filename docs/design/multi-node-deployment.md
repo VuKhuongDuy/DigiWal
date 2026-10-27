@@ -694,3 +694,9 @@ The load generator (k6) runs on vm2 and api-gateway moves from vm4 to vm3, so th
 the ledger database, vm3 the gateway (next to Redis and wallet-service), vm4 ledger-service, withdrawal-service, history-service and the
 api_gateway database. Measured why: with k6 and the gateway on vm4 that node was 74-83% busy (k6 alone 1.3 cores) while vm3 was idle. The
 gateway reaches ledger-service on vm4:8444 and withdrawal-service on vm4:8446 over mTLS and its database at vm4:5432; nothing else changes.
+
+## Addendum: the ledger's Postgres on vm4 (2026-10-27)
+
+The ledger-service on vm4 now reaches its Postgres on the Docker network; the one on vm3 and the auditor reach it over WireGuard at 10.10.0.3:5432. vm2 keeps mongo and the HSM and is free for the load generator, which no longer competes with the database for CPU. Same definition as before (2 CPU, 2500 MB, `pg_ledger_data`).
+Moved with `pg_dump -Fc` / `pg_restore` after stopping both ledger-services; row counts of `accounts`, `entries`, `ledger_transactions` and `locks` are identical before and after (the dump and counts are in /root/backups/ledger-move-20261027 on vm2). The old volume on vm2 is kept, unused, until the new placement is confirmed.
+Consequence: one of the two ledger-services is next to its database, the other is not (the same asymmetry as before, mirrored). The postgres-exporter is off (monitoring is stopped for the load tests); on vm4 `EXPORTER_PASSWORD` is empty in .env, so set it before enabling it there.

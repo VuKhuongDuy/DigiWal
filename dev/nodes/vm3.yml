@@ -165,7 +165,7 @@ services:
       KAFKA_BROKERS: "" # no deposit consumer here
       REDIS_ADDR: redis:6379
       REDIS_PASSWORD: ${REDIS_PASSWORD:?run make env}
-    extra_hosts: ["ledger-db:10.10.0.1"] # the ledger's Postgres on vm2
+    extra_hosts: ["ledger-db:10.10.0.3"] # the ledger's Postgres on vm4
     depends_on: !override
       redis: {condition: service_healthy}
     ports: !override ["10.10.0.2:8447:8443", "10.10.0.2:9104:9100"] # 8447: callers on other nodes, if any; /metrics
@@ -185,7 +185,7 @@ services:
   auditor:
     environment:
       POSTGRES_DSN: postgres://svc_auditor:${SVC_AUDITOR_PASSWORD}@postgres:5432/auditor?sslmode=disable
-      LEDGER_RO_DSN: postgres://auditor_ro:auditor_ro@10.10.0.1:5432/ledger?sslmode=disable # pg-ledger on vm2
+      LEDGER_RO_DSN: postgres://auditor_ro:auditor_ro@10.10.0.3:5432/ledger?sslmode=disable # pg-ledger on vm4
       WALLET_RO_DSN: postgres://auditor_ro:auditor_ro@postgres:5432/custody?sslmode=disable
       WITHDRAWAL_RO_DSN: postgres://auditor_ro:auditor_ro@postgres:5432/withdrawal?sslmode=disable
       WATCHER_RO_DSN: postgres://auditor_ro:auditor_ro@postgres:5432/chain_watcher?sslmode=disable
