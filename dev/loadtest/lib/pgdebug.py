@@ -76,3 +76,60 @@ print(f"  ledger-service request         : {l:7.1f} ms  ({int(lg['count@http'])}
 print(f"  gateway minus ledger           : {g - l:7.1f} ms  (balancer, TLS, WireGuard, the gateway's own work, API-key lookup)")
 print(f"  ledger waits for a PG connection: {wait:6.1f} ms per acquire  ({int(lg['digiwal_db_pool_empty_acquires_total'])} of {int(acq)} acquires had to wait = {100 * lg['digiwal_db_pool_empty_acquires_total'] / acq if acq else 0:.1f}%)")
 print("  time inside Postgres per statement: see statements.txt (mean / max exec ms)")
+
+
+# ---- histograms added on 2026-10-27: what each side measures itself (client-side calls, pool, statements). Delta of the buckets between before and after.
+def hist(prefix, name, labels=""):
+    """Bucket counts of one histogram summed over the containers of a service: {le: count}, sum, count -- after minus before."""
+    def read(path):
+        b, sm, ct = collections.defaultdict(float), 0.0, 0.0
+        if not os.path.exists(path): return b, sm, ct
+        for l in open(path):
+            if not l.startswith(name + "_") or labels not in l: continue
+            m = re.match(name + r'_(bucket|sum|count)(\{.*\}) ([0-9.e+-]+)$', l)
+            if not m: continue
+            if m.group(1) == "bucket":
+                b[float(re.search(r'le="([^"]+)"', m.group(2)).group(1).replace("+Inf", "inf"))] += float(m.group(3))
+            elif m.group(1) == "sum": sm += float(m.group(3))
+            else: ct += float(m.group(3))
+        return b, sm, ct
+    B, S, C = collections.defaultdict(float), 0.0, 0.0
+    for f in glob.glob(f"{out}/metrics.after.{prefix}*.txt"):
+        ab, asum, acnt = read(f); bb, bsum, bcnt = read(f.replace("metrics.after", "metrics.before"))
+        for k in ab: B[k] += max(ab[k] - bb[k], 0.0)
+        S += max(asum - bsum, 0.0); C += max(acnt - bcnt, 0.0)
+    return B, S, C
+
+def quantile(B, C, q):
+    """Upper edge of the bucket holding the q-quantile (so: at most this value; exact to the bucket width)."""
+    if not C: return float("nan")
+    for le in sorted(B):
+        if B[le] >= q * C: return le
+    return float("inf")
+
+def line(title, prefix, name, labels=""):
+    B, S, C = hist(prefix, name, labels)
+    if not C:
+        print(f"  {title:46} no data"); return
+    print(f"  {title:46} n={int(C):7d}  avg {1000 * S / C:7.1f}  p50 <= {1000 * quantile(B, C, .5):7.1f}  p95 <= {1000 * quantile(B, C, .95):7.1f}  p99 <= {1000 * quantile(B, C, .99):7.1f} ms")
+
+print("\n== measured by the services themselves (histograms; avg and the upper edge of the bucket that holds each percentile)")
+line("gateway: whole request GET /v1/balances", "api-gateway", "digiwal_http_request_duration_seconds", 'route="GET /v1/balances"')
+line("gateway: call to ledger, until response headers", "api-gateway", "digiwal_upstream_request_duration_seconds", 'kind="ledger"')
+line("ledger: handler GET /v1/ledger/balances/{user_id}", "ledger-service", "digiwal_http_request_duration_seconds", 'route="GET /v1/ledger/balances')
+line("ledger: wait for a connection from the pool", "ledger-service", "digiwal_db_pool_acquire_wait_seconds")
+line("ledger: a connection stays checked out", "ledger-service", "digiwal_db_pool_hold_seconds")
+line("ledger: one statement (start to last row)", "ledger-service", "digiwal_db_query_duration_seconds")
+print("  new connections gateway -> ledger:")
+line("    TCP connect", "api-gateway", "digiwal_upstream_setup_seconds", 'stage="connect"')
+line("    TLS handshake", "api-gateway", "digiwal_upstream_setup_seconds", 'stage="tls"')
+new = reused = 0.0
+for f in glob.glob(f"{out}/metrics.after.api-gateway*.txt"):
+    for ff, sign in ((f, 1), (f.replace("metrics.after", "metrics.before"), -1)):
+        if not os.path.exists(ff): continue
+        for l in open(ff):
+            m = re.match(r'digiwal_upstream_connections_total\{kind="ledger",result="(new|reused)".*\} ([0-9.e+-]+)$', l)
+            if m:
+                if m.group(1) == "new": new += sign * float(m.group(2))
+                else: reused += sign * float(m.group(2))
+if new + reused: print(f"  calls to ledger on a new connection: {int(new)} of {int(new + reused)} ({100 * new / (new + reused):.1f}%)")
