@@ -37,15 +37,17 @@ func main() {
 	if err != nil {
 		log.Fatalf("configuring mTLS client: %v", err)
 	}
+	reg := metrics.NewRegistry()
+	upstream := metrics.NewUpstream(reg, "api-gateway") // client-side time of each call to another service
 	s := &api.Server{
 		Auth: st, Users: st,
 		Wallet: &api.WalletClient{BaseURL: requireEnv("WALLET_SERVICE_URL"),
-			HTTP: &http.Client{Timeout: 10 * time.Second, Transport: pooledTransport(nil)}},
+			HTTP: &http.Client{Timeout: 10 * time.Second, Transport: upstream.Transport("wallet", pooledTransport(nil))}},
 		Ledger: &api.LedgerClient{BaseURL: requireEnv("LEDGER_SERVICE_URL"),
-			HTTP: &http.Client{Timeout: 10 * time.Second, Transport: pooledTransport(tlsCfg)}},
+			HTTP: &http.Client{Timeout: 10 * time.Second, Transport: upstream.Transport("ledger", pooledTransport(tlsCfg))}},
 		// withdrawal-service, same mTLS client (CN=api-gateway).
 		Withdrawals: &api.WithdrawalClient{BaseURL: requireEnv("WITHDRAWAL_SERVICE_URL"),
-			HTTP: &http.Client{Timeout: 15 * time.Second, Transport: pooledTransport(tlsCfg)}},
+			HTTP: &http.Client{Timeout: 15 * time.Second, Transport: upstream.Transport("withdrawal", pooledTransport(tlsCfg))}},
 	}
 	// Rate limits, requests per minute; 0 disables. In-memory and per instance by default; with
 	// REDIS_ADDR the budget is shared across instances, falling back to the in-memory limiter
@@ -82,7 +84,6 @@ func main() {
 	s.IPLimit = newLimiter("ip", envInt("RATE_LIMIT_IP_PER_MIN", 1200))
 	s.UserLimit = newLimiter("user", envInt("RATE_LIMIT_USER_PER_MIN", 600))
 	// Metrics: their own internal port, never the public listener (monitoring-dashboard.md invariant 6).
-	reg := metrics.NewRegistry()
 	reg.MustRegister(metrics.CacheCollector(authStats))
 	reg.MustRegister(obs.Collector(st), metrics.PoolCollector("api-gateway", func() metrics.PoolStat { return metrics.PoolFromPgx(st.Pool().Stat()) }))
 	httpm := metrics.NewHTTP(reg, "api-gateway")

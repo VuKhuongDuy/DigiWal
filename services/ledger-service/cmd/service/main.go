@@ -34,14 +34,13 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	store, err := ledger.ConnectWithPool(ctx, requireEnv("POSTGRES_DSN"), int32(envInt("POSTGRES_MAX_CONNS", 0)))
+	// Metrics (monitoring-dashboard.md decision (d)): one registry; both API listeners are measured, and neither serves it.
+	reg := metrics.NewRegistry()
+	store, err := ledger.ConnectWithPoolMetrics(ctx, requireEnv("POSTGRES_DSN"), int32(envInt("POSTGRES_MAX_CONNS", 0)), metrics.NewDB(reg, "ledger-service"))
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer store.Close()
-
-	// Metrics (monitoring-dashboard.md decision (d)): one registry; both API listeners are measured, and neither serves it.
-	reg := metrics.NewRegistry()
 	reg.MustRegister(obs.Collector(store), metrics.PoolCollector("ledger-service", func() metrics.PoolStat { return metrics.PoolFromPgx(store.PoolStat()) }))
 	httpm := metrics.NewHTTP(reg, "ledger-service")
 
