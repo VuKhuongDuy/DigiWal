@@ -58,3 +58,7 @@ through SSH tunnels. Nothing needs to be set up on the servers (sshd allows TCP 
 
 What the laptop run measures: the system plus an internet path and an SSH tunnel. Latencies include the round trip from the laptop to the VMs, and sshd on vm3/vm4 spends some CPU
 on the tunnel, so compare numbers only with other laptop runs. Run `./00-prepare.sh` on vm2 first so the keys are fresh and the system is idle.
+
+### Laptop shortcut
+`./mac-k6.sh` does steps 1–4 above in one go (opens the eight tunnels with `./tunnels.sh up`, copies `keys.json` into `k6/` when it is missing, runs k6 and writes `k6/results/<time>/`).
+`./tunnels.sh status` shows which tunnels work; `./tunnels.sh down` closes them.
