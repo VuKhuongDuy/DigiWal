@@ -52,11 +52,17 @@ export const options = { scenarios, thresholds, discardResponseBodies: true, // 
   summaryTrendStats: ['avg', 'p(50)', 'p(95)', 'p(99)', 'max'] };
 
 export function setup() {
+  const seen = {}; // HTTP status -> count, so a failed setup says why
   const users = keys.map((k) => {
     const r = http.get(base + '/v1/whitelist', { headers: { Authorization: 'Bearer ' + k }, responseType: 'text' }); // the only body we read
+    seen[r.status] = (seen[r.status] || 0) + 1;
     const a = r.status === 200 ? r.json().find((w) => w.status === 'active') : null;
     return { k, addr: a ? a.address : null };
   }).filter((u) => u.addr);
+  if (users.length === 0) {
+    throw new Error(`setup found no user with an active whitelist: GET ${base}/v1/whitelist for ${keys.length} keys returned ${JSON.stringify(seen)} ` +
+      '(0 = nothing is listening there: is the SSH tunnel to that port up? 401 = the keys are not valid for this environment: copy keys.json again)');
+  }
   console.log(`SETUP_DONE ${Date.now()} users=${users.length} of ${keys.length}`); // the analyser aligns its windows on this line
   return users;
 }
