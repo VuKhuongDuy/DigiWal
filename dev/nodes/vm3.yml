@@ -148,6 +148,8 @@ services:
       WITHDRAWAL_SERVICE_URL: https://withdrawal-service:8446
       REDIS_ADDR: redis:6379
       REDIS_PASSWORD: ${REDIS_PASSWORD:?run make env}
+      REDIS_TIMEOUT_MS: "300" # 100 ms (the default) was exceeded on this CPU-bound node: dial/lookup timeouts at 3,500+ req/s (2026-10-27)
+      REDIS_MIN_IDLE_CONNS: "50"
     extra_hosts: ["withdrawal-service:10.10.0.3"] # ledger-service is the balancer below
     depends_on: !override
       redis: {condition: service_healthy}

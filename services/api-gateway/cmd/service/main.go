@@ -52,11 +52,15 @@ func main() {
 	// (fail-open) whenever Redis errors.
 	var rdb *redis.Client
 	if addr := os.Getenv("REDIS_ADDR"); addr != "" {
+		// One time budget for dial, read, write and the wait for a pooled connection (REDIS_TIMEOUT_MS, default 100): at ~3,000 req/s on a CPU-bound
+		// node 100 ms was exceeded by scheduling alone, and every timeout closed a connection that the next call had to dial (and resolve) again.
+		// REDIS_MIN_IDLE_CONNS keeps that many connections open in the pool so that a burst does not have to dial them.
+		redisTimeout := time.Duration(envInt("REDIS_TIMEOUT_MS", 100)) * time.Millisecond
 		rdb = redis.NewClient(&redis.Options{Addr: addr, Password: os.Getenv("REDIS_PASSWORD"), MaxRetries: -1,
-			DialTimeout: 100 * time.Millisecond, ReadTimeout: 100 * time.Millisecond, WriteTimeout: 100 * time.Millisecond,
+			DialTimeout: redisTimeout, ReadTimeout: redisTimeout, WriteTimeout: redisTimeout, MinIdleConns: envInt("REDIS_MIN_IDLE_CONNS", 0),
 			// go-redis defaults to 10 connections per CPU and waits ReadTimeout+1s for a free one: at ~2,000 req/s with 100+ ms round trips
 			// that is hundreds of calls in flight, and the cache (and the rate limiter) errored out. A big pool, and a short wait for it.
-			PoolSize: envInt("REDIS_POOL_SIZE", 200), PoolTimeout: 100 * time.Millisecond})
+			PoolSize: envInt("REDIS_POOL_SIZE", 200), PoolTimeout: redisTimeout})
 		defer rdb.Close()
 	}
 	newLimiter := func(prefix string, perMin int) api.RateLimiter {

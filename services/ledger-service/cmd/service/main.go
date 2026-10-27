@@ -48,10 +48,12 @@ func main() {
 	// Balance read cache (docs/design/read-cache.md): off unless BALANCE_CACHE_ENABLED=1 and REDIS_ADDR is set. Redis trouble never fails a request.
 	var balCache *api.BalanceCache
 	if addr := os.Getenv("REDIS_ADDR"); addr != "" && os.Getenv("BALANCE_CACHE_ENABLED") == "1" {
+		// REDIS_TIMEOUT_MS and REDIS_MIN_IDLE_CONNS: see api-gateway.
+		redisTimeout := time.Duration(envInt("REDIS_TIMEOUT_MS", 100)) * time.Millisecond
 		rdb := redis.NewClient(&redis.Options{Addr: addr, Password: os.Getenv("REDIS_PASSWORD"), MaxRetries: -1,
-			DialTimeout: 100 * time.Millisecond, ReadTimeout: 100 * time.Millisecond, WriteTimeout: 100 * time.Millisecond,
+			DialTimeout: redisTimeout, ReadTimeout: redisTimeout, WriteTimeout: redisTimeout, MinIdleConns: envInt("REDIS_MIN_IDLE_CONNS", 0),
 			// see api-gateway: the default pool (10 per CPU) ran dry at ~2,000 req/s and every miss showed up as a cache error
-			PoolSize: envInt("REDIS_POOL_SIZE", 200), PoolTimeout: 100 * time.Millisecond})
+			PoolSize: envInt("REDIS_POOL_SIZE", 200), PoolTimeout: redisTimeout})
 		defer rdb.Close()
 		stats := metrics.NewCache("ledger-service", "balances")
 		reg.MustRegister(metrics.CacheCollector(stats))
