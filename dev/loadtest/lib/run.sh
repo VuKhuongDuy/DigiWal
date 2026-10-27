@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # run_load <outdir> <steps> <step_s> <gap_s> <write_pct> [mix]:   mix = mixed (default) or balances (only GET /v1/balances)
 # one k6 run on $K6_HOST with the Postgres samplers running beside it.
-# Leaves in <outdir>: k6.log, summary.json, sample.ledger.txt (vm2), sample.gateway.txt (vm4), sample.core.txt (vm3).
+# Leaves in <outdir>: k6.log, summary.json, sample.ledger.txt (vm4), sample.gateway.txt (vm3), sample.core.txt (vm3).
 run_load() {
 	local out=$1 steps=$2 step_s=$3 gap_s=$4 write=$5 mix=${6:-mixed}
 	local n total
@@ -12,7 +12,7 @@ run_load() {
 	put_k6 "$HERE/k6/mix.js" "$REMOTE_DIR/mix.js"
 	on_k6 "test -s $REMOTE_DIR/keys.json" || die "no $REMOTE_DIR/keys.json on $K6_HOST: run 00-prepare.sh first"
 
-	"$HERE/lib/sampler.sh" "$total" digiwal-dev-postgres-1 > "$out/sample.ledger.txt" 2>/dev/null &
+	ssh vm4 "bash -s $total digiwal-dev-postgres-1" < "$HERE/lib/sampler.sh" > "$out/sample.ledger.txt" 2>/dev/null &
 	local p1=$!
 	ssh "$GATEWAY_NODE" "bash -s $total digiwal-dev-postgres-gateway-1" < "$HERE/lib/sampler.sh" > "$out/sample.gateway.txt" 2>/dev/null &
 	local p2=$!
@@ -39,11 +39,11 @@ environment_snapshot() {
 	echo "date: $(date -u +%FT%TZ)"
 	echo "code: $(git -C "$HERE/../.." log -1 --format='%h %s' 2>/dev/null || echo unknown)"
 	echo "nodes: 3 VMs (vm2 vm3 vm4), each $(nproc) vCPU / $(free -g | awk '/Mem:/{print $2}') GB; chain: mockchain (no EVM); users are simulated"
-	for node in vm2 vm3; do
+	for node in vm3 vm4; do
 		c=digiwal-dev-postgres-1
-		if [ $node = vm2 ]; then docker inspect -f "$node $c cpus={{.HostConfig.NanoCpus}} (0 = no cap) mem={{.HostConfig.Memory}}" $c
-		else ssh $node "docker inspect -f '$node $c cpus={{.HostConfig.NanoCpus}} (0 = no cap) mem={{.HostConfig.Memory}}' $c"; fi
+		ssh $node "docker inspect -f '$node $c cpus={{.HostConfig.NanoCpus}} (0 = no cap) mem={{.HostConfig.Memory}}' $c"
 	done
+	echo "topology: 2 api-gateways + postgres-gateway + ledger-lb (HAProxy, TCP) on vm3; 2 ledger-services + ledger Postgres on vm4"
 	echo "gateway on $GATEWAY_NODE, k6 on $K6_HOST; gateway POSTGRES_MAX_CONNS=$(ssh $GATEWAY_NODE 'docker exec digiwal-dev-api-gateway-1 printenv POSTGRES_MAX_CONNS' 2>/dev/null) ledger-service=$(ssh vm4 'docker exec digiwal-dev-ledger-service-1 printenv POSTGRES_MAX_CONNS' 2>/dev/null)"
 	echo "running monitoring containers: $( (docker ps --format '{{.Names}}'; ssh vm3 "docker ps --format '{{.Names}}'"; ssh vm4 "docker ps --format '{{.Names}}'") | grep -cE 'prometheus|grafana|auditor|exporter|cadvisor' )"
 }

@@ -6,16 +6,19 @@
 #   ./03-cache.sh status      what each service has now, and the cache counters
 source "$(cd "$(dirname "$0")" && pwd)/common.sh"
 mode=${1:-status}
-# One override file per node holding the flags of BOTH services (both run on every node): two files of the same name would overwrite each other.
-YAML='services:\n  api-gateway:\n    environment:\n      AUTH_CACHE_ENABLED: "1"\n  ledger-service:\n    environment:\n      BALANCE_CACHE_ENABLED: "1"\n'
+# One override file per node holding the flags of the services that run there (gateways on GATEWAY_NODES, ledger-services on LEDGER_NODES): two files
+# of the same name would overwrite each other.
 recreate() { # node
-	ssh "$1" "NODE=$1 YAML='$YAML' MODE=$mode bash -s" <<'R'
+	local yaml='services:\n' svcs=''
+	case " $GATEWAY_NODES " in *" $1 "*) yaml="$yaml  api-gateway:\n    environment:\n      AUTH_CACHE_ENABLED: \"1\"\n"; svcs="$svcs api-gateway";; esac
+	case " $LEDGER_NODES " in *" $1 "*) for s in ledger-service ledger-service-2; do yaml="$yaml  $s:\n    environment:\n      BALANCE_CACHE_ENABLED: \"1\"\n"; svcs="$svcs $s"; done;; esac
+	ssh "$1" "NODE=$1 YAML='$yaml' SVCS='$svcs' MODE=$mode bash -s" <<'R'
 set -e
 cd /root/DigiWal/dev; export MASTER_KEY_HEX=not-on-this-node
 if [ "$MODE" = on ]; then printf '%b' "$YAML" > nodes/loadtest-cache.yml; else rm -f nodes/loadtest-cache.yml; fi
 files="-f ../infra/docker-compose.yml -f ../e2e/docker-compose.yml -f docker-compose.yml -f nodes/$NODE.yml"
 for f in nodes/loadtest-*.yml; do [ -e "$f" ] && files="$files -f $f"; done
-docker compose -p digiwal-dev --project-directory ../e2e --env-file .env $files up -d --no-build --no-deps --force-recreate ledger-service api-gateway 2>&1 | tail -2
+docker compose -p digiwal-dev --project-directory ../e2e --env-file .env $files up -d --no-build --no-deps --force-recreate $SVCS 2>&1 | tail -2
 R
 }
 case $mode in

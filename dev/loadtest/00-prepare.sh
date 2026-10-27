@@ -16,9 +16,9 @@ check() { # node container...
 		case "$st" in "running false healthy"|"running false -") ;; *) bad "$node $c: ${st:-missing}";; esac
 	done
 }
-check vm2 postgres mongo
-check vm3 postgres postgres-gateway kafka redis anvil wallet-service chain-watcher sweeper api-gateway ledger-service
-check vm4 ledger-service api-gateway withdrawal-service history-service
+check vm2 mongo
+check vm3 postgres postgres-gateway kafka redis anvil wallet-service chain-watcher sweeper api-gateway ledger-lb
+check vm4 postgres redis ledger-service withdrawal-service history-service
 [ $fail = 0 ] && ok "all functional services up"
 sim=$(ssh vm3 "docker inspect -f '{{.State.Status}}' digiwal-dev-simulator-1 2>/dev/null" || echo missing)
 [ "$sim" = running ] && bad "the simulator is running and would add background load (docker stop digiwal-dev-simulator-1 on vm3)" || ok "simulator is stopped"

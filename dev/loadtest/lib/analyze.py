@@ -44,7 +44,7 @@ def ms(metric, key):
 
 
 lines = [f"users with an active whitelist: {users} of {m.group(3)}",
-         "step | target | achieved | dropped | failed% | 429% | 5xx% | write p50/p95/p99 ms | read p50/p95/p99 ms | PG ledger (vm2) cores/thr%/act | PG gateway (vm3) | PG core (vm3) | backlog"]
+         "step | target | achieved | dropped | failed% | 429% | 5xx% | write p50/p95/p99 ms | read p50/p95/p99 ms | PG ledger (vm4) cores/thr%/act | PG gateway (vm3) | PG core (vm3) | backlog"]
 for i, rate in enumerate(steps):
     s = f"r{rate}"
     a = t0 + i * (step_s + gap_s)

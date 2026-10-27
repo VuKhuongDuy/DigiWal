@@ -8,8 +8,8 @@ preflight_clean
 RATE=${RATE:-800}; SECONDS_RUN=${SECONDS_RUN:-40}; MIX=${MIX:-balances}; WRITE_PCT=${WRITE_PCT:-20}
 OUT=$RESULTS_ROOT/$(date +%Y%m%d-%H%M%S)-diagnose-${RATE}rps; mkdir -p "$OUT/m1" "$OUT/m2"
 metrics() {
-	for n in $GATEWAY_NODES; do ssh "$n" "docker exec digiwal-dev-api-gateway-1 wget -qO- http://127.0.0.1:9100/metrics" > "$1/api-gateway.$n.txt" 2>/dev/null || true; done
-	for n in $LEDGER_NODES; do ssh "$n" "docker exec digiwal-dev-ledger-service-1 wget -qO- http://127.0.0.1:9100/metrics" > "$1/ledger-service.$n.txt" 2>/dev/null || true; done
+	for n in $GATEWAY_NODES; do for c in api-gateway-1 api-gateway-2; do ssh "$n" "docker exec digiwal-dev-$c wget -qO- http://127.0.0.1:9100/metrics" > "$1/api-gateway.$n.$c.txt" 2>/dev/null || true; done; done
+	for n in $LEDGER_NODES; do for c in ledger-service-1 ledger-service-2-1; do ssh "$n" "docker exec digiwal-dev-$c wget -qO- http://127.0.0.1:9100/metrics" > "$1/ledger-service.$n.$c.txt" 2>/dev/null || true; done; done
 }
 metrics "$OUT/m1"
 total=$(( SECONDS_RUN + 30 ))

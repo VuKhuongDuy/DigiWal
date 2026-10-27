@@ -5,10 +5,10 @@ set -euo pipefail
 
 RESULTS_ROOT=${RESULTS_ROOT:-$HOME/loadtest-results}
 K6_HOST=${K6_HOST:-vm2}                                  # where k6 runs: vm2, apart from the gateway (vm3) and the ledger service (vm4)
-GATEWAY_NODES=${GATEWAY_NODES:-vm3 vm4}                   # one api-gateway per node, each beside a ledger-service
-LEDGER_NODES=${LEDGER_NODES:-vm3 vm4}
-# k6 spreads its requests over these (no load balancer). Both gateways: each pair (gateway + ledger-service + Redis) is on its own node.
-GATEWAY_URLS=${GATEWAY_URLS:-http://10.10.0.2:8084,http://10.10.0.3:8084}
+GATEWAY_NODES=${GATEWAY_NODES:-vm3}                       # two api-gateways on vm3, beside postgres-gateway and a layer-4 balancer (ledger-lb) for the ledger-services
+LEDGER_NODES=${LEDGER_NODES:-vm4}                         # two ledger-services on vm4, beside the ledger Postgres
+# k6 spreads its requests over these (no load balancer in front of the gateways). The gateways call the ledger-services through ledger-lb (HAProxy, TCP).
+GATEWAY_URLS=${GATEWAY_URLS:-http://10.10.0.2:8084,http://10.10.0.2:8085}
 GATEWAY_URL=${GATEWAY_URL:-${GATEWAY_URLS%%,*}}           # the first one: setup and the pre-flight use it
 GATEWAY_NODE=${GATEWAY_NODE:-${GATEWAY_NODES%% *}}
 REMOTE_DIR=/tmp/loadtest                                 # on the k6 host: keys.json and the k6 scripts
@@ -25,11 +25,11 @@ on_k6() { run_on "$K6_HOST" "$*"; }
 put_k6() { if [ "$K6_HOST" = vm2 ]; then cp "$1" "$2"; else scp -q "$1" "$K6_HOST:$2"; fi; }
 get_k6() { if [ "$K6_HOST" = vm2 ]; then cp "$1" "$2"; else scp -q "$K6_HOST:$1" "$2"; fi; }
 
-# psql inside the Postgres container of a node. vm2: ledger. vm3: custody, withdrawal, chain_watcher, auditor.
-# vm4 has postgres-gateway (api_gateway) instead. Usage: sql vm3 withdrawal "select 1"
+# psql inside the Postgres container of a node. vm4: ledger. vm3: custody, withdrawal, chain_watcher, auditor; its postgres-gateway holds api_gateway
+# (use db api_gateway). Usage: sql vm3 withdrawal "select 1"
 sql() {
 	local node=$1 db=$2 q=$3 c=digiwal-dev-postgres-1
-	[ "$node" = vm4 ] && c=digiwal-dev-postgres-gateway-1
+	[ "$db" = api_gateway ] && c=digiwal-dev-postgres-gateway-1
 	if [ "$node" = vm2 ]; then docker exec "$c" psql -U custody -d "$db" -tA -c "$q"
 	else ssh "$node" "docker exec $c psql -U custody -d $db -tA -c \"$q\""; fi
 }

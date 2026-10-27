@@ -13,8 +13,9 @@ for c in $(docker ps --format '{{.Names}}' | grep -E 'api-gateway|ledger-service
   id=$(docker inspect -f '{{.Id}}' $c 2>/dev/null) || continue
   echo "CG ${c#digiwal-dev-} $(awk '/^usage_usec/{print $2}' /sys/fs/cgroup/system.slice/docker-$id.scope/cpu.stat 2>/dev/null)"
 done
-for s in api-gateway ledger-service; do
-  docker exec digiwal-dev-$s-1 wget -qO- http://127.0.0.1:9100/metrics 2>/dev/null | grep -E '^digiwal_(db_pool_(acquire_seconds_total|acquires_total|empty_acquires_total)|cache_requests_total|http_request_duration_seconds_(sum|count))' | sed "s/^/M $s /"
+for c in $(docker ps --format '{{.Names}}' | grep -E '^digiwal-dev-(api-gateway|ledger-service)'); do
+  s=api-gateway; case $c in *ledger-service*) s=ledger-service;; esac
+  docker exec $c wget -qO- http://127.0.0.1:9100/metrics 2>/dev/null | grep -E '^digiwal_(db_pool_(acquire_seconds_total|acquires_total|empty_acquires_total)|cache_requests_total|http_request_duration_seconds_(sum|count))' | sed "s/^/M $s /"
 done
 echo "K6 $(docker ps --format '{{.Image}}' | grep -c k6)"
 '''
@@ -32,7 +33,8 @@ def snap(node):
         elif p[0] == "K6": d["k6"] = int(p[1])
         elif p[0] == "M":
             m = re.match(r'(\S+?)(\{[^}]*\})? ([0-9.e+-]+)$', l.split(" ", 2)[2])
-            if m: d["m"][(p[1], m.group(1), m.group(2) or "")] = float(m.group(3))
+            if m:
+                k = (p[1], m.group(1), m.group(2) or ""); d["m"][k] = d["m"].get(k, 0.0) + float(m.group(3))   # two containers of a service: add up
     return d
 
 def busy(a, b):
@@ -43,6 +45,10 @@ def busy(a, b):
 def cores(a, b, name):
     if name not in a["cg"] or name not in b["cg"]: return 0.0
     return (b["cg"][name] - a["cg"][name]) / 1e6 / max(b["t"] - a["t"], 1)
+
+def cores_of(a, b, prefix):
+    """Cores of every container whose name starts with prefix (api-gateway-1, api-gateway-2, ledger-service-1, ledger-service-2-1, ...)."""
+    return sum(cores(a, b, n) for n in b["cg"] if n.startswith(prefix))
 
 def delta(a, b, svc, metric, label_re=None):
     tot = 0.0
@@ -65,7 +71,7 @@ while time.time() < end:
     b = {n: busy(prev[n], cur[n]) for n in nodes}
     fmt = lambda x: "  - " if x is None else f"{x[0]:3.0f}({x[1]:2.0f})"
     c = lambda node, name: cores(prev[node], cur[node], name)
-    gws = ("vm3", "vm4")                      # one api-gateway and one ledger-service on each
+    gws = ("vm3", "vm4")                      # the two gateways are on vm3, the two ledger-services on vm4
     def wait(svc):
         n = delta_all(prev, cur, gws, svc, "digiwal_db_pool_acquires_total")
         return 1000 * delta_all(prev, cur, gws, svc, "digiwal_db_pool_acquire_seconds_total") / n if n > 0 else 0.0
@@ -78,5 +84,5 @@ while time.time() < end:
     dt = max(cur["vm3"]["t"] - prev["vm3"]["t"], 1)
     ah, _ = hit("api-gateway", "apikey"); bh, be = hit("ledger-service", "balances")
     k6 = "RUN" if cur["vm2"]["k6"] else "idle"
-    print(f"{time.strftime('%H:%M:%S')} {k6:4} | {fmt(b['vm2'])} {fmt(b['vm3'])} {fmt(b['vm4'])} | {c('vm3','api-gateway-1')+c('vm4','api-gateway-1'):4.2f} {c('vm3','ledger-service-1')+c('vm4','ledger-service-1'):5.2f} {c('vm3','redis-1')+c('vm4','redis-1'):5.2f} {c('vm3','postgres-gateway-1'):5.2f} {c('vm2','postgres-1'):7.2f} | {wait('api-gateway'):6.1f} {wait('ledger-service'):6.1f} | {ah:5.1f} {bh:5.1f} ({be:.0f}) | {reqs/dt:6.0f} {1000*secs/reqs if reqs>0 else 0:6.0f}", flush=True)
+    print(f"{time.strftime('%H:%M:%S')} {k6:4} | {fmt(b['vm2'])} {fmt(b['vm3'])} {fmt(b['vm4'])} | {cores_of(prev['vm3'], cur['vm3'], 'api-gateway'):4.2f} {cores_of(prev['vm4'], cur['vm4'], 'ledger-service'):5.2f} {c('vm3','redis-1')+c('vm4','redis-1'):5.2f} {c('vm3','postgres-gateway-1'):5.2f} {c('vm4','postgres-1'):7.2f} | {wait('api-gateway'):6.1f} {wait('ledger-service'):6.1f} | {ah:5.1f} {bh:5.1f} ({be:.0f}) | {reqs/dt:6.0f} {1000*secs/reqs if reqs>0 else 0:6.0f}", flush=True)
     prev = cur
