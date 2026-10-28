@@ -51,6 +51,10 @@ services:
       KAFKA_HEAP_OPTS: -Xmx512m -Xms512m # the volume is tiny; the default heap is sized to the host
     ports: !override ["10.10.0.2:9092:9092"] # advertised as kafka:9092; vm2's services resolve kafka via extra_hosts
     mem_limit: 1g
+    # The base healthcheck starts a JVM (kafka-broker-api-versions.sh) every 10 s: measured 2026-10-27 at ~0.5 core of this 4-vCPU node, 13% of it, even
+    # when idle. A TCP connect to the listener is enough for a lab broker.
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c '</dev/tcp/localhost/9092'"]
 
   anvil:
     ports: !override ["10.10.0.2:8545:8545", "127.0.0.1:8545:8545"]
@@ -150,6 +154,7 @@ services:
       REDIS_PASSWORD: ${REDIS_PASSWORD:?run make env}
       REDIS_TIMEOUT_MS: "300" # 100 ms (the default) was exceeded on this CPU-bound node: dial/lookup timeouts at 3,500+ req/s (2026-10-27)
       REDIS_MIN_IDLE_CONNS: "50"
+      LEDGER_SERVICE_ENDPOINTS: "10.10.0.3:8444,10.10.0.3:8448" # the two ledger-services on vm4; the gateway balances per request itself (api.Balancer), ledger-lb is no longer in this path
     extra_hosts: ["withdrawal-service:10.10.0.3"] # ledger-service is the balancer below
     depends_on: !override
       redis: {condition: service_healthy}

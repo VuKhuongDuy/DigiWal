@@ -8,9 +8,11 @@ import (
 	"crypto/tls"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -39,12 +41,26 @@ func main() {
 	}
 	reg := metrics.NewRegistry()
 	upstream := metrics.NewUpstream(reg, "api-gateway") // client-side time of each call to another service
+	// LEDGER_SERVICE_ENDPOINTS (host:port,host:port) makes the gateway spread its calls over several ledger-services itself, per request (api.Balancer);
+	// LEDGER_SERVICE_URL then supplies the name the certificates are checked against. Without it the single URL is used.
+	var ledgerRT http.RoundTripper = pooledTransport(tlsCfg)
+	if eps := os.Getenv("LEDGER_SERVICE_ENDPOINTS"); eps != "" {
+		lu, err := url.Parse(requireEnv("LEDGER_SERVICE_URL"))
+		if err != nil || lu.Hostname() == "" {
+			log.Fatalf("LEDGER_SERVICE_URL is not a URL: %v", err)
+		}
+		ledgerRT = api.NewBalancer(strings.Split(eps, ","), func() http.RoundTripper {
+			c := tlsCfg.Clone()
+			c.ServerName = lu.Hostname() // the instances are addressed by IP; their certificate says ledger-service
+			return pooledTransport(c)
+		}, 5*time.Second)
+	}
 	s := &api.Server{
 		Auth: st, Users: st,
 		Wallet: &api.WalletClient{BaseURL: requireEnv("WALLET_SERVICE_URL"),
 			HTTP: &http.Client{Timeout: 10 * time.Second, Transport: upstream.Transport("wallet", pooledTransport(nil))}},
 		Ledger: &api.LedgerClient{BaseURL: requireEnv("LEDGER_SERVICE_URL"),
-			HTTP: &http.Client{Timeout: 10 * time.Second, Transport: upstream.Transport("ledger", pooledTransport(tlsCfg))}},
+			HTTP: &http.Client{Timeout: 10 * time.Second, Transport: upstream.Transport("ledger", ledgerRT)}},
 		// withdrawal-service, same mTLS client (CN=api-gateway).
 		Withdrawals: &api.WithdrawalClient{BaseURL: requireEnv("WITHDRAWAL_SERVICE_URL"),
 			HTTP: &http.Client{Timeout: 15 * time.Second, Transport: upstream.Transport("withdrawal", pooledTransport(tlsCfg))}},
