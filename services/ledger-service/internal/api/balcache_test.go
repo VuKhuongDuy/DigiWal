@@ -112,3 +112,26 @@ func TestBalanceCacheOffByDefault(t *testing.T) {
 		t.Errorf("with the cache off the filter must reach the database query, got %q", f.gotKey)
 	}
 }
+
+func TestBalanceCacheHitIsTheStoredJSONAndAnUnusableEntryIsRefilled(t *testing.T) {
+	f, kv := &fake{sheet: twoAssets()}, &memKV{m: map[string]string{}}
+	c := &BalanceCache{KV: kv, TTL: 5 * time.Second, Stats: metrics.NewCache("t", "balances")}
+	s := NewServer(f).WithBalanceCache(c)
+
+	miss := getCached(s, "/v1/ledger/balances/alice")
+	if stored := kv.m[balKey("alice")]; stored != miss.Body.String() {
+		t.Errorf("the entry is not the response body:\nstored %q\nbody   %q", stored, miss.Body.String())
+	}
+	if hit := getCached(s, "/v1/ledger/balances/alice"); hit.Body.String() != miss.Body.String() || hit.Header().Get("Content-Type") != "application/json" {
+		t.Errorf("a hit must be byte-identical to the miss: %q vs %q", hit.Body, miss.Body)
+	}
+
+	kv.m[balKey("alice")] = "not json" // somebody else wrote the key: treated as a miss, then overwritten
+	calls := f.calls
+	if rec := getCached(s, "/v1/ledger/balances/alice"); rec.Code != 200 || rec.Body.String() != miss.Body.String() {
+		t.Fatalf("a bad entry must be answered from the database: %d %q", rec.Code, rec.Body)
+	}
+	if f.calls != calls+1 || kv.m[balKey("alice")] != miss.Body.String() {
+		t.Errorf("the bad entry was not refilled (database reads +%d)", f.calls-calls)
+	}
+}

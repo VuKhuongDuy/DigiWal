@@ -56,7 +56,10 @@ type BalanceCache struct {
 
 func balKey(userID string) string { return "dw:v1:bal:" + strings.ToLower(userID) }
 
-func (c *BalanceCache) get(ctx context.Context, userID string) ([]balanceRow, bool) {
+// getRaw returns the cached sheet as the JSON the API answers with, untouched: a cache hit used to decode it into rows only to encode the same
+// rows again (about 10% of the service's CPU in the profile of 2026-10-28). A plain sanity check stands in for the decoding: only this service
+// writes the key, always a JSON array.
+func (c *BalanceCache) getRaw(ctx context.Context, userID string) ([]byte, bool) {
 	v, found, err := c.KV.Get(ctx, balKey(userID))
 	if err != nil {
 		c.Stats.Error()
@@ -66,21 +69,25 @@ func (c *BalanceCache) get(ctx context.Context, userID string) ([]balanceRow, bo
 		c.Stats.Miss()
 		return nil, false
 	}
-	var rows []balanceRow
-	if err := json.Unmarshal([]byte(v), &rows); err != nil {
-		c.Stats.Error() // an entry we cannot read is a miss; the refill overwrites it
+	if len(v) < 2 || v[0] != '[' {
+		c.Stats.Error() // an entry we cannot use is a miss; the refill overwrites it
 		return nil, false
 	}
 	c.Stats.Hit()
-	return rows, true
+	return []byte(v), true
 }
 
-func (c *BalanceCache) set(ctx context.Context, userID string, rows []balanceRow) {
+// encodeRows is the response body of a balance sheet: what the JSON encoder writes, newline included.
+func encodeRows(rows []balanceRow) ([]byte, error) {
 	b, err := json.Marshal(rows)
-	if err == nil {
-		err = c.KV.Set(ctx, balKey(userID), string(b), c.TTL)
-	}
 	if err != nil {
+		return nil, err
+	}
+	return append(b, '\n'), nil
+}
+
+func (c *BalanceCache) setRaw(ctx context.Context, userID string, body []byte) {
+	if err := c.KV.Set(ctx, balKey(userID), string(body), c.TTL); err != nil {
 		c.Stats.Error()
 	}
 }

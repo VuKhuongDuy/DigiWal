@@ -219,6 +219,13 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
+// writeRaw answers with JSON that is already encoded.
+func writeRaw(w http.ResponseWriter, status int, body []byte) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_, _ = w.Write(body)
+}
+
 var uuidRe = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
 
 // handleBalances returns the user's Total/Locked/Available per registered asset, all amounts as
@@ -235,27 +242,36 @@ func (s *Server) handleBalances(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.cache != nil {
-		out, ok := s.cache.get(r.Context(), userID)
+		body, ok := s.cache.getRaw(r.Context(), userID)
 		if !ok {
 			sheet, err := s.ledger.BalanceSheet(r.Context(), userID, "") // the whole sheet, so one entry serves every asset filter
+			if err == nil {
+				body, err = encodeRows(sheetRows(sheet))
+			}
 			if err != nil {
 				log.Printf("reading balances: %v", err)
 				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
 				return
 			}
-			out = sheetRows(sheet)
-			s.cache.set(r.Context(), userID, out)
+			s.cache.setRaw(r.Context(), userID, body)
 		}
-		if assetID != "" {
-			kept := make([]balanceRow, 0, len(out))
-			for _, b := range out {
-				if strings.EqualFold(b.AssetID, assetID) {
-					kept = append(kept, b)
-				}
+		if assetID == "" { // the usual call: the stored JSON is the answer
+			writeRaw(w, http.StatusOK, body)
+			return
+		}
+		var rows []balanceRow
+		if err := json.Unmarshal(body, &rows); err != nil {
+			log.Printf("balance cache: unreadable entry for a filtered read: %v", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
+			return
+		}
+		kept := make([]balanceRow, 0, len(rows))
+		for _, b := range rows {
+			if strings.EqualFold(b.AssetID, assetID) {
+				kept = append(kept, b)
 			}
-			out = kept
 		}
-		writeJSON(w, http.StatusOK, out)
+		writeJSON(w, http.StatusOK, kept)
 		return
 	}
 	sheet, err := s.ledger.BalanceSheet(r.Context(), userID, assetID)
