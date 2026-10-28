@@ -17,6 +17,7 @@ for c in $(docker ps --format '{{.Names}}' | grep -E '^digiwal-dev-(api-gateway|
   s=api-gateway; case $c in *ledger-service*) s=ledger-service;; esac
   docker exec $c wget -qO- http://127.0.0.1:9100/metrics 2>/dev/null | grep -E '^digiwal_(db_pool_(acquire_seconds_total|acquires_total|empty_acquires_total)|cache_requests_total|http_request_duration_seconds_(sum|count))' | sed "s/^/M $s /"
 done
+echo "PSI $(awk '/^some/{split($2,a,"="); print a[2]}' /proc/pressure/cpu)"
 echo "K6 $(docker ps --format '{{.Image}}' | grep -c k6)"
 '''
 
@@ -24,13 +25,14 @@ def snap(node):
     cmd = ["bash", "-c", SNAP] if node == "vm2" else ["ssh", node, SNAP]
     t = time.time()
     out = subprocess.run(cmd, capture_output=True, text=True, timeout=40).stdout
-    d = {"t": t, "stat": None, "cg": {}, "m": {}, "k6": 0}
+    d = {"t": t, "stat": None, "cg": {}, "m": {}, "k6": 0, "psi": 0.0}
     for l in out.splitlines():
         p = l.split()
         if not p: continue
         if p[0] == "STAT": d["stat"] = [int(x) for x in p[1:5]]
         elif p[0] == "CG" and len(p) == 3: d["cg"][p[1]] = int(p[2])
         elif p[0] == "K6": d["k6"] = int(p[1])
+        elif p[0] == "PSI" and len(p) == 2: d["psi"] = float(p[1])
         elif p[0] == "M":
             m = re.match(r'(\S+?)(\{[^}]*\})? ([0-9.e+-]+)$', l.split(" ", 2)[2])
             if m:
@@ -63,7 +65,7 @@ def delta_all(prev, cur, nodes, svc, metric, label_re=None):
 
 nodes = ("vm2", "vm3", "vm4")
 prev = {n: snap(n) for n in nodes}
-print("time     k6 | busy% (sys%) vm2 vm3 vm4 | cores (both nodes summed): gw  ledger redis pg-gw pg-ledger | pool wait ms: gw ledger | cache hit%: apikey bal (err) | gateway: req/s avg ms")
+print("time     k6 | busy% (sys%) vm2 vm3 vm4 | cores (both nodes summed): gw  ledger redis pg-gw pg-ledger | pool wait ms: gw ledger | cache hit%: apikey bal (err) | gateway: req/s avg ms | cpu pressure(avg10) vm3 vm4")
 end = time.time() + TOTAL
 while time.time() < end:
     time.sleep(INTERVAL)
@@ -84,5 +86,5 @@ while time.time() < end:
     dt = max(cur["vm3"]["t"] - prev["vm3"]["t"], 1)
     ah, _ = hit("api-gateway", "apikey"); bh, be = hit("ledger-service", "balances")
     k6 = "RUN" if cur["vm2"]["k6"] else "idle"
-    print(f"{time.strftime('%H:%M:%S')} {k6:4} | {fmt(b['vm2'])} {fmt(b['vm3'])} {fmt(b['vm4'])} | {cores_of(prev['vm3'], cur['vm3'], 'api-gateway'):4.2f} {cores_of(prev['vm4'], cur['vm4'], 'ledger-service'):5.2f} {c('vm3','redis-1')+c('vm4','redis-1'):5.2f} {c('vm3','postgres-gateway-1'):5.2f} {c('vm4','postgres-1'):7.2f} | {wait('api-gateway'):6.1f} {wait('ledger-service'):6.1f} | {ah:5.1f} {bh:5.1f} ({be:.0f}) | {reqs/dt:6.0f} {1000*secs/reqs if reqs>0 else 0:6.0f}", flush=True)
+    print(f"{time.strftime('%H:%M:%S')} {k6:4} | {fmt(b['vm2'])} {fmt(b['vm3'])} {fmt(b['vm4'])} | {cores_of(prev['vm3'], cur['vm3'], 'api-gateway'):4.2f} {cores_of(prev['vm4'], cur['vm4'], 'ledger-service'):5.2f} {c('vm3','redis-1')+c('vm4','redis-1'):5.2f} {c('vm3','postgres-gateway-1'):5.2f} {c('vm4','postgres-1'):7.2f} | {wait('api-gateway'):6.1f} {wait('ledger-service'):6.1f} | {ah:5.1f} {bh:5.1f} ({be:.0f}) | {reqs/dt:6.0f} {1000*secs/reqs if reqs>0 else 0:6.0f} | {cur['vm3']['psi']:5.1f} {cur['vm4']['psi']:5.1f}", flush=True)
     prev = cur

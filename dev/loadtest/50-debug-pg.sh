@@ -6,6 +6,7 @@
 #                   and how long each hop takes (gateway request, ledger request, wait for a connection)
 #   statements.txt  pg_stat_statements for the run (reset just before): calls, mean/max/stddev exec time per statement, top by total and by max;
 #                   pg_stat_database counters before and after
+#   nodeprof.vm3/vm4.txt  CPU split (user/system/softirq/steal), softirqs, CPU pressure and pidstat of every process, per node (also in summary.txt)
 #   samples.vm4.txt the raw samples, metrics.*.txt the services' /metrics before and after, k6.log, table.txt the usual k6 table
 # It creates the pg_stat_statements extension in the ledger database if it is not there (the library is preloaded; CREATE EXTENSION adds only a view).
 source "$(cd "$(dirname "$0")" && pwd)/common.sh"
@@ -29,6 +30,7 @@ metrics before
 total=$((STEP_S + 100))      # the sampler starts first; k6's setup takes a while before the load starts (k6.log: SETUP_DONE)
 ssh vm4 "bash -s $total 2" < "$HERE/lib/pgdebug-sampler.sh" > "$OUT/samples.vm4.txt" 2>/dev/null &
 sp=$!
+for n in vm3 vm4; do ssh "$n" "bash -s $total 5" < "$HERE/lib/node-prof.sh" > "$OUT/nodeprof.$n.txt" 2>/dev/null & eval "np_$n=\$!"; done
 run_load "$OUT" "$RATE" "$STEP_S" "$GAP_S" "$WRITE_PCT" "$MIX"
 metrics after
 { dbstats after
@@ -39,7 +41,7 @@ metrics after
   echo; echo "-- all statements together"
   ssh vm4 "$PSQL -c \"select sum(calls) calls, round((sum(total_exec_time)/nullif(sum(calls),0))::numeric,3) mean_ms from pg_stat_statements where dbid=(select oid from pg_database where datname='ledger')\""
 } >> "$OUT/statements.txt"
-kill "$sp" 2>/dev/null; wait "$sp" 2>/dev/null || true
+kill "$sp" $np_vm3 $np_vm4 2>/dev/null; wait "$sp" $np_vm3 $np_vm4 2>/dev/null || true
 analyse "$OUT" "$RATE" "$STEP_S" "$GAP_S" > /dev/null
-python3 "$HERE/lib/pgdebug.py" "$OUT" "$STEP_S" | tee "$OUT/summary.txt"
+{ python3 "$HERE/lib/pgdebug.py" "$OUT" "$STEP_S"; echo; echo "== where the CPU goes on each node (lib/node-prof.sh: /proc/stat, softirqs, pressure, pidstat)"; python3 "$HERE/lib/nodeprof.py" "$OUT" "$STEP_S"; } | tee "$OUT/summary.txt"
 echo; cat "$OUT/table.txt"; echo; echo "pg_stat_statements: $OUT/statements.txt"; echo "results: $OUT"
