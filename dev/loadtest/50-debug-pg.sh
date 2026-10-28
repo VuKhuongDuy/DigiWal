@@ -31,9 +31,10 @@ total=$((STEP_S + 100))      # the sampler starts first; k6's setup takes a whil
 ssh vm4 "bash -s $total 2" < "$HERE/lib/pgdebug-sampler.sh" > "$OUT/samples.vm4.txt" 2>/dev/null &
 sp=$!
 for n in vm3 vm4; do ssh "$n" "bash -s $total 5" < "$HERE/lib/node-prof.sh" > "$OUT/nodeprof.$n.txt" 2>/dev/null & eval "np_$n=\$!"; done
-if [ "${PROFILE:-0}" = 1 ]; then   # PROFILE=1: a 30 s CPU profile of each ledger-service, 15 s into the load (needs PPROF_ENABLED=1 on them)
+if [ "${PROFILE:-0}" = 1 ]; then   # PROFILE=1: a 30 s CPU profile of each ledger-service and api-gateway, 15 s into the load (needs PPROF_ENABLED=1 on them)
 	( until grep -q SETUP_DONE "$OUT/k6.log" 2>/dev/null; do sleep 1; done; sleep 15
-	  for c in ledger-service-1 ledger-service-2-1; do ssh vm4 "docker exec digiwal-dev-$c wget -qO- 'http://127.0.0.1:6060/debug/pprof/profile?seconds=30'" > "$OUT/cpu.$c.pb.gz" 2>/dev/null & done; wait ) &
+	  for c in ledger-service-1 ledger-service-2-1; do ssh vm4 "docker exec digiwal-dev-$c wget -qO- 'http://127.0.0.1:6060/debug/pprof/profile?seconds=30'" > "$OUT/cpu.$c.pb.gz" 2>/dev/null & done
+	  for c in api-gateway-1 api-gateway-2; do ssh vm3 "docker exec digiwal-dev-$c wget -qO- 'http://127.0.0.1:6060/debug/pprof/profile?seconds=30'" > "$OUT/cpu.$c.pb.gz" 2>/dev/null & done; wait ) &
 fi
 run_load "$OUT" "$RATE" "$STEP_S" "$GAP_S" "$WRITE_PCT" "$MIX"
 metrics after
