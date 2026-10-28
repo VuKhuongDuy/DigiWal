@@ -7,7 +7,7 @@ for l in open(sys.argv[1]):
         r = json.loads(l); runs[r["variant"]].append(r)
 cols = [("achieved", "achieved req/s", 0), ("dropped", "dropped", 0), ("failed_pct", "failed %", 2), ("k6_p50", "k6 p50 ms", 0), ("k6_p95", "k6 p95 ms", 0),
         ("k6_p99", "k6 p99 ms", 0), ("gateway_avg", "gateway avg ms", 0), ("call_avg", "call ledger avg ms", 0), ("ledger_avg", "ledger avg ms", 0),
-        ("psi_vm3", "PSI vm3 %", 0), ("psi_vm4", "PSI vm4 %", 0), ("busy_vm3", "busy vm3 %", 0), ("busy_vm4", "busy vm4 %", 0), ("ledger_share_max_pct", "busiest ledger %", 0)]
+        ("pool_acquires", "pool acquires (DB path)", 0), ("pool_wait_avg", "pool wait avg ms", 0), ("hold_avg", "conn hold avg ms", 0), ("stmt_avg", "statement avg ms (seen by ledger)", 0), ("ledger_cores", "ledger CPU cores (both)", 2), ("psi_vm3", "PSI vm3 %", 0), ("psi_vm4", "PSI vm4 %", 0), ("busy_vm3", "busy vm3 %", 0), ("busy_vm4", "busy vm4 %", 0), ("ledger_share_max_pct", "busiest ledger %", 0)]
 print("median (min - max) over the runs of each variant:\n")
 vs = sorted(runs)
 w = max(len(c[1]) for c in cols)

@@ -17,6 +17,15 @@ try:
                      ("ledger_avg", r"ledger: handler GET[^\n]*?n=\s*\d+\s+avg\s+([\d.]+)")):
         m = re.search(pat, s)
         if m: r[key] = float(m.group(1))
+    for key, pat in (("pool_wait_avg", r"ledger: wait for a connection from the pool\s+n=\s*\d+\s+avg\s+([\d.]+)"),
+                     ("pool_acquires", r"ledger: wait for a connection from the pool\s+n=\s*(\d+)"),
+                     ("hold_avg", r"ledger: a connection stays checked out\s+n=\s*\d+\s+avg\s+([\d.]+)"),
+                     ("stmt_avg", r"ledger: one statement \(start to last row\)\s+n=\s*\d+\s+avg\s+([\d.]+)")):
+        m = re.search(pat, s)
+        if m: r[key] = float(m.group(1))
+    v4 = s.split("== vm4", 1)[1] if "== vm4" in s else ""
+    cores = [(float(a) + float(b)) / 100 for a, b in re.findall(r"^\s+ledger-service-[\w-]+\s+(\d+)\s+(\d+)\s", v4, re.M)]
+    if cores: r["ledger_cores"] = sum(cores)
     psi = re.findall(r"CPU pressure \(some, avg10\): avg (\d+)%", s)
     if len(psi) >= 2: r["psi_vm3"], r["psi_vm4"] = float(psi[0]), float(psi[1])
     busy = re.findall(r"CPU, all 4 cores, load window: user (\d+)%\s+system (\d+)%\s+idle (\d+)%", s)
