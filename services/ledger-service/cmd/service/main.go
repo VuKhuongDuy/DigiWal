@@ -11,6 +11,7 @@ import (
 	"context"
 	"log"
 	"net/http"
+	"net/http/pprof"
 	"os"
 	"os/signal"
 	"strconv"
@@ -111,6 +112,22 @@ func main() {
 		log.Printf("deposit consumer running on %s (group %s)", events.TopicDepositsConfirmed, envOr("KAFKA_GROUP_ID", "ledger-service"))
 	} else {
 		log.Println("KAFKA_BROKERS not set: deposit consumer disabled")
+	}
+
+	// PPROF_ENABLED=1: CPU/heap profiles on 127.0.0.1:6060 INSIDE the container (not published): `docker exec <c> wget -qO- 'http://127.0.0.1:6060/debug/pprof/profile?seconds=30'`.
+	if os.Getenv("PPROF_ENABLED") == "1" {
+		pm := http.NewServeMux()
+		pm.HandleFunc("/debug/pprof/", pprof.Index)
+		pm.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+		pm.HandleFunc("/debug/pprof/profile", pprof.Profile)
+		pm.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+		pm.HandleFunc("/debug/pprof/trace", pprof.Trace)
+		go func() {
+			log.Print("pprof on 127.0.0.1:6060 (inside the container only)")
+			if err := http.ListenAndServe("127.0.0.1:6060", pm); err != nil {
+				log.Printf("pprof listener: %v", err)
+			}
+		}()
 	}
 
 	go func() {

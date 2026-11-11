@@ -8,6 +8,7 @@ import (
 	"crypto/tls"
 	"log"
 	"net/http"
+	"net/http/pprof"
 	"net/url"
 	"os"
 	"os/signal"
@@ -103,6 +104,21 @@ func main() {
 	reg.MustRegister(metrics.CacheCollector(authStats))
 	reg.MustRegister(obs.Collector(st), metrics.PoolCollector("api-gateway", func() metrics.PoolStat { return metrics.PoolFromPgx(st.Pool().Stat()) }))
 	httpm := metrics.NewHTTP(reg, "api-gateway")
+	// PPROF_ENABLED=1: CPU/heap profiles on 127.0.0.1:6060 INSIDE the container (not published): `docker exec <c> wget -qO- 'http://127.0.0.1:6060/debug/pprof/profile?seconds=30'`.
+	if os.Getenv("PPROF_ENABLED") == "1" {
+		pm := http.NewServeMux()
+		pm.HandleFunc("/debug/pprof/", pprof.Index)
+		pm.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+		pm.HandleFunc("/debug/pprof/profile", pprof.Profile)
+		pm.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+		pm.HandleFunc("/debug/pprof/trace", pprof.Trace)
+		go func() {
+			log.Print("pprof on 127.0.0.1:6060 (inside the container only)")
+			if err := http.ListenAndServe("127.0.0.1:6060", pm); err != nil {
+				log.Printf("pprof listener: %v", err)
+			}
+		}()
+	}
 	go func() {
 		addr := ":" + envOr("METRICS_PORT", metrics.DefaultPort)
 		log.Printf("metrics on %s", addr)
